@@ -1269,6 +1269,24 @@ button, input, select, textarea { font: inherit; }
 
 .tab-spacer { flex: 1; }
 
+.tab-root,
+.scan-root-chip {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-raised);
+}
+.tab-root {
+  align-self: center;
+  margin-right: 10px;
+  flex-shrink: 0;
+}
+
 .tab-status {
   display: flex;
   align-items: center;
@@ -2805,6 +2823,16 @@ button, input, select, textarea { font: inherit; }
   max-width: 36em;
 }
 
+.index-loading-root {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-raised);
+}
 .index-loading {
   display: flex;
   flex-direction: column;

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 import type { ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
 import { protectedFolderDisplayName } from "../../shared/pathProtection";
 import type { ExcludedFolderActionBlocker } from "../../shared/pathProtection";
+import { formatScanRoot } from "../../shared/pathUtils";
 import { formatBytes, formatCount } from "../lib/format";
 import { useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
@@ -255,7 +256,22 @@ export function FolderList({ snapshot }: Props) {
   if (!rootPath) {
     return (
       <div className="folder-explorer">
-        <div className="empty-view"><span>Run a scan to explore folders</span></div>
+        <div className="empty-view">
+          <span>Run a scan to explore folders</span>
+          <span className="empty-view-sub">Pick a drive on Overview. This tab follows that scan.</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (snapshot.status === "idle") {
+    return (
+      <div className="folder-explorer">
+        <div className="empty-view">
+          <span className="scan-root-chip">{formatScanRoot(rootPath)}</span>
+          <span>{formatScanRoot(rootPath)} has not been scanned yet.</span>
+          <span className="empty-view-sub">Use Overview or Rescan in the header to scan this drive.</span>
+        </div>
       </div>
     );
   }
@@ -263,7 +279,11 @@ export function FolderList({ snapshot }: Props) {
   if (snapshot.status === "running") {
     return (
       <div className="folder-explorer">
-        <div className="empty-view"><span>Scan in progress — folders available once it completes</span></div>
+        <div className="empty-view">
+          <span className="scan-root-chip">{formatScanRoot(rootPath)}</span>
+          <span>Scanning {formatScanRoot(rootPath)}…</span>
+          <span className="empty-view-sub">Folders for this drive will be ready when the scan finishes.</span>
+        </div>
       </div>
     );
   }
@@ -335,7 +355,8 @@ export function FolderList({ snapshot }: Props) {
         {loading ? (
           <IndexLoadingPanel
             compact
-            title="Loading folder contents"
+            eyebrow={formatScanRoot(rootPath)}
+            title={`Loading folders on ${formatScanRoot(rootPath)}`}
             stages={FOLDER_LOADING_STAGES}
             elapsedSec={loadingElapsedSec}
           />

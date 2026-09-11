@@ -97,6 +97,56 @@ describe("sidecarFromFolderTreeFile", () => {
   });
 });
 
+describe("resolveDevArtifactSidecar", () => {
+  it("returns the history sidecar when it already exists", async () => {
+    const { resolveDevArtifactSidecar, writeDevArtifactSidecar } = await import("../devArtifactSidecar");
+    const dest = Path.join(tempDir, "scan.dev-artifacts.json");
+    await writeDevArtifactSidecar(dest, {
+      version: 1,
+      rootPath: "C:\\",
+      generatedAt: 1,
+      roots: [{ path: "C:\\proj\\node_modules", kind: "node-modules", size: 10, files: 1 }],
+      projects: ["C:\\proj"],
+    });
+    const sidecar = await resolveDevArtifactSidecar(dest, "C:\\", [
+      Path.join(tempDir, "pending-other.dev-artifacts.json"),
+    ]);
+    expect(sidecar?.roots).toHaveLength(1);
+    expect(sidecar?.roots[0]?.path).toBe("C:\\proj\\node_modules");
+  });
+
+  it("adopts a pending sidecar for the same scan root", async () => {
+    const { resolveDevArtifactSidecar, writeDevArtifactSidecar, readDevArtifactSidecar } = await import("../devArtifactSidecar");
+    const dest = Path.join(tempDir, "history.dev-artifacts.json");
+    const pending = Path.join(tempDir, "pending-abc.dev-artifacts.json");
+    await writeDevArtifactSidecar(pending, {
+      version: 1,
+      rootPath: "C:\\",
+      generatedAt: 2,
+      roots: [{ path: "C:\\proj\\target", kind: "rust-target", size: 50, files: 3 }],
+      projects: ["C:\\proj"],
+    });
+    const sidecar = await resolveDevArtifactSidecar(dest, "C:\\", [pending]);
+    expect(sidecar?.roots[0]?.kind).toBe("rust-target");
+    expect(await readDevArtifactSidecar(dest)).not.toBeNull();
+    await expect(FSP.access(pending)).rejects.toThrow();
+  });
+
+  it("ignores a pending sidecar for a different root", async () => {
+    const { resolveDevArtifactSidecar, writeDevArtifactSidecar } = await import("../devArtifactSidecar");
+    const dest = Path.join(tempDir, "history-d.dev-artifacts.json");
+    const pending = Path.join(tempDir, "pending-d.dev-artifacts.json");
+    await writeDevArtifactSidecar(pending, {
+      version: 1,
+      rootPath: "D:\\",
+      generatedAt: 3,
+      roots: [{ path: "D:\\proj\\node_modules", kind: "node-modules", size: 9, files: 1 }],
+      projects: ["D:\\proj"],
+    });
+    await expect(resolveDevArtifactSidecar(dest, "C:\\", [pending])).resolves.toBeNull();
+  });
+});
+
 describe("reportFromSidecar", () => {
   it("keeps dist/ only when a project marker exists", async () => {
     const { reportFromSidecar } = await import("../devArtifactSidecar");

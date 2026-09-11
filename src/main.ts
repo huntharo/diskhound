@@ -82,6 +82,7 @@ import {
   folderTreeSidecarPath,
   indexFilePath,
   initScanIndex,
+  listPendingDevArtifactSidecars,
 } from "./shared/scanIndex";
 import {
   runDuplicateScan,
@@ -114,6 +115,7 @@ import {
 import {
   readDevArtifactSidecar,
   reportFromSidecar,
+  resolveDevArtifactSidecar,
 } from "./shared/devArtifactSidecar";
 import {
   deleteFullDiffCachesForScan,
@@ -455,6 +457,31 @@ function writeCrashLog(tag: string, message: string): void {
 // Back-compat alias — older call sites still use writeStartupLog.
 function writeStartupLog(message: string): void {
   writeCrashLog("startup", message);
+}
+
+/** Native used to write the Dev sidecar after Done. Retry the rename
+ *  so a late file still lands on the history id. */
+function adoptTempDevSidecar(tempPath: string, destPath: string): void {
+  void (async () => {
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      try {
+        await FS.access(tempPath);
+        await FS.rename(tempPath, destPath);
+        writeCrashLog(
+          "dev-artifacts-sidecar",
+          `renamed ${Path.basename(tempPath)} -> ${Path.basename(destPath)}`,
+        );
+        return;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+    writeCrashLog(
+      "dev-artifacts-sidecar",
+      `rename missed ${Path.basename(tempPath)}; Dev open will adopt a matching pending sidecar`,
+    );
+  })();
 }
 
 // Errors codes that we treat as "routine, not user-actionable":
@@ -1015,14 +1042,10 @@ void (async () => {
           }
         }
         if (historyId && session.tempDevArtifactsPath) {
-          try {
-            await FS.rename(
-              session.tempDevArtifactsPath,
-              devArtifactsSidecarPath(historyId),
-            );
-          } catch {
-            /* worker fallback on first Dev Artifacts open */
-          }
+          adoptTempDevSidecar(
+            session.tempDevArtifactsPath,
+            devArtifactsSidecarPath(historyId),
+          );
         }
 
         // Rename the temp index file to match the history entry ID
@@ -3087,6 +3110,13 @@ void (async () => {
     return readDevArtifactSidecar(devArtifactsSidecarPath(previous.id));
   };
 
+  const sidecarForScan = (scanId: string, scanRoot: string) =>
+    resolveDevArtifactSidecar(
+      devArtifactsSidecarPath(scanId),
+      scanRoot,
+      listPendingDevArtifactSidecars(),
+    );
+
   ipcMain.handle("diskhound:get-dev-artifacts", async (_event, rootPath: string, options?: { sidecarOnly?: boolean }) => {
     const history = getScanHistory(rootPath);
     const current = history[0];
@@ -3094,20 +3124,20 @@ void (async () => {
     const cached = devArtifactCache.get(current.id);
     if (cached) return cached;
     if (options?.sidecarOnly) {
-      const sidecar = await readDevArtifactSidecar(devArtifactsSidecarPath(current.id));
+      const sidecar = await sidecarForScan(current.id, rootPath);
       if (!sidecar) return null;
       const report = reportFromSidecar(sidecar, await previousSidecarFor(history));
-      devArtifactCache.set(current.id, report);
+      if (report.artifacts.length > 0) devArtifactCache.set(current.id, report);
       return report;
     }
     const inflight = devArtifactInflight.get(current.id);
     if (inflight) return inflight;
 
     const pending = (async () => {
-      const sidecar = await readDevArtifactSidecar(devArtifactsSidecarPath(current.id));
+      const sidecar = await sidecarForScan(current.id, rootPath);
       if (sidecar) {
         const report = reportFromSidecar(sidecar, await previousSidecarFor(history));
-        devArtifactCache.set(current.id, report);
+        if (report.artifacts.length > 0) devArtifactCache.set(current.id, report);
         return report;
       }
 
@@ -3127,7 +3157,7 @@ void (async () => {
         },
         { workerPath: devArtifactsWorkerEntry },
       );
-      devArtifactCache.set(current.id, report);
+      if (report.artifacts.length > 0) devArtifactCache.set(current.id, report);
       return report;
     })().catch((err) => {
       writeCrashLog(
@@ -3155,7 +3185,8 @@ void (async () => {
         },
         { workerPath: devArtifactsWorkerEntry },
       );
-      devArtifactCache.set(current.id, report);
+      if (report.artifacts.length > 0) devArtifactCache.set(current.id, report);
+      else devArtifactCache.delete(current.id);
       return report;
     } catch (err) {
       writeCrashLog(
@@ -3780,6 +3811,12 @@ void (async () => {
         const nextDev = devArtifactsSidecarPath(historyId);
         if (FS_SYNC.existsSync(prevDev) && !FS_SYNC.existsSync(nextDev)) {
           await FS.copyFile(prevDev, nextDev);
+        } else if (!FS_SYNC.existsSync(nextDev)) {
+          await resolveDevArtifactSidecar(
+            nextDev,
+            rootPath,
+            listPendingDevArtifactSidecars(),
+          );
         }
       } catch (err) {
         writeCrashLog(

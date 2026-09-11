@@ -50,6 +50,18 @@ export function devArtifactsSidecarPath(id: string): string {
   return Path.join(indexDir, `${id}${DEV_ARTIFACTS_SIDECAR_SUFFIX}`);
 }
 
+/** Leftover native writes that landed after Done, before the history rename. */
+export function listPendingDevArtifactSidecars(): string[] {
+  if (!indexDir) return [];
+  try {
+    return FS.readdirSync(indexDir)
+      .filter((name) => name.startsWith("pending-") && name.endsWith(DEV_ARTIFACTS_SIDECAR_SUFFIX))
+      .map((name) => Path.join(indexDir, name));
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Short NDJSON record: `{"p":"<path>","s":<size>,"m":<mtime>}` for files.
  * Directory entries have no `s` field: `{"p":"<dir-path>","t":"d","m":<mtime>}`.

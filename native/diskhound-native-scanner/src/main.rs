@@ -252,25 +252,33 @@ impl IndexWriter {
             let _ = tx.send(IndexWriteMsg::Finish);
             drop(tx);
         }
-        if let Some(handle) = self.handle.take() {
+        let join_err = if let Some(handle) = self.handle.take() {
             match handle.join() {
-                Ok(result) => result?,
-                Err(_) => {
-                    return Err(io::Error::other(
-                        "index writer thread panicked",
-                    ))
-                }
+                Ok(result) => result.err(),
+                Err(_) => Some(io::Error::other("index writer thread panicked")),
             }
-        }
+        } else {
+            None
+        };
+        // Write the Dev sidecar even if gzip finish failed — classify
+        // already ran on every file the writer accepted.
         if let (Some(out), Some(acc)) = (self.dev_output.take(), self.dev_acc.take()) {
             let guard = acc.lock().unwrap_or_else(|e| e.into_inner());
-            if let Err(err) = dev_artifacts::write_sidecar(&out, &self.scan_root, &guard) {
-                eprintln!(
+            match dev_artifacts::write_sidecar(&out, &self.scan_root, &guard) {
+                Ok(()) => eprintln!(
+                    "[diskhound-native-scanner] dev-artifacts sidecar: wrote {} ({} roots)",
+                    out.display(),
+                    guard.root_count()
+                ),
+                Err(err) => eprintln!(
                     "[diskhound-native-scanner] dev-artifacts sidecar: write failed ({err})"
-                );
+                ),
             }
         }
-        Ok(())
+        match join_err {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 }
 
@@ -1117,23 +1125,24 @@ fn run() -> Result<(), String> {
         }
     }
 
+    // Finish the index writer (gzip flush + Dev sidecar) BEFORE Done.
+    // Node renames pending-* files as soon as it sees Done. Writing the
+    // Dev sidecar after Done raced: the rename missed, and Dev Artifacts
+    // fell through to a 1m+ folder-tree classify on a 7M-file C: scan.
+    if let Some(writer) = state.index_writer.take() {
+        if let Err(err) = writer.finish() {
+            eprintln!("[diskhound-native-scanner] index writer finish failed ({err})");
+        }
+    }
+
     if matches!(final_status, ScanStatus::Done) {
         state.scan_phase = ScanPhase::Complete;
     }
 
-    let emit_result = emit_message(&Message::Done {
+    emit_message(&Message::Done {
         snapshot: state.snapshot(final_status, None),
     })
-    .map_err(|error| error.to_string());
-
-    // Flush and close the index writer in both the success and cancelled
-    // paths. Best-effort: if finalizing the gzip stream fails, drop it
-    // silently rather than crashing the scan.
-    if let Some(writer) = state.index_writer.take() {
-        let _ = writer.finish();
-    }
-
-    emit_result
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(windows)]

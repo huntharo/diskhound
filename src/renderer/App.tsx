@@ -14,6 +14,7 @@ import {
   type ScanSnapshot,
   type UpdateStatus,
 } from "../shared/contracts";
+import { formatScanRoot } from "../shared/pathUtils";
 import { formatBytes } from "./lib/format";
 import { clearDeletedPaths } from "./lib/deletedPaths";
 import { useLiveDiskSpace } from "./lib/hooks";
@@ -52,6 +53,9 @@ const TABS: { id: AppView; label: string; key: string }[] = [
 ];
 
 const SEARCHABLE_VIEWS: readonly AppView[] = ["files"];
+const SCAN_SCOPED_VIEWS: readonly AppView[] = [
+  "overview", "files", "folders", "dev", "duplicates", "changes",
+];
 
 function isEditableElement(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -1243,6 +1247,14 @@ export function App() {
             </button>
           ))}
           <div className="tab-spacer" />
+          {SCAN_SCOPED_VIEWS.includes(view) && snapshot.rootPath && (
+            <span
+              className="tab-root"
+              title={`${snapshot.rootPath} — switch drives with the pills in the header`}
+            >
+              {formatScanRoot(snapshot.rootPath)}
+            </span>
+          )}
           <div className="tab-status">
             <span className={`status-dot ${snapshot.status}`} />
             <span>{statusLabel}</span>

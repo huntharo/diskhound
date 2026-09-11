@@ -64,6 +64,10 @@ impl DevArtifactAcc {
         }
     }
 
+    pub fn root_count(&self) -> usize {
+        self.artifacts.values().filter(|rec| rec.size > 0).count()
+    }
+
     pub fn add(&mut self, path: &str, size: u64, extra_hardlink: bool) {
         if let Some(name) = file_name(path) {
             if is_project_marker(name) {
@@ -264,5 +268,19 @@ mod tests {
         let (root, kind) = classify("/home/dev/diskhound/target/debug/diskhound").unwrap();
         assert_eq!(root, "/home/dev/diskhound/target/debug");
         assert!(matches!(kind, Kind::RustTarget));
+    }
+
+    #[test]
+    fn writes_sidecar_json() {
+        let mut acc = DevArtifactAcc::new();
+        acc.add(r"C:\proj\node_modules\x.js", 1000, false);
+        let dir = std::env::temp_dir().join(format!("dh-dev-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("scan.dev-artifacts.json");
+        write_sidecar(&out, r"C:\", &acc).unwrap();
+        let raw = std::fs::read_to_string(&out).unwrap();
+        assert!(raw.contains("node-modules"));
+        assert!(raw.contains("rootPath"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

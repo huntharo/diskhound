@@ -2,9 +2,10 @@ import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 
 import type { DevArtifact, DevArtifactKind, DevArtifactReport, ScanSnapshot } from "../../shared/contracts";
 import { DEV_KIND_LABEL } from "../../shared/devArtifacts";
+import { formatScanRoot } from "../../shared/pathUtils";
 import { formatBytes, formatCount } from "../lib/format";
 import { nativeApi } from "../nativeApi";
-import { DEV_LOADING_STAGES, DEV_RESCAN_STAGES, IndexLoadingPanel } from "./IndexLoadingPanel";
+import { DEV_FOLDER_TREE_STAGES, DEV_RESCAN_STAGES, DEV_SIDECAR_STAGES, IndexLoadingPanel } from "./IndexLoadingPanel";
 import { toast } from "./Toasts";
 
 interface Props {
@@ -34,6 +35,7 @@ export function DevView({ snapshot }: Props) {
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
   const [rescanning, setRescanning] = useState(false);
+  const [loadPath, setLoadPath] = useState<"sidecar" | "folder-tree">("sidecar");
 
   const load = useCallback(async () => {
     if (!root) {
@@ -52,7 +54,16 @@ export function DevView({ snapshot }: Props) {
     if (sessionLoadStarted?.key !== key) sessionLoadStarted = { key, at: Date.now() };
     setLoadingStartedAt(sessionLoadStarted.at);
     setLoadingElapsedSec(Math.floor((Date.now() - sessionLoadStarted.at) / 1000));
+    setLoadPath("sidecar");
     try {
+      const fast = await nativeApi.getDevArtifacts(root, { sidecarOnly: true });
+      if (fast) {
+        setReport(fast);
+        sessionReport = { key, report: fast };
+        sessionLoadStarted = null;
+        return;
+      }
+      setLoadPath("folder-tree");
       const next = await nativeApi.getDevArtifacts(root);
       setReport(next);
       if (next) {
@@ -61,7 +72,7 @@ export function DevView({ snapshot }: Props) {
       }
       if (!next) {
         setLoadError(
-          "No Dev Artifacts sidecar for this scan. Run a full scan, or open Folders first on an older scan so DiskHound can classify from the folder tree.",
+          `No Dev Artifacts sidecar for ${formatScanRoot(root)}. Run a full scan of this drive, or open Folders first on an older scan so DiskHound can classify from the folder tree.`,
         );
       }
     } catch (err) {
@@ -74,8 +85,9 @@ export function DevView({ snapshot }: Props) {
   }, [root, snapshot.finishedAt]);
 
   useEffect(() => {
+    if (snapshot.status !== "done") return;
     void load();
-  }, [load]);
+  }, [load, snapshot.status]);
 
   useEffect(() => {
     if (!loadingStartedAt) return;
@@ -258,11 +270,38 @@ export function DevView({ snapshot }: Props) {
     }
   };
 
-  if (!root || snapshot.status === "idle") {
+  const rootLabel = root ? formatScanRoot(root) : null;
+
+  if (!root) {
     return (
       <div className="dev-view">
         <div className="empty-view">
           <span>Scan a drive to find worktrees, node_modules, Rust targets, and other developer bloat.</span>
+          <span className="empty-view-sub">Pick a drive on Overview. Dev Artifacts always follows that scan, not the whole PC.</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (snapshot.status === "idle") {
+    return (
+      <div className="dev-view">
+        <div className="empty-view">
+          <span className="scan-root-chip">{rootLabel}</span>
+          <span>{rootLabel} has not been scanned yet.</span>
+          <span className="empty-view-sub">Use Overview or Rescan in the header. Other drives stay on their own scan.</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (snapshot.status === "running" && !report) {
+    return (
+      <div className="dev-view">
+        <div className="empty-view">
+          <span className="scan-root-chip">{rootLabel}</span>
+          <span>Scanning {rootLabel}…</span>
+          <span className="empty-view-sub">Dev Artifacts for this drive will be ready when the scan finishes.</span>
         </div>
       </div>
     );
@@ -272,8 +311,9 @@ export function DevView({ snapshot }: Props) {
     return (
       <div className="dev-view">
         <IndexLoadingPanel
-          title={rescanning ? "Refreshing artifact trees" : "Reading developer artifacts"}
-          stages={rescanning ? DEV_RESCAN_STAGES : DEV_LOADING_STAGES}
+          eyebrow={rootLabel ?? undefined}
+          title={rescanning ? `Refreshing artifact trees on ${rootLabel}` : `Reading developer artifacts on ${rootLabel}`}
+          stages={rescanning ? DEV_RESCAN_STAGES : loadPath === "folder-tree" ? DEV_FOLDER_TREE_STAGES : DEV_SIDECAR_STAGES}
           elapsedSec={loadingElapsedSec}
         />
       </div>
@@ -284,7 +324,9 @@ export function DevView({ snapshot }: Props) {
     return (
       <div className="dev-view">
         <div className="empty-view">
+          <span className="scan-root-chip">{rootLabel}</span>
           <span>{loadError}</span>
+          <span className="empty-view-sub">This tab is for {rootLabel}. Scan a different drive from Overview.</span>
           <button className="action-btn" onClick={() => void load()}>Retry</button>
         </div>
       </div>
@@ -295,8 +337,9 @@ export function DevView({ snapshot }: Props) {
     return (
       <div className="dev-view">
         <div className="empty-view">
-          <span>No developer artifacts left on this scan.</span>
-          <span className="empty-view-sub">DiskHound looks for worktrees, package trees, Rust targets, venvs, and compiler caches.</span>
+          <span className="scan-root-chip">{rootLabel}</span>
+          <span>No developer artifacts left on {rootLabel}.</span>
+          <span className="empty-view-sub">DiskHound looks for worktrees, package trees, Rust targets, venvs, and compiler caches on this scan. Switch drives in the header to see another root.</span>
           {report ? (
             <button
               className="action-btn"
@@ -318,8 +361,9 @@ export function DevView({ snapshot }: Props) {
     <div className="dev-view">
       <div className="dev-summary">
         <div className="dev-summary-net">
+          <span className="scan-root-chip" title={root}>{rootLabel}</span>
           <span className="changes-delta-big">{formatBytes(summary.totalBytes)}</span>
-          <span className="changes-delta-label">reclaimable developer files</span>
+          <span className="changes-delta-label">reclaimable on {rootLabel}</span>
         </div>
         <div className="changes-summary-stats">
           <div className="summary-item">

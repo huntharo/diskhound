@@ -8,6 +8,7 @@ import type { DevArtifact, DevArtifactKind, DevArtifactReport } from "./contract
 import { classifyArtifactPath } from "./devArtifacts";
 import { occupancyBytes } from "./allocatedSize";
 import { attachPipeErrorHandlers } from "./streamSafety";
+import { normPath } from "./pathUtils";
 
 export const DEV_ARTIFACTS_SIDECAR_SUFFIX = ".dev-artifacts.json";
 
@@ -287,6 +288,36 @@ export async function readDevArtifactSidecar(filePath: string): Promise<DevArtif
   } catch {
     return null;
   }
+}
+
+/**
+ * Happy path: `{scanId}.dev-artifacts.json` already exists.
+ * Salvage: native wrote the sidecar to a pending path after Done, and
+ * the history rename missed it. Adopt a pending file whose `rootPath`
+ * matches this scan.
+ */
+export async function resolveDevArtifactSidecar(
+  destPath: string,
+  scanRoot: string,
+  pendingPaths: string[],
+): Promise<DevArtifactSidecar | null> {
+  const existing = await readDevArtifactSidecar(destPath);
+  if (existing) return existing;
+
+  const wanted = normPath(scanRoot);
+  for (const pending of pendingPaths) {
+    const sidecar = await readDevArtifactSidecar(pending);
+    if (!sidecar || normPath(sidecar.rootPath) !== wanted) continue;
+    try {
+      await FSP.rename(pending, destPath);
+    } catch {
+      const afterClash = await readDevArtifactSidecar(destPath);
+      if (afterClash) return afterClash;
+      continue;
+    }
+    return (await readDevArtifactSidecar(destPath)) ?? sidecar;
+  }
+  return null;
 }
 
 export async function writeDevArtifactSidecar(filePath: string, sidecar: DevArtifactSidecar): Promise<void> {
