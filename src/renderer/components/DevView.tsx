@@ -19,8 +19,26 @@ type GroupBy = "kind" | "project";
 let sessionReport: { key: string; report: DevArtifactReport } | null = null;
 let sessionLoadStarted: { key: string; at: number } | null = null;
 
-function reportKey(root: string, finishedAt: number | null): string {
-  return `${root}|${finishedAt ?? 0}`;
+function reportKey(root: string | null, finishedAt: number | null): string {
+  return `${root ?? ""}|${finishedAt ?? 0}`;
+}
+
+/** First paint must not look like an empty sidecar. Show a cached
+ *  report for this root+scan, or start on the loading panel. */
+function seedViewState(
+  root: string | null,
+  finishedAt: number | null,
+  status: ScanSnapshot["status"],
+): { report: DevArtifactReport | null; loading: boolean; startedAt: number | null } {
+  const key = reportKey(root, finishedAt);
+  if (sessionReport?.key === key) {
+    return { report: sessionReport.report, loading: false, startedAt: null };
+  }
+  if (status === "done" && root) {
+    if (sessionLoadStarted?.key !== key) sessionLoadStarted = { key, at: Date.now() };
+    return { report: null, loading: true, startedAt: sessionLoadStarted.at };
+  }
+  return { report: null, loading: false, startedAt: null };
 }
 
 function truncatePath(path: string, max = 56): string {
@@ -30,11 +48,16 @@ function truncatePath(path: string, max = 56): string {
 
 export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props) {
   const root = snapshot.rootPath;
-  const [report, setReport] = useState<DevArtifactReport | null>(null);
-  const [loading, setLoading] = useState(false);
+  const key = reportKey(root, snapshot.finishedAt);
+  const [boot] = useState(() => seedViewState(root, snapshot.finishedAt, snapshot.status));
+  const [heldKey, setHeldKey] = useState(key);
+  const [report, setReport] = useState<DevArtifactReport | null>(boot.report);
+  const [loading, setLoading] = useState(boot.loading);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [loadingStartedAt, setLoadingStartedAt] = useState<number | null>(null);
-  const [loadingElapsedSec, setLoadingElapsedSec] = useState(0);
+  const [loadingStartedAt, setLoadingStartedAt] = useState<number | null>(boot.startedAt);
+  const [loadingElapsedSec, setLoadingElapsedSec] = useState(() => (
+    boot.startedAt ? Math.floor((Date.now() - boot.startedAt) / 1000) : 0
+  ));
   const [groupBy, setGroupBy] = useState<GroupBy>("kind");
   const [kindFilter, setKindFilter] = useState<DevArtifactKind | "all">("all");
   const [busyPaths, setBusyPaths] = useState<Set<string>>(() => new Set());
@@ -46,38 +69,61 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
   const [loadPath, setLoadPath] = useState<"sidecar" | "folder-tree">("sidecar");
   const rescanningRef = useRef(false);
   const rescanGenRef = useRef(0);
+  const loadGenRef = useRef(0);
+
+  if (heldKey !== key) {
+    setHeldKey(key);
+    const next = seedViewState(root, snapshot.finishedAt, snapshot.status);
+    setReport(next.report);
+    setLoading(next.loading);
+    setLoadError(null);
+    setLoadingStartedAt(next.startedAt);
+    setLoadingElapsedSec(next.startedAt ? Math.floor((Date.now() - next.startedAt) / 1000) : 0);
+  }
 
   const load = useCallback(async () => {
     if (!root) {
       setReport(null);
       return;
     }
-    const key = reportKey(root, snapshot.finishedAt);
-    if (sessionReport?.key === key) {
+    const loadKey = reportKey(root, snapshot.finishedAt);
+    const gen = ++loadGenRef.current;
+    if (sessionReport?.key === loadKey) {
       setReport(sessionReport.report);
       setLoadError(null);
       setLoading(false);
+      // Cheap sidecar reread — keep the cached report on screen.
+      void nativeApi.getDevArtifacts(root, { sidecarOnly: true }).then((fast) => {
+        if (gen !== loadGenRef.current) return;
+        if (!fast) return;
+        setReport(fast);
+        sessionReport = { key: loadKey, report: fast };
+      }).catch(() => {
+        /* keep the session report */
+      });
       return;
     }
     setLoading(true);
     setLoadError(null);
-    if (sessionLoadStarted?.key !== key) sessionLoadStarted = { key, at: Date.now() };
+    if (sessionLoadStarted?.key !== loadKey) sessionLoadStarted = { key: loadKey, at: Date.now() };
     setLoadingStartedAt(sessionLoadStarted.at);
     setLoadingElapsedSec(Math.floor((Date.now() - sessionLoadStarted.at) / 1000));
     setLoadPath("sidecar");
     try {
       const fast = await nativeApi.getDevArtifacts(root, { sidecarOnly: true });
+      if (gen !== loadGenRef.current) return;
       if (fast) {
         setReport(fast);
-        sessionReport = { key, report: fast };
+        sessionReport = { key: loadKey, report: fast };
         sessionLoadStarted = null;
         return;
       }
       setLoadPath("folder-tree");
       const next = await nativeApi.getDevArtifacts(root);
+      if (gen !== loadGenRef.current) return;
       setReport(next);
       if (next) {
-        sessionReport = { key, report: next };
+        sessionReport = { key: loadKey, report: next };
         sessionLoadStarted = null;
       }
       if (!next) {
@@ -86,9 +132,11 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
         );
       }
     } catch (err) {
+      if (gen !== loadGenRef.current) return;
       setReport(null);
       setLoadError(err instanceof Error ? err.message : String(err));
     } finally {
+      if (gen !== loadGenRef.current) return;
       setLoading(false);
       setLoadingStartedAt(null);
     }
@@ -366,7 +414,10 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     );
   }
 
-  if (loading && !report) {
+  // First paint and Retry stay on this panel until a sidecar (or
+  // folder-tree) read has finished. `!loadError` covers the gap before
+  // useEffect starts the load so we never flash Scan C: / Retry.
+  if (!report && snapshot.status === "done" && (loading || !loadError)) {
     return (
       <div className="dev-view">
         <IndexLoadingPanel

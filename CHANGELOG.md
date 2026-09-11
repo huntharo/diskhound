@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.5.45 — 2026-09-11
+
+Size on disk, a Dev Artifacts tab, quieter first-run defaults, and a
+sidecar-backed open that no longer flashes the empty Retry state while
+the in-process load is still running. Cut from the
+`feat/disk-quality-and-dev-artifacts` branch as a prerelease until that
+work lands on main.
+
+### Dev Artifacts first open
+
+Opening Dev no longer paints “No Dev Artifacts sidecar…” / Scan C: /
+Retry for a frame before the sidecar arrives. First paint shows the
+loading panel, or the last report for this root+scan, and Retry stays
+on that panel until the read finishes.
+
 ### First-run defaults
 
 - New installs no longer launch DiskHound at login.
