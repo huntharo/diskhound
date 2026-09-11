@@ -121,6 +121,8 @@ export async function analyzeDevArtifacts(
   }
 
   artifacts.sort((a, b) => b.size - a.size);
+  const LIST_CAP = 2_500;
+  const listed = artifacts.length > LIST_CAP ? artifacts.slice(0, LIST_CAP) : artifacts;
 
   const kindMap = new Map<DevArtifactKind, { size: number; count: number }>();
   for (const artifact of artifacts) {
@@ -131,7 +133,7 @@ export async function analyzeDevArtifacts(
   }
 
   return {
-    artifacts,
+    artifacts: listed,
     totalBytes: artifacts.reduce((sum, a) => sum + a.size, 0),
     totalFiles: artifacts.reduce((sum, a) => sum + a.fileCount, 0),
     projectCount: new Set(artifacts.map((a) => a.projectPath).filter(Boolean)).size,

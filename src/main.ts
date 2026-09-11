@@ -24,6 +24,7 @@ import {
   normalizeAppSettings,
   type AffinityRule,
   type AppSettings,
+  type DevArtifactReport,
   type DiskIoSnapshot,
   type FullDiffStatus,
   type FullDiffResult,
@@ -105,6 +106,10 @@ import {
   runFolderTreeWorker,
 } from "./shared/folderTreeWorkerRuntime";
 import {
+  resolveBundledDevArtifactsWorkerPath,
+  runDevArtifactsWorker,
+} from "./shared/devArtifactsWorkerRuntime";
+import {
   deleteFullDiffCachesForScan,
   hasFullDiffCache,
   initFullDiffCacheStore,
@@ -124,7 +129,6 @@ import { resolveNativeScannerBinary } from "./nativeScanner";
 import { initNativeProcessSample } from "./nativeProcessSample";
 import { searchIndexFile } from "./shared/scanIndex";
 import { analyzeCleanupFromIndex } from "./shared/suggestions";
-import { analyzeDevArtifacts } from "./shared/devArtifactsIndex";
 import { createNativeScannerSession, type NativeScannerSession } from "./nativeScanner";
 import * as elevationModule from "./elevation";
 
@@ -150,6 +154,7 @@ const rendererEntryFile = Path.join(projectRoot, "dist-renderer", "index.html");
 const scanWorkerEntry = Path.join(__dirname, "scan", "scanWorker.cjs");
 const fullDiffWorkerEntry = resolveBundledFullDiffWorkerPath(__dirname);
 const folderTreeWorkerEntry = resolveBundledFolderTreeWorkerPath(__dirname);
+const devArtifactsWorkerEntry = resolveBundledDevArtifactsWorkerPath(__dirname);
 const RELEASES_URL = "https://github.com/tzarebczan/diskhound/releases";
 
 type WorkerScanSession = {
@@ -2673,6 +2678,9 @@ void (async () => {
               .map(([name, size, modifiedAt]) => ({ name, size, modifiedAt }))
           : [];
         tree.set(rec.k, { dirs, files });
+        if (linesRead % 4_000 === 0) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
       }
       // Log success/failure ratio so we can tell if a sidecar was
       // present-but-corrupt (rare, but hard to diagnose without
@@ -3039,16 +3047,39 @@ void (async () => {
     if (!current) return { hits: [], truncated: false, filesScanned: 0 };
     return searchIndexFile(indexFilePath(current.id), query);
   });
+  const devArtifactCache = new Map<string, DevArtifactReport>();
+  const devArtifactInflight = new Map<string, Promise<DevArtifactReport | null>>();
+
   ipcMain.handle("diskhound:get-dev-artifacts", async (_event, rootPath: string) => {
     const history = getScanHistory(rootPath);
     const current = history[0];
     if (!current) return null;
+    const cached = devArtifactCache.get(current.id);
+    if (cached) return cached;
+    const inflight = devArtifactInflight.get(current.id);
+    if (inflight) return inflight;
     const previous = history[1];
-    return analyzeDevArtifacts(
-      rootPath,
-      indexFilePath(current.id),
-      previous ? indexFilePath(previous.id) : null,
-    );
+    const pending = runDevArtifactsWorker(
+      {
+        rootPath,
+        currentIndexPath: indexFilePath(current.id),
+        previousIndexPath: previous ? indexFilePath(previous.id) : null,
+      },
+      { workerPath: devArtifactsWorkerEntry },
+    ).then((report) => {
+      devArtifactCache.set(current.id, report);
+      return report;
+    }).catch((err) => {
+      writeCrashLog(
+        "dev-artifacts",
+        err instanceof Error ? (err.stack ?? err.message) : String(err),
+      );
+      return null;
+    }).finally(() => {
+      devArtifactInflight.delete(current.id);
+    });
+    devArtifactInflight.set(current.id, pending);
+    return pending;
   });
 
   // ── IPC: Duplicate Detection ────────────────────────────

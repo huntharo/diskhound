@@ -50,6 +50,14 @@ instead of PowerShell on every tick. GPU still uses performance counters.
 Full diffs merge sorted index chunks on disk instead of loading a 12 GB
 in-memory map.
 
+### Dev cleanup
+
+The Dev tab no longer freezes the app while it reads a multi-million-file
+index (that work runs in a worker). Overview shows a compact **dev cleanup**
+tile on the summary row. From Dev you can select trees, trash selected, or
+trash all. Folders yields while loading a large sidecar so the tab does not
+stay stuck on "Loading folder contents".
+
 ### Packaged app starts
 
 The Windows installer no longer crashes on launch with

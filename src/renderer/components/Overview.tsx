@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 
-import type { CleanupAnalysis, DevArtifactReport, ExtensionBucket, ScanDiffResult, ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
+import type { DevArtifactReport, ExtensionBucket, ScanDiffResult, ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
 import {
   deletedPathLabel,
   deletedPathTitle,
@@ -274,7 +274,6 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
   return (
     <div className="overview">
       <MonitoringNudge />
-      <OverviewInsights snapshot={snapshot} onViewDev={onViewDev} />
       <div className="metrics-strip">
         <Metric
           value={formatBytes(bytesSeen)}
@@ -298,6 +297,7 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
             </div>
           </div>
         )}
+        <DevCleanupTile snapshot={snapshot} onViewDev={onViewDev} />
       </div>
 
       {latestDiff && <LatestScanSummary diff={latestDiff} onViewDetails={onViewChanges} />}
@@ -795,60 +795,60 @@ function LatestScanSummary({ diff, onViewDetails }: { diff: ScanDiffResult; onVi
   );
 }
 
-/**
- * Dismissible banner that nudges the user to turn on background monitoring.
- * Shows only when monitoring is currently off AND the user hasn't dismissed
- * it previously (persisted via localStorage). Clicking "Enable" flips the
- * setting on and dismisses the banner; clicking the × just dismisses.
- */
-function OverviewInsights({ snapshot, onViewDev }: { snapshot: ScanSnapshot; onViewDev?: () => void }) {
+function DevCleanupTile({ snapshot, onViewDev }: { snapshot: ScanSnapshot; onViewDev?: () => void }) {
   const [dev, setDev] = useState<DevArtifactReport | null>(null);
-  const [cleanup, setCleanup] = useState<CleanupAnalysis | null>(null);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     if (!snapshot.rootPath || snapshot.status !== "done") {
       setDev(null);
-      setCleanup(null);
+      setLoading(false);
       return;
     }
     let cancelled = false;
-    void Promise.all([
-      nativeApi.getDevArtifacts(snapshot.rootPath),
-      nativeApi.analyzeCleanup(snapshot.rootPath),
-    ]).then(([devReport, cleanupReport]) => {
+    setLoading(true);
+    void nativeApi.getDevArtifacts(snapshot.rootPath).then((report) => {
       if (cancelled) return;
-      setDev(devReport);
-      setCleanup(cleanupReport);
+      setDev(report);
+      setLoading(false);
+    }).catch(() => {
+      if (cancelled) return;
+      setDev(null);
+      setLoading(false);
     });
     return () => { cancelled = true; };
   }, [snapshot.rootPath, snapshot.finishedAt, snapshot.status]);
 
-  if (!dev && !cleanup) return null;
-  const showDev = (dev?.totalBytes ?? 0) >= 512 * 1024 * 1024;
-  const showCleanup = (cleanup?.totalReclaimableBytes ?? 0) >= 256 * 1024 * 1024;
-  if (!showDev && !showCleanup) return null;
-
+  if (snapshot.status !== "done") return null;
+  if (loading && !dev) {
+    return (
+      <button
+        type="button"
+        className="metric metric-dev-tile"
+        onClick={() => onViewDev?.()}
+        title="Open Dev cleanup"
+      >
+        <span className="metric-value">…</span>
+        <span className="metric-label">dev cleanup</span>
+      </button>
+    );
+  }
+  if (!dev || dev.totalBytes <= 0) return null;
+  const topKind = dev.kindTotals[0]?.kind;
   return (
-    <div className="overview-insight-row">
-      {showDev && dev && (
-        <button className="overview-insight-card" onClick={() => onViewDev?.()}>
-          <span className="overview-insight-kicker">Developer artifacts</span>
-          <span className="overview-insight-value">{formatBytes(dev.totalBytes)}</span>
-          <span className="overview-insight-sub">
-            {formatCount(dev.projectCount)} projects · worktrees, targets, node_modules
-          </span>
-        </button>
-      )}
-      {showCleanup && cleanup && (
-        <div className="overview-insight-card">
-          <span className="overview-insight-kicker">Cleanup from this scan</span>
-          <span className="overview-insight-value">{formatBytes(cleanup.totalReclaimableBytes)}</span>
-          <span className="overview-insight-sub">
-            {cleanup.suggestions.slice(0, 3).map((s) => s.title).join(" · ")}
-          </span>
-        </div>
-      )}
-    </div>
+    <button
+      type="button"
+      className="metric metric-dev-tile"
+      onClick={() => onViewDev?.()}
+      title="Open Dev cleanup to trash worktrees, node_modules, and build caches"
+    >
+      <span className="metric-value accent">{formatBytes(dev.totalBytes)}</span>
+      <span className="metric-label">dev cleanup</span>
+      <span className="metric-dev-meta">
+        {formatCount(dev.projectCount)} proj
+        {topKind ? ` · ${formatCount(dev.kindTotals[0]!.count)} trees` : ""}
+      </span>
+    </button>
   );
 }
 

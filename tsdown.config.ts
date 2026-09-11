@@ -30,6 +30,7 @@ export default defineConfig([
       "src/scan/scanWorker.ts",
       "src/scan/fullDiffWorker.ts",
       "src/scan/folderTreeWorker.ts",
+      "src/scan/devArtifactsWorker.ts",
     ],
   },
 ]);

@@ -97,6 +97,8 @@ export function FolderList({ snapshot }: Props) {
     hiddenExcludedBytes: 0,
   });
   const [loading, setLoading] = useState(false);
+  const [loadingStartedAt, setLoadingStartedAt] = useState<number | null>(null);
+  const [loadingElapsedSec, setLoadingElapsedSec] = useState(0);
   const [showOtherFiles, setShowOtherFiles] = useState(false);
   const [contextMenu, setContextMenu] = useState<{
     x: number;
@@ -173,6 +175,8 @@ export function FolderList({ snapshot }: Props) {
     setLooseFiles([]);
     setFolderMeta({ totalSize: 0, totalItemCount: 0, hiddenExcludedCount: 0, hiddenExcludedBytes: 0 });
     setLoading(true);
+    setLoadingStartedAt(Date.now());
+    setLoadingElapsedSec(0);
     void nativeApi.getFolderChildren(rootPath, currentPath).then((res) => {
       if (cancelled) return;
       setChildren(res?.dirs ?? []);
@@ -184,15 +188,25 @@ export function FolderList({ snapshot }: Props) {
         hiddenExcludedBytes: res?.hiddenExcludedBytes ?? 0,
       });
       setLoading(false);
+      setLoadingStartedAt(null);
     }).catch(() => {
       if (cancelled) return;
       setChildren([]);
       setLooseFiles([]);
       setFolderMeta({ totalSize: 0, totalItemCount: 0, hiddenExcludedCount: 0, hiddenExcludedBytes: 0 });
       setLoading(false);
+      setLoadingStartedAt(null);
     });
     return () => { cancelled = true; };
   }, [rootPath, currentPath]);
+
+  useEffect(() => {
+    if (!loadingStartedAt) return;
+    const id = window.setInterval(() => {
+      setLoadingElapsedSec(Math.floor((Date.now() - loadingStartedAt) / 1000));
+    }, 500);
+    return () => window.clearInterval(id);
+  }, [loadingStartedAt]);
 
   // Child sizes are authoritative — no more inferring-with-0B or reading
   // from the snapshot's bounded top-N. Total of this folder = sum of
@@ -320,6 +334,12 @@ export function FolderList({ snapshot }: Props) {
         {loading ? (
           <div className="empty-view" style={{ paddingTop: 48 }}>
             <span>Loading folder contents…</span>
+            {loadingElapsedSec >= 4 && (
+              <span className="empty-view-sub">
+                Large drives can take a minute the first time this tab opens.
+                {loadingElapsedSec >= 8 ? ` ${loadingElapsedSec}s` : ""}
+              </span>
+            )}
           </div>
         ) : children.length === 0 && looseFiles.length === 0 && folderMeta.hiddenExcludedCount === 0 ? (
           <div className="empty-view" style={{ paddingTop: 48 }}>
