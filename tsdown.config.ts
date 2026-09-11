@@ -17,6 +17,11 @@ export default defineConfig([
     ...shared,
     entry: ["src/main.ts"],
     clean: true,
+    // Rolldown otherwise emits sampler/native chunks that `require('./main.cjs')`
+    // for `__toESM` while main.cjs is still loading → TypeError on startup.
+    outputOptions: {
+      codeSplitting: false,
+    },
   },
   {
     ...shared,

@@ -50,6 +50,12 @@ instead of PowerShell on every tick. GPU still uses performance counters.
 Full diffs merge sorted index chunks on disk instead of loading a 12 GB
 in-memory map.
 
+### Packaged app starts
+
+The Windows installer no longer crashes on launch with
+`require_main.__toESM is not a function`. The main process is a single
+CJS file instead of circular code-split chunks.
+
 ### Relaunch focuses the existing window (#1)
 
 Closing DiskHound with "Minimize to tray" left the app running invisibly.
