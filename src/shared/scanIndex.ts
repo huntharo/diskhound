@@ -570,8 +570,15 @@ export async function buildSnapshotFromIndex(
 
     // Skip files outside the scan root (defensive — index should be root-
     // scoped already, but the incremental path may leave cruft).
+    // Match the given root as well as Path.resolve: on POSIX, resolve("C:\\foo")
+    // prefixes cwd and would otherwise drop every Windows index line.
     const fileNorm = normPath(rec.p);
-    if (!fileNorm.startsWith(normPath(rootNorm))) continue;
+    if (
+      !fileNorm.startsWith(normPath(rootNorm)) &&
+      !fileNorm.startsWith(normPath(rootPath))
+    ) {
+      continue;
+    }
 
     const occupancy = rec.h === 1 ? 0 : rec.s;
     filesVisited += 1;
