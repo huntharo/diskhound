@@ -8,7 +8,7 @@ import type { DevArtifact, DevArtifactKind, DevArtifactReport } from "./contract
 import { classifyArtifactPath } from "./devArtifacts";
 import { occupancyBytes } from "./allocatedSize";
 import { attachPipeErrorHandlers } from "./streamSafety";
-import { normPath } from "./pathUtils";
+import { basenameOf, dirnameOf, normPath } from "./pathUtils";
 
 export const DEV_ARTIFACTS_SIDECAR_SUFFIX = ".dev-artifacts.json";
 /** Largest trees kept on disk and in the Dev list. Native used to write
@@ -87,9 +87,9 @@ export function createDevAcc(): {
 export type DevAcc = ReturnType<typeof createDevAcc>;
 
 export function noteDevFile(acc: DevAcc, filePath: string, size: number, extraHardlink: boolean): void {
-  const name = Path.basename(filePath);
+  const name = basenameOf(filePath);
   if (isProjectMarkerName(name)) {
-    acc.projects.add(Path.dirname(filePath));
+    acc.projects.add(dirnameOf(filePath));
   }
   const match = classifyArtifactPath(filePath);
   if (!match) return;
@@ -242,14 +242,15 @@ function nearestProject(artifactPath: string, projects: Map<string, string>): st
   while (true) {
     const hit = projects.get(cursor.toLowerCase());
     if (hit) return hit;
-    const parent = Path.dirname(cursor);
+    // Host Path.dirname treats "C:\real\app" as a single name on POSIX.
+    const parent = dirnameOf(cursor);
     if (parent === cursor) return null;
     cursor = parent;
   }
 }
 
 function keepArtifact(root: string, projects: Map<string, string>): boolean {
-  const last = Path.basename(root).toLowerCase();
+  const last = basenameOf(root).toLowerCase();
   if (last === "dist" || last === "build" || last === "out") {
     return nearestProject(root, projects) !== null;
   }
@@ -301,7 +302,7 @@ export function reportFromSidecar(
       path: rec.path,
       kind: rec.kind,
       projectPath,
-      projectName: projectPath ? Path.basename(projectPath) : "Unscoped",
+      projectName: projectPath ? basenameOf(projectPath) : "Unscoped",
       size: rec.size,
       fileCount: rec.files,
       previousSize,
