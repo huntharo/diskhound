@@ -97,8 +97,8 @@ const api: DiskhoundNativeApi = {
     ipcRenderer.invoke("diskhound:analyze-cleanup", rootPath),
   searchIndex: (rootPath, query) =>
     ipcRenderer.invoke("diskhound:search-index", rootPath, query),
-  getDevArtifacts: (rootPath) =>
-    ipcRenderer.invoke("diskhound:get-dev-artifacts", rootPath),
+  getDevArtifacts: (rootPath, options) =>
+    ipcRenderer.invoke("diskhound:get-dev-artifacts", rootPath, options),
   rescanDevArtifacts: (rootPath) =>
     ipcRenderer.invoke("diskhound:rescan-dev-artifacts", rootPath),
 

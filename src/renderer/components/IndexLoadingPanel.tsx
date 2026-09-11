@@ -50,10 +50,10 @@ export const FOLDER_LOADING_STAGES: Stage[] = [
 ];
 
 export const DEV_LOADING_STAGES: Stage[] = [
-  { afterSec: 0, label: "Opening the scan index…" },
-  { afterSec: 3, label: "Finding worktrees, node_modules, and targets…" },
-  { afterSec: 12, label: "Rolling up caches and build trees…" },
-  { afterSec: 30, label: "Still reading — millions of files can take a minute." },
+  { afterSec: 0, label: "Opening the Dev Artifacts sidecar…" },
+  { afterSec: 3, label: "Reading the folder tree…" },
+  { afterSec: 12, label: "Grouping worktrees, node_modules, and targets…" },
+  { afterSec: 30, label: "Still reading the folder tree — first open on a huge drive can take a bit." },
 ];
 
 export const DEV_RESCAN_STAGES: Stage[] = [

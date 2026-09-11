@@ -27,18 +27,18 @@ allocated MFT baseline.
 ### Index search and cleanup
 
 Ctrl+F searches the full scan index, not only the top-N largest files.
-Cleanup suggestions now stream that index (temps, caches, old installers,
-large media) and surface on Overview when they are large enough. Cache
-matching uses unambiguous trees (`node_modules`, `target`, `obj`, …) and
-does not treat `dist`/`build`/`out`/`bin` as reclaimable. Ctrl+F falls
-back to the live top-N list when the index is not on disk yet.
+Cleanup suggestions stream that same index (temps, caches, old installers,
+large media). Cache matching uses unambiguous trees (`node_modules`,
+`target`, `obj`, …) and does not treat `dist`/`build`/`out`/`bin` as
+reclaimable. Ctrl+F falls back to the live top-N list when the index is
+not on disk yet.
 
 ### Dev artifacts
 
 New **Dev Artifacts** tab (Ctrl+4) groups worktrees, `node_modules`, Rust
 `target/`, package-manager caches, venvs, and other developer bloat by
 kind or project, with growth since the previous scan. Overview shows a
-card when those trees exceed 512 MB.
+compact tile on the summary row when a sidecar is already on disk.
 
 ### Faster live sampling
 
@@ -55,9 +55,15 @@ in-memory map.
 Full scans write a compact Dev Artifacts sidecar while indexing, so the
 tab opens instantly and does not re-scan when you leave and come back.
 **Rescan trees** walks those artifact folders on disk without a full
-drive scan. Overview shows a compact tile on the summary row. You can
-select trees, trash selected, or trash all. Folders and Dev Artifacts
-show a staged spinner the first time a large index is built.
+drive scan. Overview's tile reads the sidecar only. Older scans without
+a sidecar classify from the folder tree (directory rollups already on
+disk or in memory) instead of streaming millions of file-index lines.
+Opening Dev before that tree exists shows a retryable empty state rather
+than a stuck blank report. **Rescan trees** only walks known roots; it
+does not fall back to the file index.
+
+You can select trees, trash selected, or trash all. Folders and Dev
+Artifacts show a staged spinner the first time a large tree is opened.
 
 ### Packaged app starts
 

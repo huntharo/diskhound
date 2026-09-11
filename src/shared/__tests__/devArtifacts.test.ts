@@ -17,6 +17,13 @@ describe("classifyArtifactPath", () => {
     });
   });
 
+  it("classifies a bare target directory", () => {
+    expect(classifyArtifactPath("C:\\src\\diskhound\\target")).toEqual({
+      root: "C:\\src\\diskhound\\target",
+      kind: "rust-target",
+    });
+  });
+
   it("detects git worktrees", () => {
     expect(classifyArtifactPath("C:\\Users\\thoma\\proj\\.worktrees\\feat-foo\\src\\main.ts")).toEqual({
       root: "C:\\Users\\thoma\\proj\\.worktrees\\feat-foo",

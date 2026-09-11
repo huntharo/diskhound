@@ -23,21 +23,11 @@ if (parentPort) {
           message.input.previousIndexPath,
         )
       : (async () => {
-          let sidecar = await readDevArtifactSidecar(message.input.sidecarPath);
+          const sidecar = await readDevArtifactSidecar(message.input.sidecarPath);
           if (!sidecar) {
-            const report = await analyzeDevArtifacts(message.input.rootPath, message.input.indexPath);
-            sidecar = {
-              version: 1,
-              rootPath: report.rootPath,
-              generatedAt: report.generatedAt,
-              roots: report.artifacts.map((a) => ({
-                path: a.path,
-                kind: a.kind,
-                size: a.size,
-                files: a.fileCount,
-              })),
-              projects: [...new Set(report.artifacts.map((a) => a.projectPath).filter((p): p is string => Boolean(p)))],
-            };
+            throw new Error(
+              "No Dev Artifacts sidecar to refresh. Run a full scan, or open Dev Artifacts after Folders has loaded.",
+            );
           }
           const next = await rescanDevArtifactSidecar(sidecar);
           await writeDevArtifactSidecar(message.input.sidecarPath, next);

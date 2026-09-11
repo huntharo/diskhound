@@ -71,10 +71,12 @@ export function classifyArtifactPath(filePath: string): { root: string; kind: De
     const seg = parts[i]!;
     const lower = seg.toLowerCase();
 
-    if (lower === "target" && i + 1 < parts.length) {
-      const next = parts[i + 1]!.toLowerCase();
-      if (next === "debug" || next === "release" || next === "doc" || next === "incremental") {
-        return { root: joinSegments(filePath, i + 2), kind: "rust-target" };
+    if (lower === "target") {
+      if (i + 1 < parts.length) {
+        const next = parts[i + 1]!.toLowerCase();
+        if (next === "debug" || next === "release" || next === "doc" || next === "incremental") {
+          return { root: joinSegments(filePath, i + 2), kind: "rust-target" };
+        }
       }
       return { root: joinSegments(filePath, i + 1), kind: "rust-target" };
     }

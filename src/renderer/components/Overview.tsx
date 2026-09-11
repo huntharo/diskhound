@@ -797,42 +797,24 @@ function LatestScanSummary({ diff, onViewDetails }: { diff: ScanDiffResult; onVi
 
 function DevCleanupTile({ snapshot, onViewDev }: { snapshot: ScanSnapshot; onViewDev?: () => void }) {
   const [dev, setDev] = useState<DevArtifactReport | null>(null);
-  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     if (!snapshot.rootPath || snapshot.status !== "done") {
       setDev(null);
-      setLoading(false);
       return;
     }
     let cancelled = false;
-    setLoading(true);
-    void nativeApi.getDevArtifacts(snapshot.rootPath).then((report) => {
-      if (cancelled) return;
-      setDev(report);
-      setLoading(false);
+    // Sidecar only — never stream the full index from Overview. Folders
+    // and first paint stay free; Dev Artifacts builds a sidecar on demand.
+    void nativeApi.getDevArtifacts(snapshot.rootPath, { sidecarOnly: true }).then((report) => {
+      if (!cancelled) setDev(report);
     }).catch(() => {
-      if (cancelled) return;
-      setDev(null);
-      setLoading(false);
+      if (!cancelled) setDev(null);
     });
     return () => { cancelled = true; };
   }, [snapshot.rootPath, snapshot.finishedAt, snapshot.status]);
 
   if (snapshot.status !== "done") return null;
-  if (loading && !dev) {
-    return (
-      <button
-        type="button"
-        className="metric metric-dev-tile"
-        onClick={() => onViewDev?.()}
-        title="Open Dev Artifacts"
-      >
-        <span className="metric-value">…</span>
-        <span className="metric-label">dev artifacts</span>
-      </button>
-    );
-  }
   if (!dev || dev.totalBytes <= 0) return null;
   const topKind = dev.kindTotals[0]?.kind;
   return (

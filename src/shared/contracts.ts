@@ -1121,7 +1121,9 @@ export interface DiskhoundNativeApi {
   // Cleanup analysis
   analyzeCleanup: (rootPath: string) => Promise<CleanupAnalysis>;
   searchIndex: (rootPath: string, query: IndexSearchQuery) => Promise<IndexSearchResult>;
-  getDevArtifacts: (rootPath: string) => Promise<DevArtifactReport | null>;
+  /** Read the Dev Artifacts report. `sidecarOnly` reads an existing sidecar
+   *  and never classifies from the folder tree (Overview tile). */
+  getDevArtifacts: (rootPath: string, options?: { sidecarOnly?: boolean }) => Promise<DevArtifactReport | null>;
   /** Re-walk known artifact trees on disk (not a full drive scan). */
   rescanDevArtifacts: (rootPath: string) => Promise<DevArtifactReport | null>;
 

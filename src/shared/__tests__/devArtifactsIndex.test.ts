@@ -32,6 +32,24 @@ describe("analyzeDevArtifacts", () => {
   });
 });
 
+describe("sidecarFromDirectoryRoots", () => {
+  it("keeps the outer target folder and skips target/debug", async () => {
+    const { sidecarFromDirectoryRoots, reportFromSidecar } = await import("../devArtifactSidecar");
+    const sidecar = sidecarFromDirectoryRoots("C:\\", [
+      { path: "C:\\proj\\target", size: 80_000_000, files: 400 },
+      { path: "C:\\proj\\target\\debug", size: 50_000_000, files: 300 },
+      { path: "C:\\proj\\node_modules", size: 20_000_000, files: 100 },
+      { path: "C:\\proj\\node_modules\\preact", size: 1_000_000, files: 10 },
+    ], ["C:\\proj"]);
+    const report = reportFromSidecar(sidecar);
+    expect(report.totalBytes).toBe(100_000_000);
+    expect(report.artifacts.map((a) => a.path).sort()).toEqual([
+      "C:\\proj\\node_modules",
+      "C:\\proj\\target",
+    ]);
+  });
+});
+
 describe("reportFromSidecar", () => {
   it("keeps dist/ only when a project marker exists", async () => {
     const { reportFromSidecar } = await import("../devArtifactSidecar");

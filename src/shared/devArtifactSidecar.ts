@@ -83,6 +83,57 @@ export function noteDevFile(acc: DevAcc, filePath: string, size: number, extraHa
   }
 }
 
+function normalizeDir(p: string): string {
+  return p.replace(/[\\/]+$/, "");
+}
+
+function dirIsUnder(parent: string, child: string): boolean {
+  const p = normalizeDir(parent);
+  const c = normalizeDir(child);
+  if (c.length <= p.length) return false;
+  const pLower = p.toLowerCase();
+  const cLower = c.toLowerCase();
+  return cLower.startsWith(pLower + "\\") || cLower.startsWith(pLower + "/");
+}
+
+function dirsEqual(a: string, b: string): boolean {
+  return normalizeDir(a).toLowerCase() === normalizeDir(b).toLowerCase();
+}
+
+/**
+ * Build a sidecar from folder-tree directory rollups (path + recursive
+ * size + file count). Used when a scan predates the Dev sidecar so we
+ * never stream the 7M-file index. Nested classified dirs (target/debug
+ * under target) are dropped so occupancy is counted once.
+ */
+export function sidecarFromDirectoryRoots(
+  rootPath: string,
+  dirs: Array<{ path: string; size: number; files: number }>,
+  projectPaths: Iterable<string> = [],
+): DevArtifactSidecar {
+  const acc = createDevAcc();
+  for (const project of projectPaths) acc.projects.add(project);
+  for (const dir of dirs) {
+    if (dir.size <= 0) continue;
+    const match = classifyArtifactPath(dir.path);
+    if (!match || !dirsEqual(match.root, dir.path)) continue;
+    const existing = acc.artifacts.get(match.root);
+    if (!existing || dir.size > existing.size) {
+      acc.artifacts.set(match.root, { kind: match.kind, size: dir.size, files: dir.files });
+    }
+  }
+  const kept = [...acc.artifacts.keys()].sort((a, b) => a.length - b.length);
+  const survivors = new Set<string>();
+  for (const path of kept) {
+    if ([...survivors].some((parent) => dirIsUnder(parent, path))) continue;
+    survivors.add(path);
+  }
+  for (const path of [...acc.artifacts.keys()]) {
+    if (!survivors.has(path)) acc.artifacts.delete(path);
+  }
+  return sidecarFromAcc(acc, rootPath);
+}
+
 export function sidecarFromAcc(acc: DevAcc, rootPath: string): DevArtifactSidecar {
   const roots: DevArtifactRootRec[] = [];
   for (const [path, rec] of acc.artifacts) {

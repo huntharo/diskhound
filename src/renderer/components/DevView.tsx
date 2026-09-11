@@ -14,6 +14,7 @@ interface Props {
 type GroupBy = "kind" | "project";
 
 let sessionReport: { key: string; report: DevArtifactReport } | null = null;
+let sessionLoadStarted: { key: string; at: number } | null = null;
 
 function reportKey(root: string, finishedAt: number | null): string {
   return `${root}|${finishedAt ?? 0}`;
@@ -48,13 +49,21 @@ export function DevView({ snapshot }: Props) {
     }
     setLoading(true);
     setLoadError(null);
-    setLoadingStartedAt(Date.now());
-    setLoadingElapsedSec(0);
+    if (sessionLoadStarted?.key !== key) sessionLoadStarted = { key, at: Date.now() };
+    setLoadingStartedAt(sessionLoadStarted.at);
+    setLoadingElapsedSec(Math.floor((Date.now() - sessionLoadStarted.at) / 1000));
     try {
       const next = await nativeApi.getDevArtifacts(root);
       setReport(next);
-      if (next) sessionReport = { key, report: next };
-      if (!next) setLoadError("Could not read developer artifacts from this scan.");
+      if (next) {
+        sessionReport = { key, report: next };
+        sessionLoadStarted = null;
+      }
+      if (!next) {
+        setLoadError(
+          "No Dev Artifacts sidecar for this scan. Run a full scan, or open Folders first on an older scan so DiskHound can classify from the folder tree.",
+        );
+      }
     } catch (err) {
       setReport(null);
       setLoadError(err instanceof Error ? err.message : String(err));
@@ -288,6 +297,18 @@ export function DevView({ snapshot }: Props) {
         <div className="empty-view">
           <span>No developer artifacts left on this scan.</span>
           <span className="empty-view-sub">DiskHound looks for worktrees, package trees, Rust targets, venvs, and compiler caches.</span>
+          {report ? (
+            <button
+              className="action-btn"
+              disabled={rescanning}
+              onClick={() => void rescan()}
+              title="Re-walk known artifact trees on disk. Does not scan the whole drive."
+            >
+              Rescan trees
+            </button>
+          ) : (
+            <button className="action-btn" onClick={() => void load()}>Retry</button>
+          )}
         </div>
       </div>
     );
