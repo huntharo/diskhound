@@ -3,6 +3,7 @@ use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -26,6 +27,7 @@ mod usn_journal;
 mod mft;
 
 mod sample;
+mod dev_artifacts;
 
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{GetLastError, ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE};
@@ -70,6 +72,8 @@ struct ScanInput {
     /// worker thread (which was OOM-ing even at 8 GB heap on drives
     /// with 8M+ records).
     folder_tree_output: Option<PathBuf>,
+    /// Compact Dev Artifacts sidecar written from the index-writer thread.
+    dev_artifacts_output: Option<PathBuf>,
 }
 
 /// Empty options struct — kept for IPC contract stability with the JS side.
@@ -103,6 +107,9 @@ struct ScanOptions {}
 struct IndexWriter {
     tx: Option<crossbeam_channel::Sender<IndexWriteMsg>>,
     handle: Option<std::thread::JoinHandle<io::Result<()>>>,
+    dev_acc: Option<Arc<Mutex<dev_artifacts::DevArtifactAcc>>>,
+    dev_output: Option<PathBuf>,
+    scan_root: String,
 }
 
 enum IndexWriteMsg {
@@ -117,8 +124,12 @@ enum IndexWriteMsg {
 }
 
 impl IndexWriter {
-    fn create(path: &Path) -> io::Result<Self> {
+    fn create(path: &Path, dev_output: Option<PathBuf>, scan_root: String) -> io::Result<Self> {
         let file = File::create(path)?;
+        let dev_acc = dev_output
+            .as_ref()
+            .map(|_| Arc::new(Mutex::new(dev_artifacts::DevArtifactAcc::new())));
+        let dev_acc_thread = dev_acc.clone();
         // Bounded so the emit thread back-pressures naturally when the
         // writer falls behind (very rare in practice — gzip at level 1
         // on JSON runs at ~200-500 MB/s, far above our record
@@ -169,6 +180,11 @@ impl IndexWriter {
                             }
                             line.extend_from_slice(b"}\n");
                             encoder.write_all(&line)?;
+                            if let Some(acc) = &dev_acc_thread {
+                                acc.lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .add(&path, size, extra_hardlink);
+                            }
                         }
                         IndexWriteMsg::Dir { path, mtime } => {
                             line.clear();
@@ -189,6 +205,9 @@ impl IndexWriter {
         Ok(IndexWriter {
             tx: Some(tx),
             handle: Some(handle),
+            dev_acc,
+            dev_output,
+            scan_root,
         })
     }
 
@@ -241,6 +260,14 @@ impl IndexWriter {
                         "index writer thread panicked",
                     ))
                 }
+            }
+        }
+        if let (Some(out), Some(acc)) = (self.dev_output.take(), self.dev_acc.take()) {
+            let guard = acc.lock().unwrap_or_else(|e| e.into_inner());
+            if let Err(err) = dev_artifacts::write_sidecar(&out, &self.scan_root, &guard) {
+                eprintln!(
+                    "[diskhound-native-scanner] dev-artifacts sidecar: write failed ({err})"
+                );
             }
         }
         Ok(())
@@ -955,7 +982,11 @@ fn run() -> Result<(), String> {
     })?;
 
     let index_writer = match &input.index_output {
-        Some(path) => match IndexWriter::create(path) {
+        Some(path) => match IndexWriter::create(
+            path,
+            input.dev_artifacts_output.clone(),
+            input.root_path.to_string_lossy().into_owned(),
+        ) {
             Ok(writer) => Some(writer),
             Err(error) => {
                 return Err(format!(
@@ -1021,6 +1052,7 @@ fn run() -> Result<(), String> {
             index_output: input.index_output.clone(),
             baseline_index: input.baseline_index.clone(),
             folder_tree_output: input.folder_tree_output.clone(),
+            dev_artifacts_output: input.dev_artifacts_output.clone(),
         },
         root_path_string: root_path_string.clone(),
         started_at_ms: scan_started_ms,
@@ -3465,6 +3497,7 @@ fn parse_args() -> Result<ScanInput, String> {
     let mut index_output: Option<PathBuf> = None;
     let mut baseline_index: Option<PathBuf> = None;
     let mut folder_tree_output: Option<PathBuf> = None;
+    let mut dev_artifacts_output: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
 
     while let Some(argument) = args.next() {
@@ -3509,6 +3542,12 @@ fn parse_args() -> Result<ScanInput, String> {
                     .ok_or_else(|| String::from("Expected a path after --folder-tree-output"))?;
                 folder_tree_output = Some(PathBuf::from(value));
             }
+            "--dev-artifacts-output" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| String::from("Expected a path after --dev-artifacts-output"))?;
+                dev_artifacts_output = Some(PathBuf::from(value));
+            }
             unknown => {
                 return Err(format!("Unknown argument: {unknown}"));
             }
@@ -3527,6 +3566,7 @@ fn parse_args() -> Result<ScanInput, String> {
         index_output,
         baseline_index,
         folder_tree_output,
+        dev_artifacts_output,
     })
 }
 

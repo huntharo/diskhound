@@ -15,6 +15,12 @@ import {
   type ScanSnapshot,
 } from "../shared/contracts";
 import { occupancyBytes } from "../shared/allocatedSize";
+import {
+  createDevAcc,
+  noteDevFile,
+  sidecarFromAcc,
+  writeDevArtifactSidecar,
+} from "../shared/devArtifactSidecar";
 
 /**
  * Parsed baseline state used by the Phase-1 smart-rescan optimization. For
@@ -104,7 +110,9 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
       indexGzip = null;
     }
   }
+  const devAcc = createDevAcc();
   const writeIndexEntry = (path: string, size: number, mtime: number, extraHardlink = false) => {
+    noteDevFile(devAcc, path, size, extraHardlink);
     if (!indexGzip) return;
     try {
       indexGzip.write(JSON.stringify(
@@ -123,11 +131,19 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
     }
   };
   const finalizeIndex = async () => {
-    if (!indexGzip) return;
-    await new Promise<void>((resolve) => {
-      indexGzip!.end(() => resolve());
-    });
-    indexGzip = null;
+    if (indexGzip) {
+      await new Promise<void>((resolve) => {
+        indexGzip!.end(() => resolve());
+      });
+      indexGzip = null;
+    }
+    if (input.devArtifactsOutput) {
+      try {
+        await writeDevArtifactSidecar(input.devArtifactsOutput, sidecarFromAcc(devAcc, rootPath));
+      } catch {
+        /* best-effort */
+      }
+    }
   };
 
   // Load baseline (Phase 1 smart-rescan). On any parse failure we silently

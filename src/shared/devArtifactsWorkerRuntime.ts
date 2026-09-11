@@ -3,6 +3,7 @@ import { Worker } from "node:worker_threads";
 
 import type { DevArtifactReport } from "./contracts";
 import type {
+  DevArtifactsRescanInput,
   DevArtifactsWorkerInput,
   DevArtifactsWorkerRequest,
   DevArtifactsWorkerResponse,
@@ -17,8 +18,8 @@ export interface RunDevArtifactsWorkerOptions {
   signal?: AbortSignal;
 }
 
-export async function runDevArtifactsWorker(
-  input: DevArtifactsWorkerInput,
+function runDevArtifactsRequest(
+  request: DevArtifactsWorkerRequest,
   options: RunDevArtifactsWorkerOptions,
 ): Promise<DevArtifactReport> {
   const worker = new Worker(options.workerPath, {
@@ -27,9 +28,8 @@ export async function runDevArtifactsWorker(
       maxYoungGenerationSizeMb: 256,
     },
   });
-  const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-  return await new Promise<DevArtifactReport>((resolve, reject) => {
+  return new Promise<DevArtifactReport>((resolve, reject) => {
     let settled = false;
 
     const settle = (callback: () => void) => {
@@ -53,7 +53,7 @@ export async function runDevArtifactsWorker(
     };
 
     const onMessage = (message: DevArtifactsWorkerResponse) => {
-      if (!message || message.requestId !== requestId) return;
+      if (!message || message.requestId !== request.requestId) return;
       void worker.terminate().finally(() => {
         if (message.type === "result") {
           settle(() => resolve(message.report));
@@ -80,12 +80,34 @@ export async function runDevArtifactsWorker(
     worker.on("error", onError);
     worker.on("exit", onExit);
     options.signal?.addEventListener("abort", handleAbort, { once: true });
-
-    const request: DevArtifactsWorkerRequest = {
-      type: "analyze",
-      requestId,
-      input,
-    };
     worker.postMessage(request);
   });
+}
+
+export async function runDevArtifactsWorker(
+  input: DevArtifactsWorkerInput,
+  options: RunDevArtifactsWorkerOptions,
+): Promise<DevArtifactReport> {
+  return runDevArtifactsRequest(
+    {
+      type: "analyze",
+      requestId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      input,
+    },
+    options,
+  );
+}
+
+export async function runDevArtifactsRescanWorker(
+  input: DevArtifactsRescanInput,
+  options: RunDevArtifactsWorkerOptions,
+): Promise<DevArtifactReport> {
+  return runDevArtifactsRequest(
+    {
+      type: "rescan",
+      requestId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      input,
+    },
+    options,
+  );
 }

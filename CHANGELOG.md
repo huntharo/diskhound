@@ -52,11 +52,12 @@ in-memory map.
 
 ### Dev cleanup
 
-The Dev Artifacts tab no longer freezes the app while it reads a
-multi-million-file index (that work runs in a worker). Overview shows a
-compact **dev cleanup** tile on the summary row. From Dev Artifacts you
-can select trees, trash selected, or trash all. Folders and Dev Artifacts
-show a staged spinner while a large index loads.
+Full scans write a compact Dev Artifacts sidecar while indexing, so the
+tab opens instantly and does not re-scan when you leave and come back.
+**Rescan trees** walks those artifact folders on disk without a full
+drive scan. Overview shows a compact tile on the summary row. You can
+select trees, trash selected, or trash all. Folders and Dev Artifacts
+show a staged spinner the first time a large index is built.
 
 ### Packaged app starts
 

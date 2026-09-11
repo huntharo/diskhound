@@ -31,3 +31,21 @@ describe("analyzeDevArtifacts", () => {
     expect(result.artifacts.some((a) => a.kind === "node-modules")).toBe(true);
   });
 });
+
+describe("reportFromSidecar", () => {
+  it("keeps dist/ only when a project marker exists", async () => {
+    const { reportFromSidecar } = await import("../devArtifactSidecar");
+    const report = reportFromSidecar({
+      version: 1,
+      rootPath: "C:\\",
+      generatedAt: 1,
+      roots: [
+        { path: "C:\\proj\\dist", kind: "js-build", size: 9_000_000, files: 10 },
+        { path: "C:\\proj\\node_modules", kind: "node-modules", size: 5_000_000, files: 20 },
+      ],
+      projects: ["C:\\proj"],
+    });
+    expect(report.totalBytes).toBe(14_000_000);
+    expect(report.artifacts.map((a) => a.kind).sort()).toEqual(["js-build", "node-modules"]);
+  });
+});

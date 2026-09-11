@@ -78,6 +78,7 @@ import {
 import { computeDiff } from "./shared/scanDiff";
 import {
   deleteIndex,
+  devArtifactsSidecarPath,
   folderTreeSidecarPath,
   indexFilePath,
   initScanIndex,
@@ -107,8 +108,14 @@ import {
 } from "./shared/folderTreeWorkerRuntime";
 import {
   resolveBundledDevArtifactsWorkerPath,
+  runDevArtifactsRescanWorker,
   runDevArtifactsWorker,
 } from "./shared/devArtifactsWorkerRuntime";
+import {
+  readDevArtifactSidecar,
+  reportFromSidecar,
+  writeDevArtifactSidecar,
+} from "./shared/devArtifactSidecar";
 import {
   deleteFullDiffCachesForScan,
   hasFullDiffCache,
@@ -164,6 +171,7 @@ type WorkerScanSession = {
   stop: () => Promise<void>;
   tempIndexPath?: string;
   tempFolderTreePath?: string;
+  tempDevArtifactsPath?: string;
   rootPath: string;
 };
 
@@ -175,6 +183,7 @@ type ActiveScanSession = (WorkerScanSession | NativeScannerSession) & {
    *  run. Renamed to `folderTreeSidecarPath(historyId)` on success so
    *  the Folders-tab loader can skip the multi-minute NDJSON re-parse. */
   tempFolderTreePath?: string;
+  tempDevArtifactsPath?: string;
   /** The scan root this session is working on. Used as the activeScans
    *  Map key so concurrent scans on different drives stay isolated. */
   rootPath: string;
@@ -1006,6 +1015,16 @@ void (async () => {
             // Folders tab — slower but correct.
           }
         }
+        if (historyId && session.tempDevArtifactsPath) {
+          try {
+            await FS.rename(
+              session.tempDevArtifactsPath,
+              devArtifactsSidecarPath(historyId),
+            );
+          } catch {
+            /* worker fallback on first Dev Artifacts open */
+          }
+        }
 
         // Rename the temp index file to match the history entry ID
         if (historyId && session.tempIndexPath) {
@@ -1192,6 +1211,9 @@ void (async () => {
     if (session.tempFolderTreePath) {
       try { await FS.unlink(session.tempFolderTreePath); } catch { /* already gone */ }
     }
+    if (session.tempDevArtifactsPath) {
+      try { await FS.unlink(session.tempDevArtifactsPath); } catch { /* already gone */ }
+    }
 
     // If the native scanner failed to launch (ENOENT, EACCES), silently
     // fall back to the JS worker so the user still gets a scan.
@@ -1244,7 +1266,9 @@ void (async () => {
   ): { session: WorkerScanSession; startingSnapshot: ScanSnapshot } => {
     const worker = new Worker(scanWorkerEntry);
     const startingSnapshot = buildRunningSnapshot(rootPath, scanOptions, "js-worker");
-    const tempIndexPath = indexFilePath(`pending-${randomUUID()}`);
+    const pendingId = `pending-${randomUUID()}`;
+    const tempIndexPath = indexFilePath(pendingId);
+    const tempDevArtifactsPath = devArtifactsSidecarPath(pendingId);
     // Windows JS-worker occupancy is logical `stat.size`. An allocated MFT
     // baseline would mix size semantics and drop `h:1` on inherit.
     const baselineIndex = process.platform === "win32"
@@ -1256,6 +1280,7 @@ void (async () => {
       active: true,
       trigger,
       tempIndexPath,
+      tempDevArtifactsPath,
       rootPath,
       stop: async () => {
         // Ask the worker to stop gracefully first
@@ -1287,6 +1312,7 @@ void (async () => {
         options: scanOptions,
         indexOutput: tempIndexPath,
         baselineIndex,
+        devArtifactsOutput: tempDevArtifactsPath,
       },
     });
 
@@ -1304,6 +1330,7 @@ void (async () => {
     // Sidecar's temp path shares the pending UUID so we can rename
     // both atomically on scan-complete to match the final history ID.
     const tempFolderTreePath = folderTreeSidecarPath(pendingScanId);
+    const tempDevArtifactsPath = devArtifactsSidecarPath(pendingScanId);
     const baselineIndex = resolveBaselineIndexFor(rootPath);
 
     // Buffer for messages that arrive before the session is fully wired
@@ -1319,6 +1346,7 @@ void (async () => {
         indexOutput: tempIndexPath,
         baselineIndex,
         folderTreeOutput: tempFolderTreePath,
+        devArtifactsOutput: tempDevArtifactsPath,
       },
       {
         onMessage: (message) => {
@@ -1367,6 +1395,7 @@ void (async () => {
         trigger,
         tempIndexPath,
         tempFolderTreePath,
+        tempDevArtifactsPath,
         rootPath,
       }) as ActiveScanSession;
 
@@ -1419,6 +1448,9 @@ void (async () => {
     }
     if (session.tempFolderTreePath) {
       try { await FS.unlink(session.tempFolderTreePath); } catch { /* already gone */ }
+    }
+    if (session.tempDevArtifactsPath) {
+      try { await FS.unlink(session.tempDevArtifactsPath); } catch { /* already gone */ }
     }
   };
 
@@ -3050,6 +3082,12 @@ void (async () => {
   const devArtifactCache = new Map<string, DevArtifactReport>();
   const devArtifactInflight = new Map<string, Promise<DevArtifactReport | null>>();
 
+  const previousSidecarFor = async (history: { id: string }[]) => {
+    const previous = history[1];
+    if (!previous) return null;
+    return readDevArtifactSidecar(devArtifactsSidecarPath(previous.id));
+  };
+
   ipcMain.handle("diskhound:get-dev-artifacts", async (_event, rootPath: string) => {
     const history = getScanHistory(rootPath);
     const current = history[0];
@@ -3058,18 +3096,40 @@ void (async () => {
     if (cached) return cached;
     const inflight = devArtifactInflight.get(current.id);
     if (inflight) return inflight;
-    const previous = history[1];
-    const pending = runDevArtifactsWorker(
-      {
-        rootPath,
-        currentIndexPath: indexFilePath(current.id),
-        previousIndexPath: previous ? indexFilePath(previous.id) : null,
-      },
-      { workerPath: devArtifactsWorkerEntry },
-    ).then((report) => {
+
+    const pending = (async () => {
+      const sidecar = await readDevArtifactSidecar(devArtifactsSidecarPath(current.id));
+      if (sidecar) {
+        const report = reportFromSidecar(sidecar, await previousSidecarFor(history));
+        devArtifactCache.set(current.id, report);
+        return report;
+      }
+      const previous = history[1];
+      const report = await runDevArtifactsWorker(
+        {
+          rootPath,
+          currentIndexPath: indexFilePath(current.id),
+          previousIndexPath: previous ? indexFilePath(previous.id) : null,
+        },
+        { workerPath: devArtifactsWorkerEntry },
+      );
       devArtifactCache.set(current.id, report);
+      try {
+        await writeDevArtifactSidecar(devArtifactsSidecarPath(current.id), {
+          version: 1,
+          rootPath: report.rootPath,
+          generatedAt: report.generatedAt,
+          roots: report.artifacts.map((a) => ({
+            path: a.path,
+            kind: a.kind,
+            size: a.size,
+            files: a.fileCount,
+          })),
+          projects: [...new Set(report.artifacts.map((a) => a.projectPath).filter((p): p is string => Boolean(p)))],
+        });
+      } catch { /* best-effort */ }
       return report;
-    }).catch((err) => {
+    })().catch((err) => {
       writeCrashLog(
         "dev-artifacts",
         err instanceof Error ? (err.stack ?? err.message) : String(err),
@@ -3080,6 +3140,30 @@ void (async () => {
     });
     devArtifactInflight.set(current.id, pending);
     return pending;
+  });
+
+  ipcMain.handle("diskhound:rescan-dev-artifacts", async (_event, rootPath: string) => {
+    const history = getScanHistory(rootPath);
+    const current = history[0];
+    if (!current) return null;
+    try {
+      const report = await runDevArtifactsRescanWorker(
+        {
+          rootPath,
+          sidecarPath: devArtifactsSidecarPath(current.id),
+          indexPath: indexFilePath(current.id),
+        },
+        { workerPath: devArtifactsWorkerEntry },
+      );
+      devArtifactCache.set(current.id, report);
+      return report;
+    } catch (err) {
+      writeCrashLog(
+        "dev-artifacts-rescan",
+        err instanceof Error ? (err.stack ?? err.message) : String(err),
+      );
+      return null;
+    }
   });
 
   // ── IPC: Duplicate Detection ────────────────────────────
@@ -3691,6 +3775,11 @@ void (async () => {
             "folder-tree-sidecar-carry-forward",
             `usn scan ${historyId} carried forward sidecar from ${mostRecent.id}`,
           );
+        }
+        const prevDev = devArtifactsSidecarPath(mostRecent.id);
+        const nextDev = devArtifactsSidecarPath(historyId);
+        if (FS_SYNC.existsSync(prevDev) && !FS_SYNC.existsSync(nextDev)) {
+          await FS.copyFile(prevDev, nextDev);
         }
       } catch (err) {
         writeCrashLog(

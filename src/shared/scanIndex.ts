@@ -27,6 +27,7 @@ const INDEX_SUFFIX = ".ndjson.gz";
 /// canonical schema. Shared here so any code that needs to clean up
 /// an index (and its sidecar) has the suffix in one place.
 const FOLDER_TREE_SIDECAR_SUFFIX = ".folder-tree.ndjson.gz";
+const DEV_ARTIFACTS_SIDECAR_SUFFIX = ".dev-artifacts.json";
 
 let indexDir = "";
 
@@ -43,6 +44,10 @@ export function indexFilePath(id: string): string {
 
 export function folderTreeSidecarPath(id: string): string {
   return Path.join(indexDir, `${id}${FOLDER_TREE_SIDECAR_SUFFIX}`);
+}
+
+export function devArtifactsSidecarPath(id: string): string {
+  return Path.join(indexDir, `${id}${DEV_ARTIFACTS_SIDECAR_SUFFIX}`);
 }
 
 /**
@@ -457,6 +462,9 @@ export async function deleteIndex(id: string): Promise<void> {
   try {
     await FSP.unlink(folderTreeSidecarPath(id));
   } catch { /* sidecar optional / already gone */ }
+  try {
+    await FSP.unlink(devArtifactsSidecarPath(id));
+  } catch { /* optional */ }
 }
 
 // ── Snapshot reconstruction from index ─────────────────────────────────────

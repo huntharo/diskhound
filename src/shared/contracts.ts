@@ -152,6 +152,8 @@ export interface ScanStartInput {
    * 4-8 GB of worker memory down to a sub-second JSON.parse.
    */
   folderTreeOutput?: string;
+  /** Compact Dev Artifacts sidecar written during the scan. */
+  devArtifactsOutput?: string;
 }
 
 export type WorkerToMainMessage =
@@ -1120,6 +1122,8 @@ export interface DiskhoundNativeApi {
   analyzeCleanup: (rootPath: string) => Promise<CleanupAnalysis>;
   searchIndex: (rootPath: string, query: IndexSearchQuery) => Promise<IndexSearchResult>;
   getDevArtifacts: (rootPath: string) => Promise<DevArtifactReport | null>;
+  /** Re-walk known artifact trees on disk (not a full drive scan). */
+  rescanDevArtifacts: (rootPath: string) => Promise<DevArtifactReport | null>;
 
   // Easy Move
   easyMove: (sourcePath: string, destinationDir: string) => Promise<EasyMoveResult>;

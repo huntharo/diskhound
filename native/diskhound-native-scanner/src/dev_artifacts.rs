@@ -1,0 +1,268 @@
+//! Compact Dev Artifacts accumulator — same classification rules as
+//! `src/shared/devArtifacts.ts`. Runs on the index-writer thread so
+//! every emitted file (MFT, walker, inherit) is classified once.
+
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io;
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::Serialize;
+
+#[derive(Clone, Copy)]
+enum Kind {
+    Worktree,
+    NodeModules,
+    PackageCache,
+    RustTarget,
+    CargoRegistry,
+    JsBuild,
+    Python,
+    GoModule,
+    Jvm,
+    Dotnet,
+    CompilerCache,
+    CmakeBuild,
+}
+
+impl Kind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Kind::Worktree => "worktree",
+            Kind::NodeModules => "node-modules",
+            Kind::PackageCache => "package-cache",
+            Kind::RustTarget => "rust-target",
+            Kind::CargoRegistry => "cargo-registry",
+            Kind::JsBuild => "js-build",
+            Kind::Python => "python",
+            Kind::GoModule => "go-module",
+            Kind::Jvm => "jvm",
+            Kind::Dotnet => "dotnet",
+            Kind::CompilerCache => "compiler-cache",
+            Kind::CmakeBuild => "cmake-build",
+        }
+    }
+}
+
+struct AccRec {
+    kind: Kind,
+    size: u64,
+    files: u64,
+}
+
+pub struct DevArtifactAcc {
+    artifacts: HashMap<String, AccRec>,
+    projects: HashSet<String>,
+}
+
+impl DevArtifactAcc {
+    pub fn new() -> Self {
+        Self {
+            artifacts: HashMap::new(),
+            projects: HashSet::new(),
+        }
+    }
+
+    pub fn add(&mut self, path: &str, size: u64, extra_hardlink: bool) {
+        if let Some(name) = file_name(path) {
+            if is_project_marker(name) {
+                if let Some(dir) = parent_path(path) {
+                    self.projects.insert(dir);
+                }
+            }
+        }
+        let Some((root, kind)) = classify(path) else {
+            return;
+        };
+        let occupancy = if extra_hardlink { 0 } else { size };
+        let entry = self.artifacts.entry(root).or_insert(AccRec {
+            kind,
+            size: 0,
+            files: 0,
+        });
+        entry.size = entry.size.saturating_add(occupancy);
+        entry.files = entry.files.saturating_add(1);
+    }
+}
+
+#[derive(Serialize)]
+struct SidecarFile {
+    version: u32,
+    #[serde(rename = "rootPath")]
+    root_path: String,
+    #[serde(rename = "generatedAt")]
+    generated_at: u64,
+    roots: Vec<SidecarRoot>,
+    projects: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct SidecarRoot {
+    path: String,
+    kind: String,
+    size: u64,
+    files: u64,
+}
+
+pub fn write_sidecar(output: &Path, scan_root: &str, acc: &DevArtifactAcc) -> io::Result<()> {
+    let mut roots: Vec<SidecarRoot> = acc
+        .artifacts
+        .iter()
+        .filter(|(_, rec)| rec.size > 0)
+        .map(|(path, rec)| SidecarRoot {
+            path: path.clone(),
+            kind: rec.kind.as_str().to_string(),
+            size: rec.size,
+            files: rec.files,
+        })
+        .collect();
+    roots.sort_by(|a, b| b.size.cmp(&a.size));
+    let generated_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let sidecar = SidecarFile {
+        version: 1,
+        root_path: scan_root.to_string(),
+        generated_at,
+        roots,
+        projects: acc.projects.iter().cloned().collect(),
+    };
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = output.with_extension("json.tmp");
+    let file = File::create(&tmp)?;
+    serde_json::to_writer(file, &sidecar).map_err(io::Error::other)?;
+    std::fs::rename(tmp, output)?;
+    Ok(())
+}
+
+fn is_project_marker(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "package.json"
+            | "cargo.toml"
+            | "go.mod"
+            | "pyproject.toml"
+            | "composer.json"
+            | "gemfile"
+            | "mix.exs"
+            | "package.swift"
+    )
+}
+
+fn classify(path: &str) -> Option<(String, Kind)> {
+    let parts = split_segments(path);
+    for i in 0..parts.len() {
+        let lower = parts[i].to_ascii_lowercase();
+        if lower == "target" {
+            if i + 1 < parts.len() {
+                let next = parts[i + 1].to_ascii_lowercase();
+                if matches!(next.as_str(), "debug" | "release" | "doc" | "incremental") {
+                    return Some((join_segments(path, &parts, i + 2), Kind::RustTarget));
+                }
+            }
+            return Some((join_segments(path, &parts, i + 1), Kind::RustTarget));
+        }
+        if lower == ".cargo" && i + 1 < parts.len() && parts[i + 1].eq_ignore_ascii_case("registry")
+        {
+            return Some((join_segments(path, &parts, i + 2), Kind::CargoRegistry));
+        }
+        if lower == "pkg" && i + 1 < parts.len() && parts[i + 1].eq_ignore_ascii_case("mod") {
+            return Some((join_segments(path, &parts, i + 2), Kind::GoModule));
+        }
+        if lower == ".cache" && i + 1 < parts.len() {
+            let next = parts[i + 1].to_ascii_lowercase();
+            if matches!(next.as_str(), "ccache" | "sccache" | "yarn" | "pnpm") {
+                let kind = if next == "yarn" || next == "pnpm" {
+                    Kind::PackageCache
+                } else {
+                    Kind::CompilerCache
+                };
+                return Some((join_segments(path, &parts, i + 2), kind));
+            }
+        }
+        if let Some(kind) = mapped_kind(&lower) {
+            let depth = if matches!(kind, Kind::Worktree) && i + 1 < parts.len() {
+                i + 2
+            } else {
+                i + 1
+            };
+            return Some((join_segments(path, &parts, depth), kind));
+        }
+        if matches!(lower.as_str(), "dist" | "build" | "out") {
+            return Some((join_segments(path, &parts, i + 1), Kind::JsBuild));
+        }
+    }
+    None
+}
+
+fn mapped_kind(lower: &str) -> Option<Kind> {
+    Some(match lower {
+        "node_modules" => Kind::NodeModules,
+        ".pnpm-store" | ".yarn" | ".bun" => Kind::PackageCache,
+        ".next" | ".nuxt" | ".output" | ".turbo" | ".parcel-cache" | ".svelte-kit"
+        | ".vercel" | ".netlify" => Kind::JsBuild,
+        "__pycache__" | ".venv" | "venv" | ".tox" | ".mypy_cache" | ".pytest_cache"
+        | ".ruff_cache" => Kind::Python,
+        ".gradle" | ".m2" => Kind::Jvm,
+        ".nuget" => Kind::Dotnet,
+        "cmakefiles" | "cmake-build-debug" | "cmake-build-release" => Kind::CmakeBuild,
+        "ccache" | "sccache" => Kind::CompilerCache,
+        ".worktrees" => Kind::Worktree,
+        _ => return None,
+    })
+}
+
+fn split_segments(path: &str) -> Vec<&str> {
+    path.split(['\\', '/']).filter(|s| !s.is_empty()).collect()
+}
+
+fn join_segments(original: &str, parts: &[&str], count: usize) -> String {
+    let take = parts.iter().take(count);
+    if original.starts_with("\\\\") || original.starts_with("//") {
+        return format!("\\\\{}", take.cloned().collect::<Vec<_>>().join("\\"));
+    }
+    let sep = if original.contains('\\') { "\\" } else { "/" };
+    let joined = take.cloned().collect::<Vec<_>>().join(sep);
+    if original.chars().nth(1) == Some(':') {
+        return joined;
+    }
+    if original.starts_with('/') {
+        return format!("/{joined}");
+    }
+    joined
+}
+
+fn file_name(path: &str) -> Option<&str> {
+    path.rsplit(['\\', '/']).find(|s| !s.is_empty())
+}
+
+fn parent_path(path: &str) -> Option<String> {
+    let idx = path.rfind(['\\', '/'])?;
+    if idx == 0 {
+        return Some(path[..=0].to_string());
+    }
+    Some(path[..idx].to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_node_modules() {
+        let (root, kind) = classify(r"C:\proj\app\node_modules\preact\dist\preact.js").unwrap();
+        assert_eq!(root, r"C:\proj\app\node_modules");
+        assert!(matches!(kind, Kind::NodeModules));
+    }
+
+    #[test]
+    fn classifies_rust_target() {
+        let (root, kind) = classify("/home/dev/diskhound/target/debug/diskhound").unwrap();
+        assert_eq!(root, "/home/dev/diskhound/target/debug");
+        assert!(matches!(kind, Kind::RustTarget));
+    }
+}

@@ -4,7 +4,7 @@ import type { DevArtifact, DevArtifactKind, DevArtifactReport, ScanSnapshot } fr
 import { DEV_KIND_LABEL } from "../../shared/devArtifacts";
 import { formatBytes, formatCount } from "../lib/format";
 import { nativeApi } from "../nativeApi";
-import { DEV_LOADING_STAGES, IndexLoadingPanel } from "./IndexLoadingPanel";
+import { DEV_LOADING_STAGES, DEV_RESCAN_STAGES, IndexLoadingPanel } from "./IndexLoadingPanel";
 import { toast } from "./Toasts";
 
 interface Props {
@@ -12,6 +12,12 @@ interface Props {
 }
 
 type GroupBy = "kind" | "project";
+
+let sessionReport: { key: string; report: DevArtifactReport } | null = null;
+
+function reportKey(root: string, finishedAt: number | null): string {
+  return `${root}|${finishedAt ?? 0}`;
+}
 
 export function DevView({ snapshot }: Props) {
   const root = snapshot.rootPath;
@@ -26,10 +32,18 @@ export function DevView({ snapshot }: Props) {
   const [trashed, setTrashed] = useState<Set<string>>(() => new Set());
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [rescanning, setRescanning] = useState(false);
 
   const load = useCallback(async () => {
     if (!root) {
       setReport(null);
+      return;
+    }
+    const key = reportKey(root, snapshot.finishedAt);
+    if (sessionReport?.key === key) {
+      setReport(sessionReport.report);
+      setLoadError(null);
+      setLoading(false);
       return;
     }
     setLoading(true);
@@ -39,6 +53,7 @@ export function DevView({ snapshot }: Props) {
     try {
       const next = await nativeApi.getDevArtifacts(root);
       setReport(next);
+      if (next) sessionReport = { key, report: next };
       if (!next) setLoadError("Could not read developer artifacts from this scan.");
     } catch (err) {
       setReport(null);
@@ -47,7 +62,7 @@ export function DevView({ snapshot }: Props) {
       setLoading(false);
       setLoadingStartedAt(null);
     }
-  }, [root, snapshot.finishedAt, snapshot.bytesSeen]);
+  }, [root, snapshot.finishedAt]);
 
   useEffect(() => {
     void load();
@@ -202,6 +217,38 @@ export function DevView({ snapshot }: Props) {
     await trashMany([path], "Move this tree to the trash?");
   };
 
+  const rescan = async () => {
+    if (!root) return;
+    const hadReport = Boolean(report);
+    setRescanning(true);
+    if (!hadReport) setLoading(true);
+    setLoadError(null);
+    setLoadingStartedAt(Date.now());
+    setLoadingElapsedSec(0);
+    try {
+      const next = await nativeApi.rescanDevArtifacts(root);
+      if (next) {
+        setReport(next);
+        sessionReport = { key: reportKey(root, snapshot.finishedAt), report: next };
+        setTrashed(new Set());
+        setSelected(new Set());
+        toast("success", "Dev artifacts refreshed from disk");
+      } else if (!hadReport) {
+        setLoadError("Rescan failed. Try a full drive scan.");
+      } else {
+        toast("error", "Rescan failed", "Try a full drive scan.");
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!hadReport) setLoadError(message);
+      else toast("error", "Rescan failed", message);
+    } finally {
+      setRescanning(false);
+      setLoading(false);
+      setLoadingStartedAt(null);
+    }
+  };
+
   if (!root || snapshot.status === "idle") {
     return (
       <div className="dev-view">
@@ -216,8 +263,8 @@ export function DevView({ snapshot }: Props) {
     return (
       <div className="dev-view">
         <IndexLoadingPanel
-          title="Reading developer artifacts"
-          stages={DEV_LOADING_STAGES}
+          title={rescanning ? "Refreshing artifact trees" : "Reading developer artifacts"}
+          stages={rescanning ? DEV_RESCAN_STAGES : DEV_LOADING_STAGES}
           elapsedSec={loadingElapsedSec}
         />
       </div>
@@ -291,9 +338,20 @@ export function DevView({ snapshot }: Props) {
           >
             Trash all
           </button>
+          <button
+            className="action-btn"
+            disabled={bulkBusy || rescanning}
+            onClick={() => void rescan()}
+            title="Re-walk known artifact trees on disk. Does not scan the whole drive."
+          >
+            Rescan trees
+          </button>
         </div>
       </div>
 
+      {rescanning && (
+        <div className="dev-rescan-banner">Refreshing artifact trees on disk… {loadingElapsedSec}s</div>
+      )}
       <div className="dev-toolbar">
         <div className="chip-group" role="radiogroup" aria-label="Group by">
           <button className={`chip ${groupBy === "kind" ? "active" : ""}`} onClick={() => setGroupBy("kind")}>By kind</button>

@@ -6,11 +6,23 @@ export interface DevArtifactsWorkerInput {
   previousIndexPath?: string | null;
 }
 
-export interface DevArtifactsWorkerRequest {
-  type: "analyze";
-  requestId: string;
-  input: DevArtifactsWorkerInput;
+export interface DevArtifactsRescanInput {
+  rootPath: string;
+  sidecarPath: string;
+  indexPath: string;
 }
+
+export type DevArtifactsWorkerRequest =
+  | {
+      type: "analyze";
+      requestId: string;
+      input: DevArtifactsWorkerInput;
+    }
+  | {
+      type: "rescan";
+      requestId: string;
+      input: DevArtifactsRescanInput;
+    };
 
 export type DevArtifactsWorkerResponse =
   | {

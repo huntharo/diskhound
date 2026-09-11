@@ -99,6 +99,8 @@ const api: DiskhoundNativeApi = {
     ipcRenderer.invoke("diskhound:search-index", rootPath, query),
   getDevArtifacts: (rootPath) =>
     ipcRenderer.invoke("diskhound:get-dev-artifacts", rootPath),
+  rescanDevArtifacts: (rootPath) =>
+    ipcRenderer.invoke("diskhound:rescan-dev-artifacts", rootPath),
 
   // Duplicate Detection
   startDuplicateScan: (rootPath, options) => ipcRenderer.invoke("diskhound:start-duplicate-scan", rootPath, options),

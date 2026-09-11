@@ -55,3 +55,10 @@ export const DEV_LOADING_STAGES: Stage[] = [
   { afterSec: 12, label: "Rolling up caches and build trees…" },
   { afterSec: 30, label: "Still reading — millions of files can take a minute." },
 ];
+
+export const DEV_RESCAN_STAGES: Stage[] = [
+  { afterSec: 0, label: "Walking known artifact trees on disk…" },
+  { afterSec: 3, label: "Refreshing node_modules, targets, and caches…" },
+  { afterSec: 12, label: "Checking project folders for new trees…" },
+  { afterSec: 30, label: "Still walking — large package trees take a bit." },
+];
