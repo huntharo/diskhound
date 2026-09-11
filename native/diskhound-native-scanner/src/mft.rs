@@ -726,11 +726,15 @@ fn read_all_mft_records(
                 logical_position += record_size as u64;
                 total_records_read += 1;
 
-                let mut rec_buf = chunk[slice_start..slice_end].to_vec();
-                if &rec_buf[0..4] != FILE_RECORD_MAGIC {
+                // Parse on the 4 MB chunk in place. USA fixup only
+                // rewrites the last 2 bytes of each sector; copying
+                // every 1 KB record was the allocation tax on an 8M
+                // record MFT (~8 GB of short-lived Vecs).
+                let rec_buf = &mut chunk[slice_start..slice_end];
+                if rec_buf.len() < 4 || &rec_buf[0..4] != FILE_RECORD_MAGIC {
                     continue;
                 }
-                if !apply_usa_fixup(&mut rec_buf, bytes_per_sector) {
+                if !apply_usa_fixup(rec_buf, bytes_per_sector) {
                     continue;
                 }
 
@@ -1091,6 +1095,13 @@ where
             hardlink_emits += rec.names.len() as u64 - 1;
         }
     }
+
+    // Path resolution is done. Drop the FRN map + dir cache before
+    // returning `out` so emit_mft_records_into_state's pre-sort peak
+    // is the output Vec only — not HashMap+Vec together.
+    drop(dir_path_cache);
+    drop(records);
+
     eprintln!(
         "[diskhound-native-scanner] mft: filtered {} NTFS system/metadata entries (pseudo-files like $MFT, $UsnJrnl that aren't visible to normal walkers)",
         system_filtered,

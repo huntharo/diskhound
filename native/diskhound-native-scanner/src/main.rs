@@ -28,6 +28,7 @@ mod mft;
 
 mod sample;
 mod dev_artifacts;
+mod index_line;
 
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{GetLastError, ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE};
@@ -501,34 +502,12 @@ impl Baseline {
         // file_records separately lets us reject these at load time.
         let mut file_records: u64 = 0;
 
-        // Typed-struct deserialization — measurably faster than the prior
-        // serde_json::Value approach because serde can stream the fields
-        // it cares about without building a dynamic tree per line.
-        //
-        // IMPORTANT: we MUST use owned `String` (not borrowed `&str`) for
-        // `p` and `t`. Windows paths in the NDJSON source contain escaped
-        // backslashes ("C:\\\\Users\\\\foo"), and serde_json cannot give
-        // back a borrowed slice when the unescaped result is shorter
-        // than the source buffer. Using `&'a str` here silently failed
-        // to deserialize EVERY record containing a backslash — which on
-        // Windows is literally every path — destroying Phase-1 mtime-skip
-        // inheritance across all v0.3.5-v0.3.10 builds (user-visible
-        // symptom: rescans took the same 20 minutes as first-time
-        // scans, and `phase: baseline load` logged `dirs=0` even when
-        // the baseline index contained 1.2M directory entries).
-        #[derive(serde::Deserialize)]
-        struct BaselineRec {
-            p: String,
-            #[serde(default)]
-            s: Option<u64>,
-            #[serde(default)]
-            t: Option<String>,
-            #[serde(default)]
-            m: Option<u64>,
-            #[serde(default)]
-            h: Option<u64>,
-        }
-
+        // Hand-rolled field extraction — same keys the IndexWriter
+        // emits (`p`/`s`/`m`/`t`/`h`). Owned `String` for `p` after
+        // unescape: Windows paths contain `\\` in the NDJSON source,
+        // and a borrowed slice of the raw line is the wrong path
+        // (v0.3.5–v0.3.10 serde `&str` bug: every backslash record
+        // failed, Phase-1 inheritance saw `dirs=0`).
         for line in reader.lines() {
             let Ok(line) = line else { continue };
             if line.is_empty() {
@@ -539,24 +518,24 @@ impl Baseline {
                 on_heartbeat(lines_read);
             }
 
-            let Ok(rec) = serde_json::from_str::<BaselineRec>(&line) else {
+            let Some(rec) = index_line::parse_index_line(&line) else {
                 continue;
             };
-            let is_dir = rec.t.as_deref() == Some("d");
-            let normalized = normalize_path(Path::new(&rec.p));
+            let is_dir = rec.is_dir;
+            let normalized = normalize_path(Path::new(&rec.path));
 
             if is_dir {
-                let mtime = rec.m.unwrap_or(0);
+                let mtime = rec.mtime.unwrap_or(0);
                 dir_mtimes.insert(normalized.clone(), mtime);
                 dirs.insert(normalized);
                 continue;
             }
 
-            let Some(size) = rec.s else {
+            let Some(size) = rec.size else {
                 continue;
             };
             file_records += 1;
-            let extra_hardlink = rec.h == Some(1);
+            let extra_hardlink = rec.extra_hardlink;
             if extra_hardlink {
                 extra_hardlink_paths.insert(normalized.clone());
             }
@@ -565,7 +544,7 @@ impl Baseline {
             // Bubble the file's size/count up to every ancestor directory.
             // This gives us O(1) "how much is under dir D" lookups during
             // the walk without having to store individual file records.
-            let mut current = Path::new(&rec.p).parent().map(normalize_path);
+            let mut current = Path::new(&rec.path).parent().map(normalize_path);
             while let Some(dir) = current {
                 if dir.is_empty() {
                     break;
@@ -700,18 +679,18 @@ fn stream_inherited_files_into(
         if line.is_empty() {
             continue;
         }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+        let Some(rec) = index_line::parse_index_line(&line) else {
             continue;
         };
-        let Some(path_str) = value.get("p").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let is_dir = value.get("t").and_then(|v| v.as_str()) == Some("d");
-        if is_dir {
+        if rec.is_dir {
             // Dir entries were already emitted during the walk's inherit
             // path, so we don't re-emit them here.
             continue;
         }
+        let Some(size) = rec.size else {
+            continue;
+        };
+        let path_str = rec.path.as_str();
 
         let normalized = normalize_path(Path::new(path_str));
         let under_inherit = normalized_prefixes
@@ -721,11 +700,8 @@ fn stream_inherited_files_into(
             continue;
         }
 
-        let Some(size) = value.get("s").and_then(|v| v.as_u64()) else {
-            continue;
-        };
-        let mtime = value.get("m").and_then(|v| v.as_u64()).unwrap_or(0);
-        let extra_hardlink = value.get("h").and_then(|v| v.as_u64()) == Some(1);
+        let mtime = rec.mtime.unwrap_or(0);
+        let extra_hardlink = rec.extra_hardlink;
 
         let name = Path::new(path_str)
             .file_name()
@@ -4334,4 +4310,91 @@ fn windows_extended_path(path: &Path) -> String {
     }
 
     format!(r"\\?\{}", normalized)
+}
+
+#[cfg(test)]
+mod index_line_parse_tests {
+    use super::index_line::parse_index_line;
+    use super::{append_json_escaped, append_u64_decimal};
+
+    fn writer_file_line(path: &str, size: u64, mtime: u64, extra_hardlink: bool) -> String {
+        let mut line = Vec::new();
+        line.extend_from_slice(br#"{"p":""#);
+        append_json_escaped(&mut line, path.as_bytes());
+        line.extend_from_slice(br#"","s":"#);
+        append_u64_decimal(&mut line, size);
+        line.extend_from_slice(br#","m":"#);
+        append_u64_decimal(&mut line, mtime);
+        if extra_hardlink {
+            line.extend_from_slice(br#","h":1"#);
+        }
+        line.push(b'}');
+        String::from_utf8(line).unwrap()
+    }
+
+    fn writer_dir_line(path: &str, mtime: u64) -> String {
+        let mut line = Vec::new();
+        line.extend_from_slice(br#"{"p":""#);
+        append_json_escaped(&mut line, path.as_bytes());
+        line.extend_from_slice(br#"","t":"d","m":"#);
+        append_u64_decimal(&mut line, mtime);
+        line.push(b'}');
+        String::from_utf8(line).unwrap()
+    }
+
+    #[test]
+    fn canonical_file_unescapes_windows_path() {
+        let line = writer_file_line(r"C:\Users\foo.txt", 123, 456, false);
+        let rec = parse_index_line(&line).unwrap();
+        assert_eq!(rec.path, r"C:\Users\foo.txt");
+        assert_eq!(rec.size, Some(123));
+        assert_eq!(rec.mtime, Some(456));
+        assert!(!rec.is_dir);
+        assert!(!rec.extra_hardlink);
+    }
+
+    #[test]
+    fn canonical_file_keeps_hardlink_flag() {
+        let line = writer_file_line(r"C:\cache\a", 10, 1, true);
+        let rec = parse_index_line(&line).unwrap();
+        assert!(rec.extra_hardlink);
+        assert_eq!(rec.size, Some(10));
+    }
+
+    #[test]
+    fn canonical_dir_line() {
+        let line = writer_dir_line(r"C:\Users", 99);
+        let rec = parse_index_line(&line).unwrap();
+        assert!(rec.is_dir);
+        assert_eq!(rec.path, r"C:\Users");
+        assert_eq!(rec.mtime, Some(99));
+        assert_eq!(rec.size, None);
+        assert!(!rec.extra_hardlink);
+    }
+
+    #[test]
+    fn odd_field_order_still_parses() {
+        let line = r#"{"m":9,"t":"d","p":"D:\\proj"}"#;
+        let rec = parse_index_line(line).unwrap();
+        assert!(rec.is_dir);
+        assert_eq!(rec.path, r"D:\proj");
+        assert_eq!(rec.mtime, Some(9));
+    }
+
+    #[test]
+    fn odd_file_order_keeps_occupancy_flag() {
+        let line = r#"{"h":1,"s":50,"p":"C:\\a.bin","m":3}"#;
+        let rec = parse_index_line(line).unwrap();
+        assert!(!rec.is_dir);
+        assert_eq!(rec.path, r"C:\a.bin");
+        assert_eq!(rec.size, Some(50));
+        assert!(rec.extra_hardlink);
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(parse_index_line("not json").is_none());
+        assert!(parse_index_line("").is_none());
+        assert!(parse_index_line(r#"{"s":1}"#).is_none());
+    }
 }

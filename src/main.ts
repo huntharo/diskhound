@@ -107,6 +107,7 @@ import {
   resolveBundledFolderTreeWorkerPath,
   runFolderTreeWorker,
 } from "./shared/folderTreeWorkerRuntime";
+import { parseFolderTreeSidecarLine } from "./shared/folderTreeSidecarParse";
 import {
   resolveBundledDevArtifactsWorkerPath,
   runDevArtifactsClassifyWorker,
@@ -2714,24 +2715,9 @@ void (async () => {
       for await (const line of rl) {
         if (!line) continue;
         linesRead++;
-        let rec: {
-          k?: string;
-          d?: [string, number, number][];
-          f?: [string, number, number][];
-        };
-        try { rec = JSON.parse(line); } catch { parseFailures++; continue; }
-        if (typeof rec.k !== "string") continue;
-        const dirs = Array.isArray(rec.d)
-          ? rec.d
-              .filter((row) => Array.isArray(row) && row.length >= 3)
-              .map(([path, size, fileCount]) => ({ path, size, fileCount }))
-          : [];
-        const files = Array.isArray(rec.f)
-          ? rec.f
-              .filter((row) => Array.isArray(row) && row.length >= 3)
-              .map(([name, size, modifiedAt]) => ({ name, size, modifiedAt }))
-          : [];
-        tree.set(rec.k, { dirs, files });
+        const parsed = parseFolderTreeSidecarLine(line);
+        if (!parsed) { parseFailures++; continue; }
+        tree.set(parsed.key, { dirs: parsed.dirs, files: parsed.files });
         if (linesRead % 4_000 === 0) {
           await new Promise<void>((resolve) => setImmediate(resolve));
         }

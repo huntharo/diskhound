@@ -15,6 +15,7 @@ import type {
   ScanSnapshot,
 } from "./contracts";
 import { createIdleScanSnapshot } from "./contracts";
+import { parseIndexLine } from "./indexLineParse";
 import { normPath } from "./pathUtils";
 import { attachPipeErrorHandlers } from "./streamSafety";
 
@@ -559,23 +560,20 @@ export async function buildSnapshotFromIndex(
   try {
   for await (const line of rl) {
     if (!line) continue;
-    let rec: { p?: string; s?: number; m?: number; t?: string };
-    try { rec = JSON.parse(line); } catch { continue; }
-    if (!rec || typeof rec.p !== "string") continue;
+    const rec = parseIndexLine(line);
+    if (!rec) continue;
 
     if (rec.t === "d") {
       directorySet.add(normPath(rec.p));
       continue;
     }
 
-    if (typeof rec.s !== "number" || typeof rec.m !== "number") continue;
-
     // Skip files outside the scan root (defensive — index should be root-
     // scoped already, but the incremental path may leave cruft).
     const fileNorm = normPath(rec.p);
     if (!fileNorm.startsWith(normPath(rootNorm))) continue;
 
-    const occupancy = (rec as { h?: number }).h === 1 ? 0 : rec.s;
+    const occupancy = rec.h === 1 ? 0 : rec.s;
     filesVisited += 1;
     bytesSeen += occupancy;
 
@@ -608,7 +606,7 @@ export async function buildSnapshotFromIndex(
 
     // Top-N largest files with a bounded heap-like list.
     // Extra hardlinks keep their display size but must not occupy a top-N slot.
-    if ((rec as { h?: number }).h === 1) {
+    if (rec.h === 1) {
       continue;
     }
     if (largestFiles.length < TOP_FILE_LIMIT) {

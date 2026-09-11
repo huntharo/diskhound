@@ -466,7 +466,8 @@ async function applyDeltasToIndex(
 
   await FSP.mkdir(Path.dirname(newPath), { recursive: true });
 
-  const gzOut = createGzip({ level: 6 });
+  // Match the native IndexWriter: Compression::fast() is level 1.
+  const gzOut = createGzip({ level: 1 });
   const writeStream = createWriteStream(newPath);
   // Attach error listeners BEFORE pipe() — pipe() doesn't propagate
   // errors, so an EPERM/ENOSPC on writeStream or a gzip error becomes
