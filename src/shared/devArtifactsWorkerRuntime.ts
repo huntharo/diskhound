@@ -3,6 +3,7 @@ import { Worker } from "node:worker_threads";
 
 import type { DevArtifactReport } from "./contracts";
 import type {
+  DevArtifactsClassifyInput,
   DevArtifactsRescanInput,
   DevArtifactsWorkerInput,
   DevArtifactsWorkerRequest,
@@ -105,6 +106,20 @@ export async function runDevArtifactsRescanWorker(
   return runDevArtifactsRequest(
     {
       type: "rescan",
+      requestId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      input,
+    },
+    options,
+  );
+}
+
+export async function runDevArtifactsClassifyWorker(
+  input: DevArtifactsClassifyInput,
+  options: RunDevArtifactsWorkerOptions,
+): Promise<DevArtifactReport> {
+  return runDevArtifactsRequest(
+    {
+      type: "classify",
       requestId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       input,
     },

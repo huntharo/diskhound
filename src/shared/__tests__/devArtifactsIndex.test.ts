@@ -1,6 +1,10 @@
+import { createWriteStream } from "node:fs";
 import * as FSP from "node:fs/promises";
 import * as OS from "node:os";
 import * as Path from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { createGzip } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { analyzeDevArtifacts } from "../devArtifactsIndex";
@@ -47,6 +51,49 @@ describe("sidecarFromDirectoryRoots", () => {
       "C:\\proj\\node_modules",
       "C:\\proj\\target",
     ]);
+  });
+});
+
+describe("sidecarFromFolderTreeFile", () => {
+  it("classifies from a folder-tree sidecar without an index", async () => {
+    const { sidecarFromFolderTreeFile, reportFromSidecar } = await import("../devArtifactSidecar");
+    const treePath = Path.join(tempDir, "tree.folder-tree.ndjson.gz");
+    const gz = createGzip({ level: 4 });
+    const out = createWriteStream(treePath);
+    await pipeline(
+      Readable.from([
+        `${JSON.stringify({
+          k: "C:\\proj",
+          d: [
+            ["C:\\proj\\target", 80_000_000, 400],
+            ["C:\\proj\\node_modules", 20_000_000, 100],
+          ],
+          f: [["package.json", 200, 1]],
+        })}\n`,
+        `${JSON.stringify({
+          k: "C:\\proj\\target",
+          d: [["C:\\proj\\target\\debug", 50_000_000, 300]],
+          f: [],
+        })}\n`,
+      ]),
+      gz,
+      out,
+    );
+
+    const sidecar = await sidecarFromFolderTreeFile(treePath, "C:\\");
+    expect(sidecar).not.toBeNull();
+    const report = reportFromSidecar(sidecar!);
+    expect(report.totalBytes).toBe(100_000_000);
+    expect(report.artifacts.map((a) => a.path).sort()).toEqual([
+      "C:\\proj\\node_modules",
+      "C:\\proj\\target",
+    ]);
+    expect(report.projectCount).toBe(1);
+  });
+
+  it("returns null when the folder-tree sidecar is missing", async () => {
+    const { sidecarFromFolderTreeFile } = await import("../devArtifactSidecar");
+    await expect(sidecarFromFolderTreeFile(Path.join(tempDir, "missing.ndjson.gz"), "C:\\")).resolves.toBeNull();
   });
 });
 

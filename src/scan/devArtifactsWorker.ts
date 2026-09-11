@@ -5,34 +5,53 @@ import {
   readDevArtifactSidecar,
   reportFromSidecar,
   rescanDevArtifactSidecar,
+  sidecarFromFolderTreeFile,
   writeDevArtifactSidecar,
 } from "../shared/devArtifactSidecar";
 import type {
+  DevArtifactsClassifyInput,
+  DevArtifactsRescanInput,
   DevArtifactsWorkerRequest,
   DevArtifactsWorkerResponse,
 } from "../shared/devArtifactsWorkerProtocol";
 
+async function classifyFromFolderTree(input: DevArtifactsClassifyInput) {
+  const sidecar = await sidecarFromFolderTreeFile(input.folderTreePath, input.rootPath);
+  if (!sidecar) {
+    throw new Error("Folder tree sidecar had no directory rollups");
+  }
+  await writeDevArtifactSidecar(input.destSidecarPath, sidecar);
+  const previous = input.previousSidecarPath
+    ? await readDevArtifactSidecar(input.previousSidecarPath)
+    : null;
+  return reportFromSidecar(sidecar, previous);
+}
+
+async function rescanKnownTrees(input: DevArtifactsRescanInput) {
+  const sidecar = await readDevArtifactSidecar(input.sidecarPath);
+  if (!sidecar) {
+    throw new Error(
+      "No Dev Artifacts sidecar to refresh. Run a full scan, or open Dev Artifacts after Folders has loaded.",
+    );
+  }
+  const next = await rescanDevArtifactSidecar(sidecar);
+  await writeDevArtifactSidecar(input.sidecarPath, next);
+  return reportFromSidecar(next, sidecar);
+}
+
 if (parentPort) {
   parentPort.on("message", (message: DevArtifactsWorkerRequest) => {
-    if (!message || (message.type !== "analyze" && message.type !== "rescan")) return;
+    if (!message || (message.type !== "analyze" && message.type !== "rescan" && message.type !== "classify")) return;
 
-    const work = message.type === "analyze"
-      ? analyzeDevArtifacts(
-          message.input.rootPath,
-          message.input.currentIndexPath,
-          message.input.previousIndexPath,
-        )
-      : (async () => {
-          const sidecar = await readDevArtifactSidecar(message.input.sidecarPath);
-          if (!sidecar) {
-            throw new Error(
-              "No Dev Artifacts sidecar to refresh. Run a full scan, or open Dev Artifacts after Folders has loaded.",
-            );
-          }
-          const next = await rescanDevArtifactSidecar(sidecar);
-          await writeDevArtifactSidecar(message.input.sidecarPath, next);
-          return reportFromSidecar(next, sidecar);
-        })();
+    const work = message.type === "classify"
+      ? classifyFromFolderTree(message.input)
+      : message.type === "rescan"
+        ? rescanKnownTrees(message.input)
+        : analyzeDevArtifacts(
+            message.input.rootPath,
+            message.input.currentIndexPath,
+            message.input.previousIndexPath,
+          );
 
     void work
       .then((report) => {

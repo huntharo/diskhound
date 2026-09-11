@@ -108,15 +108,12 @@ import {
 } from "./shared/folderTreeWorkerRuntime";
 import {
   resolveBundledDevArtifactsWorkerPath,
+  runDevArtifactsClassifyWorker,
   runDevArtifactsRescanWorker,
 } from "./shared/devArtifactsWorkerRuntime";
 import {
-  isProjectMarkerName,
   readDevArtifactSidecar,
   reportFromSidecar,
-  sidecarFromDirectoryRoots,
-  writeDevArtifactSidecar,
-  type DevArtifactSidecar,
 } from "./shared/devArtifactSidecar";
 import {
   deleteFullDiffCachesForScan,
@@ -3090,26 +3087,6 @@ void (async () => {
     return readDevArtifactSidecar(devArtifactsSidecarPath(previous.id));
   };
 
-  const persistDevSidecar = async (scanId: string, sidecar: DevArtifactSidecar) => {
-    try {
-      await writeDevArtifactSidecar(devArtifactsSidecarPath(scanId), sidecar);
-    } catch { /* best-effort */ }
-  };
-
-  const sidecarFromFolderTree = (tree: FolderTree, treeRoot: string) => {
-    const dirs: Array<{ path: string; size: number; files: number }> = [];
-    const projects: string[] = [];
-    for (const [parent, node] of tree) {
-      for (const file of node.files) {
-        if (isProjectMarkerName(file.name)) projects.push(parent);
-      }
-      for (const dir of node.dirs) {
-        dirs.push({ path: dir.path, size: dir.size, files: dir.fileCount });
-      }
-    }
-    return sidecarFromDirectoryRoots(treeRoot, dirs, projects);
-  };
-
   ipcMain.handle("diskhound:get-dev-artifacts", async (_event, rootPath: string, options?: { sidecarOnly?: boolean }) => {
     const history = getScanHistory(rootPath);
     const current = history[0];
@@ -3127,36 +3104,31 @@ void (async () => {
     if (inflight) return inflight;
 
     const pending = (async () => {
-      const previous = await previousSidecarFor(history);
       const sidecar = await readDevArtifactSidecar(devArtifactsSidecarPath(current.id));
       if (sidecar) {
-        const report = reportFromSidecar(sidecar, previous);
+        const report = reportFromSidecar(sidecar, await previousSidecarFor(history));
         devArtifactCache.set(current.id, report);
         return report;
       }
 
-      // Old scans have no Dev sidecar. Classify directory rollups from
-      // the folder tree (RAM or its sidecar) — never stream the 7M-file
-      // index. That fallback was slower than a native full scan.
-      const cachedTree = folderTreeCache.get(current.id);
-      let tree = cachedTree && cachedTree.size > 0 ? cachedTree : null;
-      if (tree) {
-        touchFolderTree(current.id);
-      } else if (FS_SYNC.existsSync(folderTreeSidecarPath(current.id))) {
-        tree = await ensureFolderTree(current.id, rootPath);
-      }
-      if (tree && tree.size > 0) {
-        const fromTree = sidecarFromFolderTree(tree, rootPath);
-        const report = reportFromSidecar(fromTree, previous);
-        devArtifactCache.set(current.id, report);
-        await persistDevSidecar(current.id, fromTree);
-        return report;
-      }
+      // Old scans have no Dev sidecar. Classify from the folder-tree
+      // sidecar in a worker — never stream the 7M-file index, and
+      // never walk 1M+ folder-tree entries on the main thread.
+      const treePath = folderTreeSidecarPath(current.id);
+      if (!FS_SYNC.existsSync(treePath)) return null;
 
-      // Do not cache an empty report. Opening Dev before Folders
-      // (or before a folder-tree sidecar exists) must be able to
-      // succeed later in the same session.
-      return null;
+      writeCrashLog("dev-artifacts-classify", `scanId=${current.id} via folder-tree worker`);
+      const report = await runDevArtifactsClassifyWorker(
+        {
+          rootPath,
+          folderTreePath: treePath,
+          destSidecarPath: devArtifactsSidecarPath(current.id),
+          previousSidecarPath: history[1] ? devArtifactsSidecarPath(history[1].id) : null,
+        },
+        { workerPath: devArtifactsWorkerEntry },
+      );
+      devArtifactCache.set(current.id, report);
+      return report;
     })().catch((err) => {
       writeCrashLog(
         "dev-artifacts",

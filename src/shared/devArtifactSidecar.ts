@@ -1,10 +1,13 @@
 import * as FS from "node:fs";
 import * as FSP from "node:fs/promises";
 import * as Path from "node:path";
+import { createInterface } from "node:readline";
+import { createGunzip } from "node:zlib";
 
 import type { DevArtifact, DevArtifactKind, DevArtifactReport } from "./contracts";
 import { classifyArtifactPath } from "./devArtifacts";
 import { occupancyBytes } from "./allocatedSize";
+import { attachPipeErrorHandlers } from "./streamSafety";
 
 export const DEV_ARTIFACTS_SIDECAR_SUFFIX = ".dev-artifacts.json";
 
@@ -132,6 +135,65 @@ export function sidecarFromDirectoryRoots(
     if (!survivors.has(path)) acc.artifacts.delete(path);
   }
   return sidecarFromAcc(acc, rootPath);
+}
+
+/**
+ * Classify from a folder-tree sidecar (NDJSON.gz). Used for scans that
+ * predate `.dev-artifacts.json`. Never opens the 7M-file index.
+ * Returns null when the file is missing, unreadable, or has no parents.
+ */
+export async function sidecarFromFolderTreeFile(
+  filePath: string,
+  treeRoot: string,
+): Promise<DevArtifactSidecar | null> {
+  if (!FS.existsSync(filePath)) return null;
+
+  const dirs: Array<{ path: string; size: number; files: number }> = [];
+  const projects: string[] = [];
+  let parents = 0;
+
+  const gunzip = createGunzip();
+  const source = FS.createReadStream(filePath);
+  attachPipeErrorHandlers([source, gunzip]);
+  source.pipe(gunzip);
+  const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
+
+  try {
+    for await (const line of rl) {
+      if (!line) continue;
+      let rec: {
+        k?: string;
+        d?: [string, number, number][];
+        f?: [string, number, number][];
+      };
+      try { rec = JSON.parse(line); } catch { continue; }
+      if (typeof rec.k !== "string") continue;
+      parents += 1;
+      if (Array.isArray(rec.f)) {
+        for (const row of rec.f) {
+          if (Array.isArray(row) && typeof row[0] === "string" && isProjectMarkerName(row[0])) {
+            projects.push(rec.k);
+          }
+        }
+      }
+      if (!Array.isArray(rec.d)) continue;
+      for (const row of rec.d) {
+        if (!Array.isArray(row) || row.length < 3) continue;
+        const [path, size, files] = row;
+        if (typeof path !== "string" || typeof size !== "number" || typeof files !== "number") continue;
+        if (size <= 0) continue;
+        dirs.push({ path, size, files });
+      }
+    }
+  } catch {
+    return null;
+  } finally {
+    try { gunzip.destroy(); } catch { /* ok */ }
+    try { source.destroy(); } catch { /* ok */ }
+  }
+
+  if (parents === 0) return null;
+  return sidecarFromDirectoryRoots(treeRoot, dirs, projects);
 }
 
 export function sidecarFromAcc(acc: DevAcc, rootPath: string): DevArtifactSidecar {

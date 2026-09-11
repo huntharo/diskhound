@@ -12,6 +12,13 @@ export interface DevArtifactsRescanInput {
   indexPath: string;
 }
 
+export interface DevArtifactsClassifyInput {
+  rootPath: string;
+  folderTreePath: string;
+  destSidecarPath: string;
+  previousSidecarPath?: string | null;
+}
+
 export type DevArtifactsWorkerRequest =
   | {
       type: "analyze";
@@ -22,6 +29,11 @@ export type DevArtifactsWorkerRequest =
       type: "rescan";
       requestId: string;
       input: DevArtifactsRescanInput;
+    }
+  | {
+      type: "classify";
+      requestId: string;
+      input: DevArtifactsClassifyInput;
     };
 
 export type DevArtifactsWorkerResponse =
