@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 
-import type { ExtensionBucket, ScanDiffResult, ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
+import type { CleanupAnalysis, DevArtifactReport, ExtensionBucket, ScanDiffResult, ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
 import {
   deletedPathLabel,
   deletedPathTitle,
@@ -30,6 +30,7 @@ interface Props {
    *  card's "View details" affordance so users can drill into the
    *  full diff without hunting for the sidebar tab. */
   onViewChanges?: () => void;
+  onViewDev?: () => void;
   /**
    * Scan progress percent (0–99) when a scan is live and we have
    * enough drive metadata to compute a ratio. null otherwise — the
@@ -98,7 +99,7 @@ function getInitialShowFolders(): boolean {
 // canvas render performance.
 const DENSE_TREEMAP_LIMIT = 5_000;
 
-export function Overview({ snapshot, onFilterExtension, onViewChanges, scanPercent }: Props) {
+export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev, scanPercent }: Props) {
   const { bytesSeen, filesVisited, directoriesVisited, skippedEntries } = snapshot;
   // Live-ticking elapsed: during a running scan the snapshot only updates
   // ~5x/second via progress messages, so the "elapsed" metric would
@@ -273,8 +274,14 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, scanPerce
   return (
     <div className="overview">
       <MonitoringNudge />
+      <OverviewInsights snapshot={snapshot} onViewDev={onViewDev} />
       <div className="metrics-strip">
-        <Metric value={formatBytes(bytesSeen)} label="scanned" accent />
+        <Metric
+          value={formatBytes(bytesSeen)}
+          label="on disk"
+          accent
+          title="Size on disk after sparse holes and filesystem compression"
+        />
         <Metric value={formatCount(filesVisited)} label="files" />
         <Metric value={formatCount(directoriesVisited)} label="dirs" />
         <Metric value={formatCount(skippedEntries)} label="skipped" />
@@ -720,9 +727,9 @@ function FeaturedFileCard({ item, rank, isBusy, protectedBy, deletedRecord, onRe
   );
 }
 
-function Metric({ value, label, accent }: { value: string; label: string; accent?: boolean }) {
+function Metric({ value, label, accent, title }: { value: string; label: string; accent?: boolean; title?: string }) {
   return (
-    <div className="metric">
+    <div className="metric" title={title}>
       <span className={`metric-value ${accent ? "accent" : ""}`}>{value}</span>
       <span className="metric-label">{label}</span>
     </div>
@@ -732,7 +739,9 @@ function Metric({ value, label, accent }: { value: string; label: string; accent
 function LatestScanSummary({ diff, onViewDetails }: { diff: ScanDiffResult; onViewDetails?: () => void }) {
   const grew = diff.totalBytesDelta > 0;
   const bytesLabel = formatBytes(Math.abs(diff.totalBytesDelta));
-  const title = diff.totalBytesDelta === 0
+  const title = diff.sizeSemanticsChanged
+    ? "Size accounting changed to size on disk — run one more scan before comparing"
+    : diff.totalBytesDelta === 0
     ? "No size change since the previous scan"
     : grew
       ? `${bytesLabel} added since the previous scan`
@@ -747,7 +756,7 @@ function LatestScanSummary({ diff, onViewDetails }: { diff: ScanDiffResult; onVi
     .slice(0, 2);
 
   return (
-    <div className={`scan-summary-card ${grew ? "grew" : diff.totalBytesDelta < 0 ? "freed" : "flat"}`}>
+    <div className={`scan-summary-card ${diff.sizeSemanticsChanged ? "flat" : grew ? "grew" : diff.totalBytesDelta < 0 ? "freed" : "flat"}`}>
       <div className="scan-summary-main">
         <div className="scan-summary-kicker">Latest scan summary</div>
         <div className="scan-summary-title">{title}</div>
@@ -792,6 +801,57 @@ function LatestScanSummary({ diff, onViewDetails }: { diff: ScanDiffResult; onVi
  * it previously (persisted via localStorage). Clicking "Enable" flips the
  * setting on and dismisses the banner; clicking the × just dismisses.
  */
+function OverviewInsights({ snapshot, onViewDev }: { snapshot: ScanSnapshot; onViewDev?: () => void }) {
+  const [dev, setDev] = useState<DevArtifactReport | null>(null);
+  const [cleanup, setCleanup] = useState<CleanupAnalysis | null>(null);
+
+  useEffect(() => {
+    if (!snapshot.rootPath || snapshot.status !== "done") {
+      setDev(null);
+      setCleanup(null);
+      return;
+    }
+    let cancelled = false;
+    void Promise.all([
+      nativeApi.getDevArtifacts(snapshot.rootPath),
+      nativeApi.analyzeCleanup(snapshot.rootPath),
+    ]).then(([devReport, cleanupReport]) => {
+      if (cancelled) return;
+      setDev(devReport);
+      setCleanup(cleanupReport);
+    });
+    return () => { cancelled = true; };
+  }, [snapshot.rootPath, snapshot.finishedAt, snapshot.status]);
+
+  if (!dev && !cleanup) return null;
+  const showDev = (dev?.totalBytes ?? 0) >= 512 * 1024 * 1024;
+  const showCleanup = (cleanup?.totalReclaimableBytes ?? 0) >= 256 * 1024 * 1024;
+  if (!showDev && !showCleanup) return null;
+
+  return (
+    <div className="overview-insight-row">
+      {showDev && dev && (
+        <button className="overview-insight-card" onClick={() => onViewDev?.()}>
+          <span className="overview-insight-kicker">Developer artifacts</span>
+          <span className="overview-insight-value">{formatBytes(dev.totalBytes)}</span>
+          <span className="overview-insight-sub">
+            {formatCount(dev.projectCount)} projects · worktrees, targets, node_modules
+          </span>
+        </button>
+      )}
+      {showCleanup && cleanup && (
+        <button className="overview-insight-card" onClick={() => onViewDev?.()}>
+          <span className="overview-insight-kicker">Cleanup from this scan</span>
+          <span className="overview-insight-value">{formatBytes(cleanup.totalReclaimableBytes)}</span>
+          <span className="overview-insight-sub">
+            {formatCount(cleanup.suggestions.length)} groups · temps, caches, old installers
+          </span>
+        </button>
+      )}
+    </div>
+  );
+}
+
 function MonitoringNudge() {
   const [monitoringEnabled, setMonitoringEnabled] = useState<boolean | null>(null);
   const [dismissed, setDismissed] = useState<boolean>(() => {

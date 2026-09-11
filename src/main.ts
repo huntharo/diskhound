@@ -24,7 +24,6 @@ import {
   normalizeAppSettings,
   type AffinityRule,
   type AppSettings,
-  type DirectoryHotspot,
   type DiskIoSnapshot,
   type FullDiffStatus,
   type FullDiffResult,
@@ -34,6 +33,9 @@ import {
   type ScanFileRecord,
   type ScanOptions,
   type ScanSnapshot,
+  ALLOCATED_SIZE_SEMANTICS,
+  indexUsesAllocatedSize,
+  sizeSemanticsCompatible,
   type SystemMemorySnapshot,
   type ToastMessage,
   type UpdateChannel,
@@ -90,9 +92,8 @@ import { normPath } from "./shared/pathUtils";
 import {
   findExcludedFolderActionBlocker,
   isHiddenExcludedPath,
-  isPathExcluded,
 } from "./shared/pathProtection";
-import { analyzeForCleanup } from "./shared/suggestions";
+
 import { killProcess as killProcessImpl, sampleSystemMemory } from "./shared/processMonitor";
 import {
   computeFullDiffFromIndexFiles,
@@ -120,6 +121,10 @@ import {
 } from "./usnMonitor";
 import { setCursor, volumeForPath } from "./shared/usnCursorStore";
 import { resolveNativeScannerBinary } from "./nativeScanner";
+import { initNativeProcessSample } from "./nativeProcessSample";
+import { searchIndexFile } from "./shared/scanIndex";
+import { analyzeCleanupFromIndex } from "./shared/suggestions";
+import { analyzeDevArtifacts } from "./shared/devArtifacts";
 import { createNativeScannerSession, type NativeScannerSession } from "./nativeScanner";
 import * as elevationModule from "./elevation";
 
@@ -193,6 +198,10 @@ let windowStateStore: WindowStateStore | null = null;
 let widgetWindowStateStore: WindowStateStore | null = null;
 // Track whether the user explicitly quit (vs. close-to-tray)
 let isQuitting = false;
+/** Second instance arrived before createWindow finished. */
+let pendingSecondInstanceFocus = false;
+/** Filled after createWindow is defined inside whenReady. */
+let createMainWindowFn: (() => Promise<void>) | null = null;
 
 app.commandLine.appendSwitch("enable-gpu-rasterization");
 app.commandLine.appendSwitch("enable-oop-rasterization");
@@ -520,13 +529,60 @@ const singleInstanceRelaunchedAsAdmin = process.argv.includes("--relaunched-as-a
 const WINDOWS_LOCK_RETRY_MS = 5_000; // 20 × 250 ms polls
 const NORMAL_LOCK_RETRY_MS = 1_500; //  6 × 250 ms polls — covers brief races without blocking duplicate-launch UX
 
+function bringWindowToFront(win: BrowserWindow): void {
+  if (win.isDestroyed()) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.moveTop();
+  win.focus();
+  if (process.platform === "win32") {
+    app.focus({ steal: true });
+    win.setAlwaysOnTop(true);
+    win.setAlwaysOnTop(false);
+  }
+}
+
+function focusOrShowMainWindow(): void {
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) {
+    pendingSecondInstanceFocus = true;
+    if (createMainWindowFn) void createMainWindowFn();
+    return;
+  }
+  bringWindowToFront(win);
+}
+
+function hideMainWindow(): void {
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) return;
+  win.hide();
+}
+
 function registerSecondInstanceHandler(): void {
   app.on(SECOND_INSTANCE_FOCUS_EVENT, () => {
-    if (!mainWindow) return;
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    if (!mainWindow.isVisible()) mainWindow.show();
-    mainWindow.focus();
+    writeStartupLog("second-instance: focusing existing window");
+    focusOrShowMainWindow();
   });
+}
+
+function showCloseToTrayHint(): void {
+  const settings = settingsStore?.get();
+  if (!settings || settings.general.hasShownCloseToTrayHint) return;
+
+  const title = "DiskHound is still running";
+  const body =
+    "The window was hidden to the tray. Launch DiskHound again or click the tray icon to bring it back. Choose Quit in the tray menu to exit.";
+
+  if (process.platform === "win32" && tray) {
+    tray.displayBalloon({ iconType: "info", title, content: body });
+  } else if (Notification.isSupported()) {
+    new Notification({ title, body }).show();
+  }
+
+  void settingsStore?.update((current) => ({
+    ...current,
+    general: { ...current.general, hasShownCloseToTrayHint: true },
+  }));
 }
 
 async function acquireSingleInstanceLockOrExit(): Promise<void> {
@@ -570,12 +626,16 @@ async function acquireSingleInstanceLockOrExit(): Promise<void> {
   process.exit(0);
 }
 
-void app.whenReady().then(async () => {
-  writeStartupLog("whenReady fired");
+if (process.platform === "win32") {
+  app.setAppUserModelId("com.diskhound.app");
+}
+
+void (async () => {
+  writeStartupLog("acquiring single-instance lock");
   await acquireSingleInstanceLockOrExit();
-  if (process.platform === "win32") {
-    app.setAppUserModelId("com.diskhound.app");
-  }
+  await app.whenReady();
+  writeStartupLog("whenReady fired");
+  initNativeProcessSample(projectRoot);
 
   if (process.platform === "linux") {
     // First-run (and every-run, idempotently) XDG desktop integration:
@@ -873,6 +933,7 @@ void app.whenReady().then(async () => {
     if (!session.active) return;
 
     if (message.type === "progress" || message.type === "done") {
+      message.snapshot.sizeSemantics = ALLOCATED_SIZE_SEMANTICS;
       if (message.type === "done") {
         // Persist history before notifying the renderer so immediate diff
         // lookups can see the just-finished scan.
@@ -1030,7 +1091,7 @@ void app.whenReady().then(async () => {
 
         if (session.trigger === "scheduled" && settings?.notifications.deltaAlerts && message.snapshot.rootPath) {
           const latestPair = getLatestPair(message.snapshot.rootPath);
-          if (latestPair) {
+          if (latestPair && sizeSemanticsCompatible(latestPair.baseline, latestPair.current)) {
             const [baseline, current] = await Promise.all([
               loadHistoricalSnapshot(latestPair.baseline.id),
               loadHistoricalSnapshot(latestPair.current.id),
@@ -1116,6 +1177,7 @@ void app.whenReady().then(async () => {
   const resolveBaselineIndexFor = (rootPath: string): string | undefined => {
     const history = getScanHistory(rootPath);
     for (const entry of history) {
+      if (!indexUsesAllocatedSize(entry)) continue;
       const candidate = indexFilePath(entry.id);
       try {
         if (FS_SYNC.existsSync(candidate)) return candidate;
@@ -2902,12 +2964,36 @@ void app.whenReady().then(async () => {
 
   // ── IPC: Cleanup Analysis ─────────────────────────────────
 
-  ipcMain.handle("diskhound:analyze-cleanup", (_event, rootPath: string, files: ScanFileRecord[], dirs: DirectoryHotspot[]) => {
+  ipcMain.handle("diskhound:analyze-cleanup", async (_event, rootPath: string) => {
+    const history = getScanHistory(rootPath);
+    const current = history[0];
     const settings = settingsStore!.get();
-    const excludedFolders = settings.scanning.excludedFolderPaths;
-    const safeFiles = files.filter((file) => !isPathExcluded(file.path, excludedFolders, process.platform));
-    const safeDirs = dirs.filter((dir) => !findExcludedFolderActionBlocker(dir.path, excludedFolders, process.platform));
-    return analyzeForCleanup(rootPath, safeFiles, safeDirs, settings.cleanup);
+    if (!current) {
+      return {
+        suggestions: [],
+        totalReclaimableBytes: 0,
+        analyzedAt: Date.now(),
+        scanRootPath: rootPath,
+      };
+    }
+    return analyzeCleanupFromIndex(rootPath, indexFilePath(current.id), settings.cleanup);
+  });
+  ipcMain.handle("diskhound:search-index", async (_event, rootPath: string, query: { query: string; minSizeBytes?: number; extension?: string; limit?: number }) => {
+    const history = getScanHistory(rootPath);
+    const current = history[0];
+    if (!current) return { hits: [], truncated: false, filesScanned: 0 };
+    return searchIndexFile(indexFilePath(current.id), query);
+  });
+  ipcMain.handle("diskhound:get-dev-artifacts", async (_event, rootPath: string) => {
+    const history = getScanHistory(rootPath);
+    const current = history[0];
+    if (!current) return null;
+    const previous = history[1];
+    return analyzeDevArtifacts(
+      rootPath,
+      indexFilePath(current.id),
+      previous ? indexFilePath(previous.id) : null,
+    );
   });
 
   // ── IPC: Duplicate Detection ────────────────────────────
@@ -3447,6 +3533,10 @@ void app.whenReady().then(async () => {
       console.error(`[monitoring] delta skipped — no scan history for ${rootPath}`);
       return false;
     }
+    if (!indexUsesAllocatedSize(mostRecent)) {
+      console.error(`[monitoring] delta skipped — previous index still uses logical file size; running a full allocated-size scan for ${rootPath}`);
+      return false;
+    }
     const previousIndexPath = indexFilePath(mostRecent.id);
     if (!FS_SYNC.existsSync(previousIndexPath)) {
       console.error(`[monitoring] delta skipped — previous index missing at ${previousIndexPath}`);
@@ -3596,8 +3686,7 @@ void app.whenReady().then(async () => {
       {
         label: "Show DiskHound",
         click: () => {
-          mainWindow?.show();
-          mainWindow?.focus();
+          focusOrShowMainWindow();
         },
       },
       { type: "separator" },
@@ -3608,8 +3697,7 @@ void app.whenReady().then(async () => {
           if (settings?.scanning.defaultRootPath) {
             void startScan(settings.scanning.defaultRootPath, defaultScanOptions());
           }
-          mainWindow?.show();
-          mainWindow?.focus();
+          focusOrShowMainWindow();
         },
       },
       {
@@ -3630,8 +3718,7 @@ void app.whenReady().then(async () => {
 
     tray.setContextMenu(contextMenu);
     tray.on("double-click", () => {
-      mainWindow?.show();
-      mainWindow?.focus();
+      focusOrShowMainWindow();
     });
   };
 
@@ -3888,7 +3975,8 @@ void app.whenReady().then(async () => {
       const settings = settingsStore?.get();
       if (settings?.general.minimizeToTray && tray) {
         event.preventDefault();
-        mainWindow?.hide();
+        hideMainWindow();
+        showCloseToTrayHint();
       }
     });
 
@@ -3896,6 +3984,7 @@ void app.whenReady().then(async () => {
       mainWindow = null;
     });
   };
+  createMainWindowFn = createWindow;
 
   let settings = settingsStore.get();
   const normalizedSettings = normalizeAppSettings(settings);
@@ -3931,8 +4020,11 @@ void app.whenReady().then(async () => {
   const canLaunchToTray = settings.general.minimizeToTray && Boolean(tray);
   const launchMinimized =
     canLaunchToTray && wasAutoStarted && settings.general.startMinimized;
-  if (launchMinimized) {
-    mainWindow?.hide();
+  if (pendingSecondInstanceFocus) {
+    pendingSecondInstanceFocus = false;
+    focusOrShowMainWindow();
+  } else if (launchMinimized) {
+    hideMainWindow();
   }
 
   // Auto-update (production only, gated on user setting)
@@ -4229,10 +4321,11 @@ void app.whenReady().then(async () => {
     void windowStateStore?.flush();
     void widgetWindowStateStore?.flush();
   });
-}).catch((err) => {
-  writeStartupLog(`whenReady rejected: ${err?.stack ?? err?.message ?? String(err)}`);
+})().catch((err: unknown) => {
+  const error = err as { stack?: string; message?: string };
+  writeStartupLog(`whenReady rejected: ${error?.stack ?? error?.message ?? String(err)}`);
   try {
-    dialog.showErrorBox("DiskHound — Startup failed", String(err?.stack ?? err?.message ?? err));
+    dialog.showErrorBox("DiskHound — Startup failed", String(error?.stack ?? error?.message ?? err));
   } catch { /* noop */ }
 });
 

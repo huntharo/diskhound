@@ -592,6 +592,12 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
         </div>
       )}
 
+      {diff.sizeSemanticsChanged && (
+        <div className="changes-semantics-note">
+          These two scans used different size accounting (Explorer file size vs size on disk for sparse/compressed files). Totals aren't comparable — run one more scan, then compare two scans from after that.
+        </div>
+      )}
+
       {/* ── Summary strip ── */}
       <div className="changes-summary">
         <div

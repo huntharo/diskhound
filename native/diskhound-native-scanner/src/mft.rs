@@ -19,8 +19,8 @@
 //!
 //! - `$STANDARD_INFORMATION` (0x10) — timestamps + flags (always resident)
 //! - `$FILE_NAME` (0x30) — name + parent FRN + namespace (always resident)
-//! - `$DATA` (0x80) — file size (resident data length OR non-resident
-//!   allocated/real size in the attribute header)
+//! - `$DATA` (0x80) — occupancy: resident value length, or non-resident
+//!   **allocated_size** (size on disk after sparse holes / compression)
 //!
 //! ## USA (Update Sequence Array) fixup
 //!
@@ -35,7 +35,8 @@
 //!   attributes overflow a single record. These are rare (very fragmented
 //!   files, giant directories); we log and skip them. This is fine
 //!   because the goal is "fast common-case", not "archivally complete".
-//! - We don't handle encrypted or sparse volumes specially.
+//! - Encrypted files use the same $DATA allocated_size as compressed/
+//!   sparse files (cluster occupancy). We do not decrypt content.
 //! - We don't process $FILE_NAME entries with DOS-only namespace (we
 //!   prefer Win32/Win32AndDos when multiple names exist).
 
@@ -114,6 +115,10 @@ pub struct MftRecordParsed {
     pub size: u64,
     pub mtime_ms: u64,
     pub is_dir: bool,
+    /// Extra NTFS hardlink of a file already emitted under another name.
+    /// Occupancy is counted once (the first name); extras stay visible
+    /// in folder listings but must not inflate bytesSeen / parent totals.
+    pub extra_hardlink: bool,
 }
 
 /// Internal record used during MFT parsing. A file may have several
@@ -403,21 +408,12 @@ fn parse_attributes(buf: &[u8], offset: usize) -> Option<ParsedAttrs> {
                 }
             }
             ATTR_DATA => {
-                if out.data_size.is_none() {
-                    if non_resident == 0 {
-                        let value_length = u32::from_le_bytes([
-                            buf[pos + 16], buf[pos + 17],
-                            buf[pos + 18], buf[pos + 19],
-                        ]) as u64;
-                        out.data_size = Some(value_length);
-                    } else if pos + 48 <= buf.len() {
-                        let real_size = u64::from_le_bytes([
-                            buf[pos + 48], buf[pos + 49],
-                            buf[pos + 50], buf[pos + 51],
-                            buf[pos + 52], buf[pos + 53],
-                            buf[pos + 54], buf[pos + 55],
-                        ]);
-                        out.data_size = Some(real_size);
+                // Unnamed $DATA only. Named streams (Zone.Identifier, etc.)
+                // are not what Explorer "Size on disk" reports.
+                let name_length = buf[pos + 9];
+                if name_length == 0 && out.data_size.is_none() {
+                    if let Some(size) = occupancy_from_data_attribute(non_resident, buf, pos) {
+                        out.data_size = Some(size);
                     }
                 }
             }
@@ -430,7 +426,42 @@ fn parse_attributes(buf: &[u8], offset: usize) -> Option<ParsedAttrs> {
     Some(out)
 }
 
-/// Collapse the raw `$FILE_NAME` list to one entry per hardlink (parent
+/// Bytes that occupy the volume for a `$DATA` attribute.
+///
+/// Resident data lives in the MFT record — report the resident value
+/// length. Non-resident data uses **allocated_size** at header +0x28,
+/// which is cluster allocation after sparse holes and NTFS compression
+/// (Explorer "Size on disk"). `real_size` at +0x30 is logical EOF and
+/// is what inflated Android/WSL VHDX files to their maximum size.
+fn occupancy_from_data_attribute(non_resident: u8, buf: &[u8], pos: usize) -> Option<u64> {
+    if non_resident == 0 {
+        if pos + 20 > buf.len() {
+            return None;
+        }
+        return Some(u32::from_le_bytes([
+            buf[pos + 16],
+            buf[pos + 17],
+            buf[pos + 18],
+            buf[pos + 19],
+        ]) as u64);
+    }
+    // allocated_size occupies bytes [pos+40, pos+48)
+    if pos + 48 > buf.len() {
+        return None;
+    }
+    Some(u64::from_le_bytes([
+        buf[pos + 40],
+        buf[pos + 41],
+        buf[pos + 42],
+        buf[pos + 43],
+        buf[pos + 44],
+        buf[pos + 45],
+        buf[pos + 46],
+        buf[pos + 47],
+    ]))
+}
+
+/// Collapse the raw `$FILE_NAME` list to one entry per hardlink (parent)
 /// dir). Within a single parent, prefer Win32/Win32AndDos over POSIX
 /// over DOS 8.3, so we keep the user-visible long name and drop the
 /// 8.3 alias that would otherwise become a duplicate.
@@ -989,6 +1020,7 @@ where
 
     let mut system_filtered: u64 = 0;
     for (&frn, rec) in records.iter() {
+        let mut emitted_file = false;
         for (parent_frn, name) in rec.names.iter() {
             // Skip NTFS pseudo-filesystem entries that a regular
             // FindFirstFile walker never sees. Without this filter the
@@ -1047,7 +1079,11 @@ where
                 size: rec.size,
                 mtime_ms: rec.mtime_ms,
                 is_dir: rec.is_dir,
+                extra_hardlink: emitted_file && !rec.is_dir,
             });
+            if !rec.is_dir {
+                emitted_file = true;
+            }
         }
         if rec.names.len() > 1 {
             // We already counted the primary emit; each extra hardlink
@@ -1179,6 +1215,36 @@ fn is_filtered_full_path(full_lc_path: &str, drive_root: &str) -> bool {
         return true;
     }
     false
+}
+
+#[cfg(test)]
+mod occupancy_tests {
+    use super::occupancy_from_data_attribute;
+
+    #[test]
+    fn resident_data_uses_value_length() {
+        let mut buf = vec![0u8; 32];
+        buf[16..20].copy_from_slice(&1234u32.to_le_bytes());
+        assert_eq!(occupancy_from_data_attribute(0, &buf, 0), Some(1234));
+    }
+
+    #[test]
+    fn non_resident_uses_allocated_size_not_logical_eof() {
+        let mut buf = vec![0u8; 64];
+        let allocated = 4096u64;
+        let logical = 512u64 * 1024 * 1024 * 1024;
+        buf[40..48].copy_from_slice(&allocated.to_le_bytes());
+        buf[48..56].copy_from_slice(&logical.to_le_bytes());
+        assert_eq!(occupancy_from_data_attribute(1, &buf, 0), Some(allocated));
+    }
+
+    #[test]
+    fn fully_sparse_file_can_occupy_zero_clusters() {
+        let mut buf = vec![0u8; 64];
+        buf[40..48].copy_from_slice(&0u64.to_le_bytes());
+        buf[48..56].copy_from_slice(&(64u64 * 1024 * 1024 * 1024).to_le_bytes());
+        assert_eq!(occupancy_from_data_attribute(1, &buf, 0), Some(0));
+    }
 }
 
 fn path_matches_root(full: &str, root_lc: &str) -> bool {

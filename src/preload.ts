@@ -93,8 +93,12 @@ const api: DiskhoundNativeApi = {
   getExecutableIcon: (path, size) => ipcRenderer.invoke("diskhound:get-executable-icon", path, size),
 
   // Cleanup analysis
-  analyzeCleanup: (rootPath, files, dirs) =>
-    ipcRenderer.invoke("diskhound:analyze-cleanup", rootPath, files, dirs),
+  analyzeCleanup: (rootPath) =>
+    ipcRenderer.invoke("diskhound:analyze-cleanup", rootPath),
+  searchIndex: (rootPath, query) =>
+    ipcRenderer.invoke("diskhound:search-index", rootPath, query),
+  getDevArtifacts: (rootPath) =>
+    ipcRenderer.invoke("diskhound:get-dev-artifacts", rootPath),
 
   // Duplicate Detection
   startDuplicateScan: (rootPath, options) => ipcRenderer.invoke("diskhound:start-duplicate-scan", rootPath, options),

@@ -42,6 +42,46 @@ export type ScanPhase =
   | "finalizing"
   | "complete";
 
+/**
+ * How `size` / `bytesSeen` were measured.
+ * - `allocated` — size on disk (sparse holes and NTFS/FS compression).
+ * - `logical` — Explorer "Size" / file EOF. Pre-fix Windows snapshots.
+ * Missing on history written before this field existed; treat as `logical`.
+ */
+export type ScanSizeSemantics = "allocated" | "logical";
+
+export const ALLOCATED_SIZE_SEMANTICS: ScanSizeSemantics = "allocated";
+
+export function scanSizeSemantics(
+  value: { sizeSemantics?: ScanSizeSemantics } | null | undefined,
+): ScanSizeSemantics {
+  if (value?.sizeSemantics === "allocated") return "allocated";
+  if (value?.sizeSemantics === "logical") return "logical";
+  // Untagged history: Unix occupancy was already allocated; Windows was not.
+  return process.platform === "win32" ? "logical" : "allocated";
+}
+
+export function sizeSemanticsCompatible(
+  a: { sizeSemantics?: ScanSizeSemantics } | null | undefined,
+  b: { sizeSemantics?: ScanSizeSemantics } | null | undefined,
+): boolean {
+  return scanSizeSemantics(a) === scanSizeSemantics(b);
+}
+
+/**
+ * Whether a persisted scan's `s` / `bytesSeen` values are size-on-disk.
+ * Pre-field history: Unix already used allocated occupancy; Windows used
+ * logical EOF. Mixing those Windows indexes into a new scan would keep
+ * 512 GB VHDX files in the inherited baseline.
+ */
+export function indexUsesAllocatedSize(
+  entry: { sizeSemantics?: ScanSizeSemantics } | null | undefined,
+): boolean {
+  if (entry?.sizeSemantics === "allocated") return true;
+  if (entry?.sizeSemantics === "logical") return false;
+  return process.platform !== "win32";
+}
+
 export interface ScanSnapshot {
   status: ScanStatus;
   engine: ScanEngine;
@@ -68,6 +108,11 @@ export interface ScanSnapshot {
    *  progress bar during the `indexing` phase where byte-based progress
    *  stalls at ~98% because records are pre-sorted biggest-first. */
   expectedTotalFiles?: number | null;
+  /**
+   * How `bytesSeen` and per-file `size` were measured. New scans use
+   * `allocated` (size on disk). Omitted on snapshots from older builds.
+   */
+  sizeSemantics?: ScanSizeSemantics;
 }
 
 export interface PathActionResult {
@@ -178,6 +223,11 @@ export interface GeneralSettings {
   minimizeToTray: boolean;
   startMinimized: boolean;
   launchOnStartup: boolean;
+  /**
+   * Set after the first close-to-tray balloon so we don't nag on every
+   * hide. Not shown in Settings.
+   */
+  hasShownCloseToTrayHint: boolean;
   theme: "dark" | "light" | "system";
   autoUpdate: boolean;
   betaUpdates: boolean;
@@ -386,6 +436,54 @@ export interface CleanupAnalysis {
   scanRootPath: string;
 }
 
+export type DevArtifactKind =
+  | "worktree"
+  | "node-modules"
+  | "package-cache"
+  | "rust-target"
+  | "cargo-registry"
+  | "js-build"
+  | "python"
+  | "go-module"
+  | "jvm"
+  | "dotnet"
+  | "compiler-cache"
+  | "cmake-build";
+
+export interface DevArtifact {
+  path: string;
+  kind: DevArtifactKind;
+  projectPath: string | null;
+  projectName: string;
+  size: number;
+  fileCount: number;
+  previousSize: number | null;
+  deltaBytes: number | null;
+}
+
+export interface DevArtifactReport {
+  artifacts: DevArtifact[];
+  totalBytes: number;
+  totalFiles: number;
+  projectCount: number;
+  kindTotals: Array<{ kind: DevArtifactKind; size: number; count: number }>;
+  generatedAt: number;
+  rootPath: string;
+}
+
+export interface IndexSearchQuery {
+  query: string;
+  minSizeBytes?: number;
+  extension?: string;
+  limit?: number;
+}
+
+export interface IndexSearchResult {
+  hits: ScanFileRecord[];
+  truncated: boolean;
+  filesScanned: number;
+}
+
 // ── Treemap Types ───────────────────────────────────────────
 
 export interface TreemapNode {
@@ -494,6 +592,8 @@ export interface ScanHistoryEntry {
   /** Which scanner produced this entry. Optional for backward-compat with
    *  history written before v0.2.8 — older entries are treated as full. */
   engine?: ScanEngine;
+  /** How `bytesSeen` was measured. Missing on pre-allocated-size history. */
+  sizeSemantics?: ScanSizeSemantics;
 }
 
 export type FileDeltaKind = "added" | "removed" | "grew" | "shrank";
@@ -555,6 +655,12 @@ export interface ScanDiffResult {
 
   /** Elapsed time between the two scans */
   timeBetweenMs: number;
+
+  /**
+   * True when the two snapshots used different size accounting (logical
+   * Explorer size vs size on disk). Totals are not comparable.
+   */
+  sizeSemanticsChanged: boolean;
 }
 
 // ── Full File-Index Diff Types ─────────────────────────────
@@ -865,7 +971,7 @@ export interface DuplicateScanOptions {
 
 // ── View Types ──────────────────────────────────────────────
 
-export type AppView = "overview" | "files" | "folders" | "duplicates" | "easyMove" | "changes" | "memory" | "diskIo" | "settings";
+export type AppView = "overview" | "files" | "folders" | "dev" | "duplicates" | "easyMove" | "changes" | "memory" | "diskIo" | "settings";
 
 /**
  * Payload for `focusMainWithView` — used by the System Widget's
@@ -1011,7 +1117,9 @@ export interface DiskhoundNativeApi {
   runScheduledTask: () => Promise<{ ok: boolean; message?: string }>;
 
   // Cleanup analysis
-  analyzeCleanup: (rootPath: string, files: ScanFileRecord[], dirs: DirectoryHotspot[]) => Promise<CleanupAnalysis>;
+  analyzeCleanup: (rootPath: string) => Promise<CleanupAnalysis>;
+  searchIndex: (rootPath: string, query: IndexSearchQuery) => Promise<IndexSearchResult>;
+  getDevArtifacts: (rootPath: string) => Promise<DevArtifactReport | null>;
 
   // Easy Move
   easyMove: (sourcePath: string, destinationDir: string) => Promise<EasyMoveResult>;
@@ -1185,9 +1293,10 @@ export function defaultScanOptions(): ScanOptions {
 export function defaultSettings(): AppSettings {
   return {
     general: {
-      minimizeToTray: true,
+      minimizeToTray: false,
       startMinimized: false,
-      launchOnStartup: true,
+      launchOnStartup: false,
+      hasShownCloseToTrayHint: false,
       theme: "dark",
       autoUpdate: true,
       betaUpdates: false,
@@ -1199,12 +1308,12 @@ export function defaultSettings(): AppSettings {
       hideExcludedFoldersFromFolderResults: true,
     },
     monitoring: {
-      enabled: true, // on by default — DiskHound's value is continuous change tracking
-      checkIntervalMinutes: 30,
+      enabled: true, // cheap free-space polls; full rescans are opt-in-cadence
+      checkIntervalMinutes: 60,
       alertThresholdBytes: 1024 * 1024 * 1024, // 1 GB
       alertThresholdPercent: 5,
-      fullScanIntervalMinutes: 60, // hourly scans so the Changes tab has fresh data
-      requireIdle: false, // don't block scheduled scans on idle — scans are background-friendly
+      fullScanIntervalMinutes: 360, // 6h — enough for Changes without chewing SSD
+      requireIdle: false,
       idleMinutes: 10,
       excludedDrives: [],
     },
@@ -1300,6 +1409,7 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
       minimizeToTray,
       startMinimized: minimizeToTray && Boolean(merged.general.startMinimized),
       launchOnStartup: Boolean(merged.general.launchOnStartup),
+      hasShownCloseToTrayHint: Boolean(merged.general.hasShownCloseToTrayHint),
       theme: isThemeValue(merged.general.theme) ? merged.general.theme : defaults.general.theme,
       autoUpdate: merged.general.autoUpdate === undefined ? defaults.general.autoUpdate : Boolean(merged.general.autoUpdate),
       betaUpdates: Boolean(merged.general.betaUpdates),
@@ -1472,6 +1582,7 @@ export function createIdleScanSnapshot(): ScanSnapshot {
     errorMessage: null,
     lastUpdatedAt: Date.now(),
     scanPhase: "starting",
+    sizeSemantics: ALLOCATED_SIZE_SEMANTICS,
     expectedTotalFiles: null,
   };
 }

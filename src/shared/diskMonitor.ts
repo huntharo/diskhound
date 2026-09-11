@@ -163,40 +163,57 @@ export function getDiskDeltaHistory(): DiskDelta[] {
 // ── Platform-specific disk space queries ────────────────────
 
 async function getWindowsDiskSpace(): Promise<DiskSpaceInfo[]> {
+  // wmic.exe is deprecated/removed on recent Windows. CIM is the supported
+  // replacement and already the data source behind `Get-PSDrive`.
   try {
-    const { stdout } = await execFileAsync("wmic", [
-      "logicaldisk",
-      "where", "DriveType=3",
-      "get", "DeviceID,FreeSpace,Size",
-      "/format:csv",
-    ], { timeout: 10_000 });
-
-    const lines = stdout.trim().split(/\r?\n/).filter((l) => l.trim());
-    const drives: DiskSpaceInfo[] = [];
-
-    for (const line of lines.slice(1)) {
-      const parts = line.split(",");
-      if (parts.length < 4) continue;
-      const deviceId = parts[1]?.trim();
-      const freeSpace = parseInt(parts[2]?.trim() ?? "0", 10);
-      const totalSize = parseInt(parts[3]?.trim() ?? "0", 10);
-
-      if (!deviceId || isNaN(freeSpace) || isNaN(totalSize) || totalSize === 0) continue;
-
-      drives.push({
-        drive: deviceId,
-        totalBytes: totalSize,
-        freeBytes: freeSpace,
-        usedBytes: totalSize - freeSpace,
-        usedPercent: ((totalSize - freeSpace) / totalSize) * 100,
-        timestamp: Date.now(),
-      });
-    }
-
-    return drives;
+    const script = [
+      "Get-CimInstance -ClassName Win32_LogicalDisk -Filter \"DriveType=3\"",
+      "| Select-Object DeviceID, FreeSpace, Size",
+      "| ConvertTo-Json -Compress",
+    ].join(" ");
+    const { stdout } = await execFileAsync(
+      "powershell",
+      ["-NoProfile", "-NonInteractive", "-Command", script],
+      { timeout: 15_000, windowsHide: true },
+    );
+    const drives = parseWindowsCimLogicalDisks(stdout, Date.now());
+    if (drives.length > 0) return drives;
   } catch {
-    return getWindowsDiskSpaceFallback();
+    // fall through
   }
+  return getWindowsDiskSpaceFallback();
+}
+
+export function parseWindowsCimLogicalDisks(stdout: string, timestamp: number): DiskSpaceInfo[] {
+  const cleaned = stdout.replace(/^\uFEFF/, "").trim();
+  if (!cleaned) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch {
+    return [];
+  }
+  const items = Array.isArray(parsed) ? parsed : [parsed];
+  const drives: DiskSpaceInfo[] = [];
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as { DeviceID?: unknown; FreeSpace?: unknown; Size?: unknown };
+    const deviceId = typeof row.DeviceID === "string" ? row.DeviceID.trim() : "";
+    const freeSpace = Number(row.FreeSpace);
+    const totalSize = Number(row.Size);
+    if (!deviceId || !Number.isFinite(freeSpace) || !Number.isFinite(totalSize) || totalSize <= 0) {
+      continue;
+    }
+    drives.push({
+      drive: deviceId,
+      totalBytes: totalSize,
+      freeBytes: freeSpace,
+      usedBytes: totalSize - freeSpace,
+      usedPercent: ((totalSize - freeSpace) / totalSize) * 100,
+      timestamp,
+    });
+  }
+  return drives;
 }
 
 async function getWindowsDiskSpaceFallback(): Promise<DiskSpaceInfo[]> {

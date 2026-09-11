@@ -479,7 +479,7 @@ export function FileList({ snapshot, initialFilter }: Props) {
       {/* ── Column headers ── */}
       <div className="file-col-header">
         <div className="file-check" />
-        <SortableHeader field="size" label="Size" current={sortField} dir={sortDir} onToggle={toggleSort} align="right" />
+        <SortableHeader field="size" label="Size" title="Size on disk (sparse and compressed files use allocated space)" current={sortField} dir={sortDir} onToggle={toggleSort} align="right" />
         <div className="file-row-icon-hdr" />
         <SortableHeader field="name" label="Name" current={sortField} dir={sortDir} onToggle={toggleSort} />
         <SortableHeader field="ext" label="Type" current={sortField} dir={sortDir} onToggle={toggleSort} align="center" />
@@ -563,9 +563,10 @@ export function FileList({ snapshot, initialFilter }: Props) {
   );
 }
 
-function SortableHeader({ field, label, current, dir, onToggle, align }: {
+function SortableHeader({ field, label, title, current, dir, onToggle, align }: {
   field: SortField;
   label: string;
+  title?: string;
   current: SortField;
   dir: SortDir;
   onToggle: (field: SortField) => void;
@@ -575,6 +576,7 @@ function SortableHeader({ field, label, current, dir, onToggle, align }: {
   return (
     <button
       className={`file-col-btn ${isActive ? "active" : ""}`}
+      title={title}
       style={align ? { textAlign: align, justifyContent: align === "right" ? "flex-end" : align === "center" ? "center" : "flex-start" } : undefined}
       onClick={() => onToggle(field)}
     >

@@ -1,5 +1,67 @@
 # Changelog
 
+## Unreleased
+
+### First-run defaults
+
+- New installs no longer launch DiskHound at login.
+- Free-space polls default to 60 minutes; full rescans default to 6 hours.
+
+### Windows drive space without `wmic`
+
+Fixed-disk free space uses CIM (`Win32_LogicalDisk`) instead of the
+removed `wmic.exe` tool.
+
+### Size on disk and hardlinks
+
+Windows occupancy uses allocated size (see #2). Extra NTFS hardlinks stay
+visible as paths but no longer inflate totals, the treemap, or folder
+rollups.
+
+### Index search and cleanup
+
+Ctrl+F searches the full scan index, not only the top-N largest files.
+Cleanup suggestions now stream that index (temps, caches, old installers,
+large media) and surface on Overview when they are large enough.
+
+### Dev artifacts
+
+New **Dev** tab (Ctrl+4) groups worktrees, `node_modules`, Rust
+`target/`, package-manager caches, venvs, and other developer bloat by
+kind or project, with growth since the previous scan. Overview shows a
+card when those trees exceed 512 MB.
+
+### Faster live sampling
+
+Process and Disk I/O samples come from the native scanner (`sysinfo`)
+instead of PowerShell on every tick. GPU still uses performance counters.
+
+### Streaming full-file diff
+
+Full diffs merge sorted index chunks on disk instead of loading a 12 GB
+in-memory map.
+
+### Relaunch focuses the existing window (#1)
+
+Closing DiskHound with "Minimize to tray" left the app running invisibly.
+Launching it again often did nothing (Windows focus-stealing, lock taken
+late). Relaunch now restores and focuses the existing window, including
+from the tray. The first hide-to-tray shows a balloon so it is obvious
+the app is still running. New installs default "Minimize to tray" off;
+existing settings are left alone.
+
+### Windows size on disk for sparse files (#2)
+
+Windows scans used logical file size (Explorer "Size"), so a dynamically
+expanding Android/WSL VHDX showed as 512 GB even when it only occupies a
+slice of the SSD. The
+NTFS MFT path now uses `$DATA` allocated size, the FindFirstFile walker
+calls `GetCompressedFileSize` for sparse/compressed/cloud files, and USN
+incremental updates carry allocated size from the open-by-id handle.
+Unix already reported `stat.blocks * 512`. Overview totals are labeled
+"on disk". The first scan after this change is not comparable to older
+Windows history in Changes.
+
 ## 0.5.44 — 2026-06-02
 
 DiskHound now supports an opt-in beta update channel and gives users clearer

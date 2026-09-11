@@ -10,6 +10,7 @@ import {
   type DuplicateScanProgress,
   type GeneralSettings,
   type ScanOptions,
+  type ScanFileRecord,
   type ScanSnapshot,
   type UpdateStatus,
 } from "../shared/contracts";
@@ -23,6 +24,7 @@ import { nativeApi } from "./nativeApi";
 
 import { ChangesView } from "./components/ChangesView";
 import { DiskPicker } from "./components/DiskPicker";
+import { DevView } from "./components/DevView";
 import { DuplicatesView } from "./components/DuplicatesView";
 import { DiskIoView } from "./components/DiskIoView";
 import { MemoryView } from "./components/MemoryView";
@@ -40,15 +42,16 @@ const TABS: { id: AppView; label: string; key: string }[] = [
   { id: "overview", label: "Overview", key: "1" },
   { id: "files", label: "Largest Files", key: "2" },
   { id: "folders", label: "Folders", key: "3" },
-  { id: "duplicates", label: "Duplicates", key: "4" },
-  { id: "changes", label: "Changes", key: "5" },
-  { id: "easyMove", label: "Easy Move", key: "6" },
-  { id: "memory", label: "Processes", key: "7" },
-  { id: "diskIo", label: "Disk I/O", key: "8" },
-  { id: "settings", label: "Settings", key: "9" },
+  { id: "dev", label: "Dev", key: "4" },
+  { id: "duplicates", label: "Duplicates", key: "5" },
+  { id: "changes", label: "Changes", key: "6" },
+  { id: "easyMove", label: "Easy Move", key: "7" },
+  { id: "memory", label: "Processes", key: "8" },
+  { id: "diskIo", label: "Disk I/O", key: "9" },
+  { id: "settings", label: "Settings", key: "0" },
 ];
 
-const SEARCHABLE_VIEWS: readonly AppView[] = ["files"];
+const SEARCHABLE_VIEWS: readonly AppView[] = ["files", "folders", "overview", "dev"];
 
 function isEditableElement(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -159,6 +162,7 @@ export function App() {
   const [showPicker, setShowPicker] = useState<boolean | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
+  const [indexSearchHits, setIndexSearchHits] = useState<ScanFileRecord[] | null>(null);
   const [hasPendingDiff, setHasPendingDiff] = useState(false);
   const [activeTheme, setActiveTheme] = useState<"dark" | "light">("dark");
   const [themePreference, setThemePreference] = useState<GeneralSettings["theme"]>("dark");
@@ -845,6 +849,30 @@ export function App() {
     };
   }, [snapshot, searchQuery]);
 
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (q.length < 2 || !snapshot.rootPath) {
+      setIndexSearchHits(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void nativeApi.searchIndex(snapshot.rootPath!, { query: q, limit: 400 }).then((result) => {
+        if (cancelled || !result) return;
+        setIndexSearchHits(result.hits);
+      });
+    }, 220);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [searchQuery, snapshot.rootPath, snapshot.finishedAt]);
+
+  const indexSearchSnapshot = useMemo(() => {
+    if (!searchQuery.trim() || !indexSearchHits) return searchFilteredSnapshot;
+    return { ...snapshot, largestFiles: indexSearchHits };
+  }, [searchQuery, indexSearchHits, searchFilteredSnapshot, snapshot]);
+
   const statusLabel = useMemo(() => {
     switch (snapshot.status) {
       case "running":
@@ -1129,7 +1157,7 @@ export function App() {
                 setSearchOpen(!searchOpen);
                 if (searchOpen) setSearchQuery("");
               }}
-              title="Search largest files (Ctrl+F)"
+              title="Search the scan index (Ctrl+F)"
             >
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
                 <circle cx="6" cy="6" r="4" />
@@ -1171,12 +1199,12 @@ export function App() {
               className="search-bar-input"
               value={searchQuery}
               onInput={(e) => setSearchQuery((e.target as HTMLInputElement).value)}
-              placeholder="Filter largest files by name, path, or extension..."
+              placeholder="Search the whole scan by path or extension..."
               autoFocus
             />
             {searchQuery && (
               <span className="search-bar-count">
-              {searchFilteredSnapshot.largestFiles.length} match{searchFilteredSnapshot.largestFiles.length !== 1 ? "es" : ""}
+              {indexSearchSnapshot.largestFiles.length} match{indexSearchSnapshot.largestFiles.length !== 1 ? "es" : ""}
             </span>
           )}
             <button
@@ -1239,9 +1267,10 @@ export function App() {
             />
           ) : (
             <>
-              {view === "overview" && <ErrorBoundary name="Overview"><Overview snapshot={snapshot} onFilterExtension={onFilterExtension} onViewChanges={() => setView("changes")} scanPercent={currentScanPercent} /></ErrorBoundary>}
-              {view === "files" && <ErrorBoundary name="File List"><FileList snapshot={searchFilteredSnapshot} initialFilter={filterExt} /></ErrorBoundary>}
+              {view === "overview" && <ErrorBoundary name="Overview"><Overview snapshot={snapshot} onFilterExtension={onFilterExtension} onViewChanges={() => setView("changes")} onViewDev={() => setView("dev")} scanPercent={currentScanPercent} /></ErrorBoundary>}
+              {view === "files" && <ErrorBoundary name="File List"><FileList snapshot={indexSearchSnapshot} initialFilter={filterExt} /></ErrorBoundary>}
               {view === "folders" && <ErrorBoundary name="Folders"><FolderList snapshot={snapshot} /></ErrorBoundary>}
+              {view === "dev" && <ErrorBoundary name="Dev"><DevView snapshot={snapshot} /></ErrorBoundary>}
               {view === "duplicates" && (
                 <ErrorBoundary name="Duplicates">
                   <DuplicatesView

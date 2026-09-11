@@ -25,14 +25,17 @@ mod usn_journal;
 #[cfg(windows)]
 mod mft;
 
+mod sample;
+
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{GetLastError, ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE};
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
     FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW,
-    FindNextFileW, FIND_FIRST_EX_LARGE_FETCH, FILE_ATTRIBUTE_DEVICE,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-    WIN32_FIND_DATAW,
+    FindNextFileW, GetCompressedFileSizeW, FIND_FIRST_EX_LARGE_FETCH,
+    FILE_ATTRIBUTE_COMPRESSED, FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SPARSE_FILE,
+    INVALID_FILE_SIZE, WIN32_FIND_DATAW,
 };
 
 // Generous internal caps — large enough that no user reasonably hits them,
@@ -103,7 +106,12 @@ struct IndexWriter {
 }
 
 enum IndexWriteMsg {
-    File { path: String, size: u64, mtime: u64 },
+    File {
+        path: String,
+        size: u64,
+        mtime: u64,
+        extra_hardlink: bool,
+    },
     Dir { path: String, mtime: u64 },
     Finish,
 }
@@ -134,7 +142,12 @@ impl IndexWriter {
                 let mut line = Vec::with_capacity(512);
                 while let Ok(msg) = rx.recv() {
                     match msg {
-                        IndexWriteMsg::File { path, size, mtime } => {
+                        IndexWriteMsg::File {
+                            path,
+                            size,
+                            mtime,
+                            extra_hardlink,
+                        } => {
                             line.clear();
                             // Hand-rolled `{"p":"<esc>","s":N,"m":M}\n`.
                             // serde_json::to_writer was doing 5-8 μs
@@ -151,6 +164,9 @@ impl IndexWriter {
                             append_u64_decimal(&mut line, size);
                             line.extend_from_slice(br#","m":"#);
                             append_u64_decimal(&mut line, mtime);
+                            if extra_hardlink {
+                                line.extend_from_slice(br#","h":1"#);
+                            }
                             line.extend_from_slice(b"}\n");
                             encoder.write_all(&line)?;
                         }
@@ -202,6 +218,7 @@ impl IndexWriter {
                 path: path.to_string(),
                 size,
                 mtime,
+                extra_hardlink: false,
             })
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "index writer thread exited"))?;
         }
@@ -743,6 +760,16 @@ fn main() {
         || matches_flag(&raw_args, "--mode", "journal");
     let is_cursor_query = raw_args.iter().any(|a| a == "--mode=query-cursor")
         || matches_flag(&raw_args, "--mode", "query-cursor");
+    let is_sample = raw_args.iter().any(|a| a == "--mode=sample")
+        || matches_flag(&raw_args, "--mode", "sample");
+
+    if is_sample {
+        if let Err(error) = sample::run_sample_once() {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     if is_journal_mode || is_cursor_query {
         #[cfg(windows)]
@@ -1883,35 +1910,37 @@ fn emit_shard(
                 });
             }
         } else {
+            let occupancy = if rec.extra_hardlink { 0 } else { rec.size };
             local.files += 1;
-            local.bytes += rec.size;
+            local.bytes += occupancy;
             batch_files += 1;
-            batch_bytes += rec.size;
+            batch_bytes += occupancy;
 
             let path = rec.name;
             let (parent_path, file_name) = split_parent_and_name(&path);
             let extension = file_extension(&path);
 
-            upsert_ranked_file(
-                &mut local.largest_files,
-                ScanFileRecord {
-                    path: path.clone(),
-                    name: file_name.clone(),
-                    parent_path: parent_path.clone(),
-                    extension: extension.clone(),
-                    size: rec.size,
-                    modified_at: rec.mtime_ms,
-                },
-                top_file_limit,
-            );
-
-            rollup_directory_size_tallies_only(
-                root_path,
-                &parent_path,
-                rec.size,
-                &mut local.dir_totals,
-            );
-            rollup_extension(&mut local.ext_totals, &extension, rec.size);
+            if !rec.extra_hardlink {
+                upsert_ranked_file(
+                    &mut local.largest_files,
+                    ScanFileRecord {
+                        path: path.clone(),
+                        name: file_name.clone(),
+                        parent_path: parent_path.clone(),
+                        extension: extension.clone(),
+                        size: rec.size,
+                        modified_at: rec.mtime_ms,
+                    },
+                    top_file_limit,
+                );
+                rollup_directory_size_tallies_only(
+                    root_path,
+                    &parent_path,
+                    rec.size,
+                    &mut local.dir_totals,
+                );
+                rollup_extension(&mut local.ext_totals, &extension, rec.size);
+            }
 
             if want_folder_tree {
                 let list = local
@@ -1930,6 +1959,7 @@ fn emit_shard(
                     path,
                     size: rec.size,
                     mtime: rec.mtime_ms,
+                    extra_hardlink: rec.extra_hardlink,
                 });
             }
         }
@@ -3009,8 +3039,7 @@ fn enumerate_windows_directory_parallel(
                 );
                 children.push((directory_path.join(&file_name), Some(child_mtime)));
             } else {
-                let file_size =
-                    ((find_data.nFileSizeHigh as u64) << 32) | find_data.nFileSizeLow as u64;
+                let file_size = windows_find_data_occupancy(directory_path, &file_name, &find_data);
                 let file_record = ScanFileRecord {
                     path: normalize_path(&directory_path.join(&file_name)),
                     name: file_name.clone(),
@@ -3162,8 +3191,7 @@ fn enumerate_windows_directory(
               );
               stack.push((directory_path.join(&file_name), Some(child_mtime)));
           } else {
-              let file_size =
-                  ((find_data.nFileSizeHigh as u64) << 32) | find_data.nFileSizeLow as u64;
+              let file_size = windows_find_data_occupancy(directory_path, &file_name, &find_data);
               let file_record = ScanFileRecord {
                   path: normalize_path(&directory_path.join(&file_name)),
                   name: file_name.clone(),
@@ -4177,6 +4205,45 @@ fn windows_search_pattern(directory_path: &Path) -> String {
     } else {
         format!("{extended_path}\\*")
     }
+}
+
+/// Cloud placeholders that look huge logically but occupy little locally.
+#[cfg(windows)]
+const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+
+#[cfg(windows)]
+fn windows_find_data_occupancy(
+    directory_path: &Path,
+    file_name: &str,
+    find_data: &WIN32_FIND_DATAW,
+) -> u64 {
+    let logical = ((find_data.nFileSizeHigh as u64) << 32) | (find_data.nFileSizeLow as u64);
+    let attributes = find_data.dwFileAttributes;
+    const NEED_ALLOCATED: u32 = FILE_ATTRIBUTE_SPARSE_FILE
+        | FILE_ATTRIBUTE_COMPRESSED
+        | FILE_ATTRIBUTE_OFFLINE
+        | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
+    if attributes & NEED_ALLOCATED == 0 {
+        return logical;
+    }
+    windows_allocated_size(&directory_path.join(file_name)).unwrap_or(logical)
+}
+
+/// Explorer "Size on disk" via GetCompressedFileSizeW — allocated clusters
+/// after NTFS sparse holes and compression. For ordinary files this equals
+/// logical size (not cluster-rounded).
+#[cfg(windows)]
+fn windows_allocated_size(path: &Path) -> Option<u64> {
+    let wide = windows_wide_string(&windows_extended_path(path));
+    let mut high: u32 = 0;
+    let low = unsafe { GetCompressedFileSizeW(wide.as_ptr(), &mut high) };
+    if low == INVALID_FILE_SIZE {
+        let err = unsafe { GetLastError() };
+        if err != 0 {
+            return None;
+        }
+    }
+    Some(((high as u64) << 32) | (low as u64))
 }
 
 #[cfg(windows)]

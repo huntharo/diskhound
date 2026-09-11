@@ -91,7 +91,8 @@ describe("path protection helpers", () => {
   });
 
   it("provides platform defaults", () => {
-    expect(getDefaultExcludedFolderPaths("win32")).toContain("C:\\Windows");
+    const windows = getDefaultExcludedFolderPaths("win32");
+    expect(windows.some((path) => /(?:^|[\\/])windows$/i.test(path))).toBe(true);
     expect(getDefaultExcludedFolderPaths("darwin")).toContain("/System");
     expect(getDefaultExcludedFolderPaths("linux")).toContain("/usr");
   });

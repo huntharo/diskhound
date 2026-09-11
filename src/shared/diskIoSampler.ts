@@ -21,6 +21,7 @@ interface RawIo {
 }
 
 let lastLinuxSample: { sampledAt: number; byPid: Map<number, RawIo> } | null = null;
+let lastNativeIoSample: { sampledAt: number; byPid: Map<number, RawIo> } | null = null;
 
 export async function sampleDiskIo(): Promise<DiskIoSnapshot> {
   const startedAt = Date.now();
@@ -40,9 +41,11 @@ export async function sampleDiskIo(): Promise<DiskIoSnapshot> {
   }
 
   try {
-    const snap = process.platform === "win32"
-      ? await sampleWindowsDiskIo(startedAt)
-      : await sampleLinuxDiskIo(startedAt);
+    const native = await sampleNativeDiskIo(startedAt);
+    const snap = native
+      ?? (process.platform === "win32"
+        ? await sampleWindowsDiskIo(startedAt)
+        : await sampleLinuxDiskIo(startedAt));
     return {
       ...snap,
       sampleElapsedMs: Date.now() - startedAt,
@@ -58,6 +61,74 @@ export async function sampleDiskIo(): Promise<DiskIoSnapshot> {
       errorMessage: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+async function sampleNativeDiskIo(sampledAt: number): Promise<DiskIoSnapshot | null> {
+  try {
+    const { getNativeSample } = await import("../nativeProcessSample");
+    const sample = await getNativeSample();
+    if (!sample || sample.processes.length === 0) return null;
+    const rawRows: RawIo[] = sample.processes.map((row) => ({
+      pid: row.pid,
+      name: row.name,
+      readBytes: row.readBytesTotal,
+      writeBytes: row.writeBytesTotal,
+      exePath: row.exePath,
+      commandLine: row.commandLine,
+      parentPid: row.parentPid,
+    }));
+    const prev = lastNativeIoSample;
+    lastNativeIoSample = {
+      sampledAt,
+      byPid: new Map(rawRows.map((row) => [row.pid, row])),
+    };
+    const dt = prev ? Math.max(0.05, (sampledAt - prev.sampledAt) / 1000) : 0;
+    const processes: DiskIoProcessInfo[] = [];
+    for (const row of rawRows) {
+      const previous = prev?.byPid.get(row.pid);
+      const readBytesPerSec = previous && dt > 0
+        ? Math.max(0, (row.readBytes - previous.readBytes) / dt)
+        : 0;
+      const writeBytesPerSec = previous && dt > 0
+        ? Math.max(0, (row.writeBytes - previous.writeBytes) / dt)
+        : 0;
+      if (readBytesPerSec + writeBytesPerSec <= 0) continue;
+      processes.push(enrichDiskIoProcessInfo({
+        pid: row.pid,
+        name: row.name,
+        readBytesPerSec,
+        writeBytesPerSec,
+        totalBytesPerSec: readBytesPerSec + writeBytesPerSec,
+        readBytesTotal: row.readBytes,
+        writeBytesTotal: row.writeBytes,
+        exePath: row.exePath ?? null,
+        commandLine: row.commandLine ?? null,
+        parentPid: row.parentPid ?? null,
+        parentName: null,
+      }));
+    }
+    processes.sort((a, b) => b.totalBytesPerSec - a.totalBytesPerSec);
+    const named = attachDiskIoParentNames(processes);
+    return {
+      processes: named,
+      totalReadBytesPerSec: named.reduce((sum, p) => sum + p.readBytesPerSec, 0),
+      totalWriteBytesPerSec: named.reduce((sum, p) => sum + p.writeBytesPerSec, 0),
+      sampledAt,
+      sampleElapsedMs: 0,
+      hasRateBaseline: Boolean(prev),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function attachDiskIoParentNames(processes: DiskIoProcessInfo[]): DiskIoProcessInfo[] {
+  const nameByPid = new Map<number, string>();
+  for (const p of processes) nameByPid.set(p.pid, p.name);
+  return processes.map((p) => ({
+    ...p,
+    parentName: p.parentPid ? (nameByPid.get(p.parentPid) ?? p.parentName ?? null) : p.parentName ?? null,
+  }));
 }
 
 async function sampleWindowsDiskIo(sampledAt: number): Promise<DiskIoSnapshot> {

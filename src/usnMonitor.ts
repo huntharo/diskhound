@@ -6,6 +6,7 @@ import { createInterface } from "node:readline";
 import { createGunzip, createGzip } from "node:zlib";
 
 import type { ScanSnapshot } from "./shared/contracts";
+import { occupancyBytes } from "./shared/allocatedSize";
 import { buildSnapshotFromIndex, indexFilePath } from "./shared/scanIndex";
 import {
   getCursor,
@@ -43,6 +44,11 @@ interface JournalRecord {
   usn: number;
   reasonMask: number;
   timestamp: number;
+  /** Allocated size on disk when the native journal reader could open the file. */
+  size?: number;
+  /** File last-write time in unix ms, when resolved from the handle. */
+  mtime?: number;
+  isDirectory?: boolean;
 }
 
 interface JournalCursorEnd {
@@ -167,14 +173,33 @@ export async function runIncrementalScan(params: {
   for (const [path, rec] of byPath) {
     if (rec.op === "delete") {
       deletes.add(path);
-    } else {
+    } else if (!rec.isDirectory) {
       createOrModify.add(path);
     }
   }
 
-  // Stat each create/modify target to get its current size + mtime. In
-  // parallel — up to 32 concurrent stats — to stay well under fd limits.
-  const freshEntries = await statInBatches(Array.from(createOrModify), 32);
+  // Prefer allocated size from the journal reader (open-by-id handle).
+  // Stat anything the native side couldn't size — Node's Windows stat
+  // is logical-only, so this is a last resort.
+  const freshEntries = new Map<string, { size: number; mtime: number }>();
+  const needStat: string[] = [];
+  for (const path of createOrModify) {
+    const rec = byPath.get(path);
+    if (rec && typeof rec.size === "number" && Number.isFinite(rec.size)) {
+      freshEntries.set(path, {
+        size: Math.max(0, rec.size),
+        mtime: typeof rec.mtime === "number" && rec.mtime > 0 ? rec.mtime : rec.timestamp,
+      });
+    } else {
+      needStat.push(path);
+    }
+  }
+  if (needStat.length > 0) {
+    const statted = await statInBatches(needStat, 32);
+    for (const [path, entry] of statted) {
+      freshEntries.set(path, entry);
+    }
+  }
 
   // Stream the previous index → new index, applying the deltas.
   const additions = await applyDeltasToIndex(
@@ -406,7 +431,7 @@ async function statInBatches(
         try {
           const st = await FSP.stat(p);
           if (st.isFile()) {
-            result.set(normPath(p), { size: st.size, mtime: st.mtimeMs });
+            result.set(normPath(p), { size: occupancyBytes(st), mtime: st.mtimeMs });
           }
         } catch {
           // File vanished between journal and stat, or no permission. The

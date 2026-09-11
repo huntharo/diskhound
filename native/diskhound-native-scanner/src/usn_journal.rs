@@ -39,9 +39,11 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, GetFinalPathNameByHandleW, OpenFileById, FILE_FLAG_BACKUP_SEMANTICS,
+    CreateFileW, FileBasicInfo, FileStandardInfo, GetFileInformationByHandleEx,
+    GetFinalPathNameByHandleW, OpenFileById, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_ID_TYPE, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
+    OPEN_EXISTING,
 };
 use windows_sys::Win32::System::Ioctl::{
     FSCTL_QUERY_USN_JOURNAL, FSCTL_READ_USN_JOURNAL, USN_JOURNAL_DATA_V0,
@@ -123,6 +125,10 @@ enum OutputLine {
         #[serde(rename = "reasonMask")]
         reason_mask: u32,
         timestamp: u64,
+        size: u64,
+        mtime: u64,
+        #[serde(rename = "isDirectory")]
+        is_directory: bool,
     },
     JournalCursor {
         cursor: i64,
@@ -313,11 +319,52 @@ where
     Ok(last_cursor)
 }
 
-/// Best-effort path resolution via OpenFileById → GetFinalPathNameByHandleW.
+struct ResolvedFile {
+    path: String,
+    allocated_size: u64,
+    mtime_ms: u64,
+    is_directory: bool,
+}
+
+fn file_standard_info(handle: HANDLE) -> Option<FILE_STANDARD_INFO> {
+    let mut info = unsafe { std::mem::zeroed::<FILE_STANDARD_INFO>() };
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileStandardInfo,
+            &mut info as *mut _ as *mut c_void,
+            std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        None
+    } else {
+        Some(info)
+    }
+}
+
+fn file_basic_info(handle: HANDLE) -> Option<FILE_BASIC_INFO> {
+    let mut info = unsafe { std::mem::zeroed::<FILE_BASIC_INFO>() };
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileBasicInfo,
+            &mut info as *mut _ as *mut c_void,
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        None
+    } else {
+        Some(info)
+    }
+}
+
+/// Best-effort path + occupancy via OpenFileById.
 /// Returns None for files that can't be opened (deleted, insufficient
 /// permissions, race conditions). Callers should expect a meaningful
 /// fraction to fail on system volumes.
-fn resolve_path(volume: HANDLE, file_ref: u64) -> Option<String> {
+fn resolve_file(volume: HANDLE, file_ref: u64) -> Option<ResolvedFile> {
     let descriptor = FILE_ID_DESCRIPTOR {
         dwSize: std::mem::size_of::<FILE_ID_DESCRIPTOR>() as u32,
         Type: FILE_ID_TYPE_FILE_ID,
@@ -341,6 +388,20 @@ fn resolve_path(volume: HANDLE, file_ref: u64) -> Option<String> {
         return None;
     }
 
+    let standard = file_standard_info(handle);
+    let basic = file_basic_info(handle);
+    let allocated_size = standard
+        .as_ref()
+        .map(|info| info.AllocationSize.max(0) as u64)
+        .unwrap_or(0);
+    let is_directory = standard
+        .as_ref()
+        .map(|info| info.Directory != 0)
+        .unwrap_or(false);
+    let mtime_ms = basic
+        .map(|info| windows_filetime_to_unix_ms(info.LastWriteTime))
+        .unwrap_or(0);
+
     let mut buffer = vec![0u16; 32_768];
     let chars_written = unsafe {
         GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, 0)
@@ -354,11 +415,15 @@ fn resolve_path(volume: HANDLE, file_ref: u64) -> Option<String> {
 
     let path = String::from_utf16_lossy(&buffer[..chars_written as usize]);
     // Strip the `\\?\` extended-length prefix for consistency with the scanner.
-    Some(
-        path.strip_prefix(r"\\?\")
+    Some(ResolvedFile {
+        path: path
+            .strip_prefix(r"\\?\")
             .map(str::to_string)
             .unwrap_or(path),
-    )
+        allocated_size,
+        mtime_ms,
+        is_directory,
+    })
 }
 
 fn windows_filetime_to_unix_ms(ticks: i64) -> u64 {
@@ -409,7 +474,7 @@ pub fn run_journal_mode(drive_letter: char, start_cursor: Option<i64>) -> Result
     let mut dropped: u64 = 0;
 
     let final_cursor = read_journal(volume, info.journal_id, effective_start, |record, name_u16| {
-        let path = match resolve_path(volume, record.FileReferenceNumber) {
+        let resolved = match resolve_file(volume, record.FileReferenceNumber) {
             Some(p) => p,
             None => {
                 dropped += 1;
@@ -422,7 +487,7 @@ pub fn run_journal_mode(drive_letter: char, start_cursor: Option<i64>) -> Result
         // between journal write and our resolve), log the journal's name
         // as a hint.
         let _name = String::from_utf16_lossy(name_u16);
-        let basename = Path::new(&path)
+        let basename = Path::new(&resolved.path)
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("");
@@ -430,12 +495,15 @@ pub fn run_journal_mode(drive_letter: char, start_cursor: Option<i64>) -> Result
 
         let line = OutputLine::JournalRecord {
             op: JournalOp::from_reason(record.Reason),
-            path,
+            path: resolved.path,
             file_ref: record.FileReferenceNumber,
             parent_ref: record.ParentFileReferenceNumber,
             usn: record.Usn,
             reason_mask: record.Reason,
             timestamp: windows_filetime_to_unix_ms(record.TimeStamp),
+            size: resolved.allocated_size,
+            mtime: resolved.mtime_ms,
+            is_directory: resolved.is_directory,
         };
         let _ = emit(&line);
         emitted += 1;
