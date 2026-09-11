@@ -24,6 +24,8 @@ describe("dirnameOf / basenameOf", () => {
     expect(pathLooksWindows("C:\\real\\app\\node_modules")).toBe(true);
     expect(dirnameOf("C:\\real\\app\\node_modules")).toBe("C:\\real\\app");
     expect(dirnameOf("C:\\real\\app")).toBe("C:\\real");
+    expect(dirnameOf("C:\\real")).toBe("C:\\");
+    expect(dirnameOf("C:\\")).toBe("C:\\");
     expect(basenameOf("C:\\real\\app\\node_modules")).toBe("node_modules");
     expect(basenameOf("C:\\proj\\package.json")).toBe("package.json");
   });
@@ -31,6 +33,7 @@ describe("dirnameOf / basenameOf", () => {
   it("keeps POSIX dirname on Unix paths", () => {
     expect(pathLooksWindows("/home/dev/app/node_modules")).toBe(false);
     expect(dirnameOf("/home/dev/app/node_modules")).toBe("/home/dev/app");
+    expect(dirnameOf("/home")).toBe("/");
     expect(basenameOf("/home/dev/app/package.json")).toBe("package.json");
   });
 });
