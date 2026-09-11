@@ -826,10 +826,10 @@ function DevCleanupTile({ snapshot, onViewDev }: { snapshot: ScanSnapshot; onVie
         type="button"
         className="metric metric-dev-tile"
         onClick={() => onViewDev?.()}
-        title="Open Dev cleanup"
+        title="Open Dev Artifacts"
       >
         <span className="metric-value">…</span>
-        <span className="metric-label">dev cleanup</span>
+        <span className="metric-label">dev artifacts</span>
       </button>
     );
   }
@@ -840,10 +840,10 @@ function DevCleanupTile({ snapshot, onViewDev }: { snapshot: ScanSnapshot; onVie
       type="button"
       className="metric metric-dev-tile"
       onClick={() => onViewDev?.()}
-      title="Open Dev cleanup to trash worktrees, node_modules, and build caches"
+      title="Open Dev Artifacts to trash worktrees, node_modules, and build caches"
     >
       <span className="metric-value accent">{formatBytes(dev.totalBytes)}</span>
-      <span className="metric-label">dev cleanup</span>
+      <span className="metric-label">dev artifacts</span>
       <span className="metric-dev-meta">
         {formatCount(dev.projectCount)} proj
         {topKind ? ` · ${formatCount(dev.kindTotals[0]!.count)} trees` : ""}

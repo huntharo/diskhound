@@ -42,7 +42,7 @@ const TABS: { id: AppView; label: string; key: string }[] = [
   { id: "overview", label: "Overview", key: "1" },
   { id: "files", label: "Largest Files", key: "2" },
   { id: "folders", label: "Folders", key: "3" },
-  { id: "dev", label: "Dev", key: "4" },
+  { id: "dev", label: "Dev Artifacts", key: "4" },
   { id: "duplicates", label: "Duplicates", key: "5" },
   { id: "changes", label: "Changes", key: "6" },
   { id: "easyMove", label: "Easy Move", key: "7" },
@@ -1271,7 +1271,7 @@ export function App() {
               {view === "overview" && <ErrorBoundary name="Overview"><Overview snapshot={snapshot} onFilterExtension={onFilterExtension} onViewChanges={() => setView("changes")} onViewDev={() => setView("dev")} scanPercent={currentScanPercent} /></ErrorBoundary>}
               {view === "files" && <ErrorBoundary name="File List"><FileList snapshot={indexSearchSnapshot} initialFilter={filterExt} /></ErrorBoundary>}
               {view === "folders" && <ErrorBoundary name="Folders"><FolderList snapshot={snapshot} /></ErrorBoundary>}
-              {view === "dev" && <ErrorBoundary name="Dev"><DevView snapshot={snapshot} /></ErrorBoundary>}
+              {view === "dev" && <ErrorBoundary name="Dev Artifacts"><DevView snapshot={snapshot} /></ErrorBoundary>}
               {view === "duplicates" && (
                 <ErrorBoundary name="Duplicates">
                   <DuplicatesView

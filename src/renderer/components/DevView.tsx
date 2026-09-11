@@ -4,6 +4,7 @@ import type { DevArtifact, DevArtifactKind, DevArtifactReport, ScanSnapshot } fr
 import { DEV_KIND_LABEL } from "../../shared/devArtifacts";
 import { formatBytes, formatCount } from "../lib/format";
 import { nativeApi } from "../nativeApi";
+import { DEV_LOADING_STAGES, IndexLoadingPanel } from "./IndexLoadingPanel";
 import { toast } from "./Toasts";
 
 interface Props {
@@ -214,14 +215,11 @@ export function DevView({ snapshot }: Props) {
   if (loading && !report) {
     return (
       <div className="dev-view">
-        <div className="empty-view">
-          <span>Reading the scan index for developer artifacts…</span>
-          <span className="empty-view-sub">
-            {loadingElapsedSec < 4
-              ? "Worktrees, package trees, and build caches."
-              : `Large drives can take a minute. ${loadingElapsedSec}s`}
-          </span>
-        </div>
+        <IndexLoadingPanel
+          title="Reading developer artifacts"
+          stages={DEV_LOADING_STAGES}
+          elapsedSec={loadingElapsedSec}
+        />
       </div>
     );
   }

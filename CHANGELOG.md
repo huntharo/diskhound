@@ -35,7 +35,7 @@ back to the live top-N list when the index is not on disk yet.
 
 ### Dev artifacts
 
-New **Dev** tab (Ctrl+4) groups worktrees, `node_modules`, Rust
+New **Dev Artifacts** tab (Ctrl+4) groups worktrees, `node_modules`, Rust
 `target/`, package-manager caches, venvs, and other developer bloat by
 kind or project, with growth since the previous scan. Overview shows a
 card when those trees exceed 512 MB.
@@ -52,11 +52,11 @@ in-memory map.
 
 ### Dev cleanup
 
-The Dev tab no longer freezes the app while it reads a multi-million-file
-index (that work runs in a worker). Overview shows a compact **dev cleanup**
-tile on the summary row. From Dev you can select trees, trash selected, or
-trash all. Folders yields while loading a large sidecar so the tab does not
-stay stuck on "Loading folder contents".
+The Dev Artifacts tab no longer freezes the app while it reads a
+multi-million-file index (that work runs in a worker). Overview shows a
+compact **dev cleanup** tile on the summary row. From Dev Artifacts you
+can select trees, trash selected, or trash all. Folders and Dev Artifacts
+show a staged spinner while a large index loads.
 
 ### Packaged app starts
 

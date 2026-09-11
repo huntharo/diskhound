@@ -7,6 +7,7 @@ import { formatBytes, formatCount } from "../lib/format";
 import { useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
 import { FileIcon } from "./FileIcon";
+import { FOLDER_LOADING_STAGES, IndexLoadingPanel } from "./IndexLoadingPanel";
 import { PathContextMenu } from "./PathContextMenu";
 
 interface Props {
@@ -332,15 +333,12 @@ export function FolderList({ snapshot }: Props) {
       {/* ── Directory list ── */}
       <div className="folder-list-scroll">
         {loading ? (
-          <div className="empty-view" style={{ paddingTop: 48 }}>
-            <span>Loading folder contents…</span>
-            {loadingElapsedSec >= 4 && (
-              <span className="empty-view-sub">
-                Large drives can take a minute the first time this tab opens.
-                {loadingElapsedSec >= 8 ? ` ${loadingElapsedSec}s` : ""}
-              </span>
-            )}
-          </div>
+          <IndexLoadingPanel
+            compact
+            title="Loading folder contents"
+            stages={FOLDER_LOADING_STAGES}
+            elapsedSec={loadingElapsedSec}
+          />
         ) : children.length === 0 && looseFiles.length === 0 && folderMeta.hiddenExcludedCount === 0 ? (
           <div className="empty-view" style={{ paddingTop: 48 }}>
             <span>This folder appears empty in the scan index</span>
