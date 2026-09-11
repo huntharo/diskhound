@@ -147,6 +147,46 @@ describe("resolveDevArtifactSidecar", () => {
   });
 });
 
+describe("loadDevArtifactReport", () => {
+  it("opens a compact sidecar without a worker", async () => {
+    const { loadDevArtifactReport, writeDevArtifactSidecar } = await import("../devArtifactSidecar");
+    const dest = Path.join(tempDir, "history.dev-artifacts.json");
+    await writeDevArtifactSidecar(dest, {
+      version: 1,
+      rootPath: "C:\\",
+      generatedAt: 4,
+      roots: [{ path: "C:\\proj\\node_modules", kind: "node-modules", size: 42, files: 3 }],
+      projects: ["C:\\proj"],
+    });
+    const report = await loadDevArtifactReport(dest, "C:\\", []);
+    expect(report?.rootPath).toBe("C:\\");
+    expect(report?.totalBytes).toBe(42);
+    expect(report?.artifacts[0]?.path).toBe("C:\\proj\\node_modules");
+  });
+
+  it("adopts a pending sidecar for the same root", async () => {
+    const { loadDevArtifactReport, writeDevArtifactSidecar } = await import("../devArtifactSidecar");
+    const dest = Path.join(tempDir, "adopt.dev-artifacts.json");
+    const pending = Path.join(tempDir, "pending-load.dev-artifacts.json");
+    await writeDevArtifactSidecar(pending, {
+      version: 1,
+      rootPath: "C:\\",
+      generatedAt: 5,
+      roots: [{ path: "C:\\proj\\target", kind: "rust-target", size: 80, files: 4 }],
+      projects: ["C:\\proj"],
+    });
+    const report = await loadDevArtifactReport(dest, "C:\\", [pending]);
+    expect(report?.artifacts[0]?.kind).toBe("rust-target");
+  });
+
+  it("throws when the dest sidecar exists but is unreadable", async () => {
+    const { loadDevArtifactReport } = await import("../devArtifactSidecar");
+    const dest = Path.join(tempDir, "broken.dev-artifacts.json");
+    await FSP.writeFile(dest, "{not-json");
+    await expect(loadDevArtifactReport(dest, "C:\\", [])).rejects.toThrow(/exists but could not be read/);
+  });
+});
+
 describe("compactDevArtifactSidecar", () => {
   it("keeps the largest trees and only projects that own them", async () => {
     const { compactDevArtifactSidecar, DEV_SIDECAR_ROOT_CAP } = await import("../devArtifactSidecar");

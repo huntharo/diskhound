@@ -40,6 +40,9 @@ asar: true
 # resolution logic.
 asarUnpack:
   - "node_modules/blake2/**/*"
+  # Worker threads cannot execute scripts inside app.asar. Unpack the
+  # scan workers so classify / rescan / folder-tree / full-diff spawn.
+  - "dist-electron/scan/**"
 compression: maximum
 
 publish:

@@ -4,6 +4,7 @@ import { createInterface } from "node:readline";
 import { Worker } from "node:worker_threads";
 import { createGunzip } from "node:zlib";
 
+import { resolveBundledWorkerScript } from "./bundledWorkerPath";
 import { normPath } from "./pathUtils";
 import type {
   CompactFolderFileRecord,
@@ -159,7 +160,7 @@ export async function buildFolderTreeFromIndex(
 }
 
 export function resolveBundledFolderTreeWorkerPath(baseDir: string): string {
-  return Path.join(baseDir, "scan", "folderTreeWorker.cjs");
+  return resolveBundledWorkerScript(baseDir, "folderTreeWorker.cjs");
 }
 
 export interface RunFolderTreeWorkerOptions {

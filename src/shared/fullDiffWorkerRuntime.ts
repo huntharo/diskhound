@@ -7,6 +7,7 @@ import { createInterface } from "node:readline";
 import { Worker } from "node:worker_threads";
 import { createGunzip } from "node:zlib";
 
+import { resolveBundledWorkerScript } from "./bundledWorkerPath";
 import type { FullDiffResult, FullFileChange } from "./contracts";
 import type {
   FullDiffWorkerInput,
@@ -416,7 +417,7 @@ export async function computeFullDiffFromIndexFiles(
 }
 
 export function resolveBundledFullDiffWorkerPath(baseDir: string): string {
-  return Path.join(baseDir, "scan", "fullDiffWorker.cjs");
+  return resolveBundledWorkerScript(baseDir, "fullDiffWorker.cjs");
 }
 
 export interface RunFullDiffWorkerOptions {

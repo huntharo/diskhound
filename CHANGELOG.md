@@ -59,8 +59,12 @@ own them. A 17 MB C: sidecar (≈29k trees + every project marker)
 crashed the load worker (exit 1); Dev then classified the 1.1M-line
 folder tree for ~55s and said “reading the folder tree.” That fallback
 is for old scans with no sidecar file. A sidecar on disk is loaded as
-JSON — never reclassified from the folder tree. Fat sidecars already
-on disk are slimmed on first successful open.
+JSON in the main process — never reclassified from the folder tree,
+and never sent through a worker thread. The packaged load worker
+exited 1 inside `app.asar` (logged as OOM); Retry then treated a
+valid C: sidecar as missing. Fat sidecars already on disk are slimmed
+on first successful open. Scan workers unpack next to the asar so
+classify / rescan / folder-tree can still spawn.
 **Rescan trees** walks those artifact folders on disk without a full
 drive scan. Overview's tile reads the sidecar only. Dev Artifacts and
 Folders can start the same full scan Overview uses when the selected

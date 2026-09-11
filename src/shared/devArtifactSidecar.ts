@@ -370,6 +370,38 @@ export async function resolveDevArtifactSidecar(
   return null;
 }
 
+/**
+ * Happy path for Dev open: read the compact sidecar (or adopt a
+ * matching pending file) and build the report. A few hundred KB of
+ * JSON — do this in-process. Do not spawn a worker, and do not
+ * treat a file on disk as "no sidecar."
+ */
+export async function loadDevArtifactReport(
+  destPath: string,
+  scanRoot: string,
+  pendingPaths: string[],
+  previousSidecarPath?: string | null,
+): Promise<DevArtifactReport | null> {
+  const sidecar = await resolveDevArtifactSidecar(destPath, scanRoot, pendingPaths);
+  if (!sidecar) {
+    if (FS.existsSync(destPath)) {
+      throw new Error(`Dev Artifacts sidecar exists but could not be read: ${Path.basename(destPath)}`);
+    }
+    return null;
+  }
+  const compact = compactDevArtifactSidecar(sidecar);
+  if (
+    compact.roots.length !== sidecar.roots.length
+    || compact.projects.length !== sidecar.projects.length
+  ) {
+    await writeDevArtifactSidecar(destPath, compact);
+  }
+  const previous = previousSidecarPath
+    ? await readDevArtifactSidecar(previousSidecarPath)
+    : null;
+  return reportFromSidecar(compact, previous);
+}
+
 export async function writeDevArtifactSidecar(filePath: string, sidecar: DevArtifactSidecar): Promise<void> {
   await FSP.mkdir(Path.dirname(filePath), { recursive: true });
   const tmp = `${filePath}.tmp`;

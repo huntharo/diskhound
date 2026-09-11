@@ -108,10 +108,10 @@ import {
   runFolderTreeWorker,
 } from "./shared/folderTreeWorkerRuntime";
 import { parseFolderTreeSidecarLine } from "./shared/folderTreeSidecarParse";
+import { loadDevArtifactReport } from "./shared/devArtifactSidecar";
 import {
   resolveBundledDevArtifactsWorkerPath,
   runDevArtifactsClassifyWorker,
-  runDevArtifactsLoadWorker,
   runDevArtifactsRescanWorker,
 } from "./shared/devArtifactsWorkerRuntime";
 import {
@@ -3091,15 +3091,12 @@ void (async () => {
   const devArtifactInflight = new Map<string, Promise<DevArtifactReport | null>>();
   const devRescanAbort = new Map<string, AbortController>();
 
-  const loadDevReportInWorker = (scanId: string, scanRoot: string, previousId?: string) =>
-    runDevArtifactsLoadWorker(
-      {
-        destSidecarPath: devArtifactsSidecarPath(scanId),
-        scanRoot,
-        pendingPaths: listPendingDevArtifactSidecars(),
-        previousSidecarPath: previousId ? devArtifactsSidecarPath(previousId) : null,
-      },
-      { workerPath: devArtifactsWorkerEntry },
+  const loadDevReport = (scanId: string, scanRoot: string, previousId?: string) =>
+    loadDevArtifactReport(
+      devArtifactsSidecarPath(scanId),
+      scanRoot,
+      listPendingDevArtifactSidecars(),
+      previousId ? devArtifactsSidecarPath(previousId) : null,
     );
 
   ipcMain.handle("diskhound:get-dev-artifacts", async (_event, rootPath: string, options?: { sidecarOnly?: boolean }) => {
@@ -3112,7 +3109,7 @@ void (async () => {
     const loadKey = `${current.id}:load`;
     let loadPromise = devArtifactInflight.get(loadKey);
     if (!loadPromise) {
-      loadPromise = loadDevReportInWorker(current.id, rootPath, history[1]?.id)
+      loadPromise = loadDevReport(current.id, rootPath, history[1]?.id)
         .then((report) => {
           if (report && report.artifacts.length > 0) devArtifactCache.set(current.id, report);
           return report;
@@ -3122,6 +3119,7 @@ void (async () => {
             "dev-artifacts",
             err instanceof Error ? (err.stack ?? err.message) : String(err),
           );
+          if (FS_SYNC.existsSync(devArtifactsSidecarPath(current.id))) throw err;
           return null;
         })
         .finally(() => {
@@ -3138,15 +3136,13 @@ void (async () => {
       const report = await loadPromise;
       if (report) return report;
 
-      // A sidecar on disk is the post-scan path. Do not classify the
-      // 1.1M-line folder tree because load returned empty — that was
-      // the 55s C: open after the worker exited 1 on a 17 MB file.
-      if (FS_SYNC.existsSync(devArtifactsSidecarPath(current.id))) {
+      const sidecarPath = devArtifactsSidecarPath(current.id);
+      if (FS_SYNC.existsSync(sidecarPath)) {
         writeCrashLog(
           "dev-artifacts",
-          `scanId=${current.id} sidecar present but load returned empty; skipping folder-tree classify`,
+          `scanId=${current.id} sidecar present but load returned empty; not classifying the folder tree`,
         );
-        return null;
+        throw new Error(`Dev Artifacts sidecar exists but could not be read: ${Path.basename(sidecarPath)}`);
       }
 
       // Old scans have no Dev sidecar. Classify from the folder-tree
@@ -3214,7 +3210,7 @@ void (async () => {
       );
       const latest = getScanHistory(rootPath)[0];
       if (latest && latest.id !== current.id) {
-        const adopted = await loadDevReportInWorker(latest.id, rootPath, getScanHistory(rootPath)[1]?.id);
+        const adopted = await loadDevReport(latest.id, rootPath, getScanHistory(rootPath)[1]?.id);
         if (adopted && adopted.artifacts.length > 0) {
           devArtifactCache.set(latest.id, adopted);
           return adopted;

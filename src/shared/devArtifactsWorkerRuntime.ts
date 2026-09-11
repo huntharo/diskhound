@@ -1,5 +1,6 @@
-import * as Path from "node:path";
 import { Worker } from "node:worker_threads";
+
+import { resolveBundledWorkerScript } from "./bundledWorkerPath";
 
 import type { DevArtifactReport } from "./contracts";
 import type { DevArtifactsRescanProgress } from "./devArtifactSidecar";
@@ -13,7 +14,7 @@ import type {
 } from "./devArtifactsWorkerProtocol";
 
 export function resolveBundledDevArtifactsWorkerPath(baseDir: string): string {
-  return Path.join(baseDir, "scan", "devArtifactsWorker.cjs");
+  return resolveBundledWorkerScript(baseDir, "devArtifactsWorker.cjs");
 }
 
 export interface RunDevArtifactsWorkerOptions {
