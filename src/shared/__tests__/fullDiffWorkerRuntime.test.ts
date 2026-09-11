@@ -71,6 +71,27 @@ describe("computeFullDiffFromIndexFiles", () => {
     ]);
   });
 
+  it("ignores extra hardlink records so occupancy is not double-counted", async () => {
+    const baselinePath = await writeIndex("baseline-hardlink", [
+      { p: "C:\\a\\file.bin", s: 1000, m: 1 },
+      { p: "C:\\b\\file.bin", s: 1000, m: 1, h: 1 },
+    ]);
+    const currentPath = await writeIndex("current-hardlink", [
+      { p: "C:\\a\\file.bin", s: 1000, m: 2 },
+      { p: "C:\\b\\file.bin", s: 1000, m: 2, h: 1 },
+    ]);
+    const result = await computeFullDiffFromIndexFiles({
+      baselineId: "baseline-hardlink",
+      currentId: "current-hardlink",
+      baselinePath,
+      currentPath,
+      caseSensitive: false,
+    });
+    expect(result?.totalChanges).toBe(0);
+    expect(result?.totalBytesAdded).toBe(0);
+    expect(result?.totalBytesRemoved).toBe(0);
+  });
+
   it("ignores malformed lines and directory records", async () => {
     const baselinePath = await writeIndex("baseline-noisy", [
       { p: "C:\\folder", t: "d", m: 1 },

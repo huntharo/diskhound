@@ -202,6 +202,25 @@ let isQuitting = false;
 let pendingSecondInstanceFocus = false;
 /** Filled after createWindow is defined inside whenReady. */
 let createMainWindowFn: (() => Promise<void>) | null = null;
+/** In-flight createWindow so second-instance / activate cannot spawn a duplicate. */
+let creatingWindow: Promise<void> | null = null;
+
+async function ensureMainWindow(): Promise<void> {
+  if (mainWindow && !mainWindow.isDestroyed()) return;
+  if (creatingWindow) {
+    await creatingWindow;
+    return;
+  }
+  const create = createMainWindowFn;
+  if (!create) return;
+  const pending = create();
+  creatingWindow = pending;
+  try {
+    await pending;
+  } finally {
+    if (creatingWindow === pending) creatingWindow = null;
+  }
+}
 
 app.commandLine.appendSwitch("enable-gpu-rasterization");
 app.commandLine.appendSwitch("enable-oop-rasterization");
@@ -544,12 +563,24 @@ function bringWindowToFront(win: BrowserWindow): void {
 
 function focusOrShowMainWindow(): void {
   const win = mainWindow;
-  if (!win || win.isDestroyed()) {
-    pendingSecondInstanceFocus = true;
-    if (createMainWindowFn) void createMainWindowFn();
+  if (win && !win.isDestroyed()) {
+    bringWindowToFront(win);
     return;
   }
-  bringWindowToFront(win);
+  pendingSecondInstanceFocus = true;
+  void ensureMainWindow()
+    .then(() => {
+      if (!pendingSecondInstanceFocus) return;
+      const created = mainWindow;
+      if (!created || created.isDestroyed()) return;
+      pendingSecondInstanceFocus = false;
+      bringWindowToFront(created);
+    })
+    .catch((err: unknown) => {
+      writeStartupLog(
+        `ensureMainWindow failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
 }
 
 function hideMainWindow(): void {
@@ -933,7 +964,11 @@ void (async () => {
     if (!session.active) return;
 
     if (message.type === "progress" || message.type === "done") {
-      message.snapshot.sizeSemantics = ALLOCATED_SIZE_SEMANTICS;
+      const engine = message.snapshot.engine;
+      message.snapshot.sizeSemantics =
+        engine === "js-worker" && process.platform === "win32"
+          ? "logical"
+          : ALLOCATED_SIZE_SEMANTICS;
       if (message.type === "done") {
         // Persist history before notifying the renderer so immediate diff
         // lookups can see the just-finished scan.
@@ -2976,7 +3011,12 @@ void (async () => {
         scanRootPath: rootPath,
       };
     }
-    return analyzeCleanupFromIndex(rootPath, indexFilePath(current.id), settings.cleanup);
+    return analyzeCleanupFromIndex(
+      rootPath,
+      indexFilePath(current.id),
+      settings.cleanup,
+      settings.scanning.excludedFolderPaths,
+    );
   });
   ipcMain.handle("diskhound:search-index", async (_event, rootPath: string, query: { query: string; minSizeBytes?: number; extension?: string; limit?: number }) => {
     const history = getScanHistory(rootPath);
@@ -4002,7 +4042,7 @@ void (async () => {
   applyLoginItemSettings(settings.general.launchOnStartup);
 
   restartMonitoring(settings);
-  await createWindow();
+  await ensureMainWindow();
   writeStartupLog("window created and loaded");
 
   // "Start minimized" is an AUTOSTART-ONLY preference — we want a
@@ -4282,7 +4322,11 @@ void (async () => {
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      void createWindow();
+      void ensureMainWindow().catch((err: unknown) => {
+        writeStartupLog(
+          `ensureMainWindow failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
     }
   });
 

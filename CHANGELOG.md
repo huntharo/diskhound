@@ -16,7 +16,10 @@ removed `wmic.exe` tool.
 
 Windows occupancy uses allocated size (see #2). Extra NTFS hardlinks stay
 visible as paths but no longer inflate totals, the treemap, or folder
-rollups.
+rollups. The `h` flag survives mtime-skip inheritance and USN rewrites.
+Unelevated FindFirstFile walks still cannot see link counts. USN records
+omit size when handle metadata is unavailable so Node can stat instead of
+storing a 0-byte file.
 
 ### Index search and cleanup
 
@@ -48,7 +51,8 @@ Launching it again often did nothing (Windows focus-stealing, lock taken
 late). Relaunch now restores and focuses the existing window, including
 from the tray. The first hide-to-tray shows a balloon so it is obvious
 the app is still running. New installs default "Minimize to tray" off;
-existing settings are left alone.
+existing settings are left alone. A second launch during first window
+creation reuses the in-flight window instead of opening another.
 
 ### Windows size on disk for sparse files (#2)
 

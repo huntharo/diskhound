@@ -12,6 +12,7 @@ import type {
   SuggestionCategory,
   SuggestionRisk,
 } from "./contracts";
+import { isPathExcluded } from "./pathProtection";
 import { attachPipeErrorHandlers } from "./streamSafety";
 
 let nextId = 0;
@@ -203,6 +204,7 @@ export async function analyzeCleanupFromIndex(
   rootPath: string,
   indexPath: string,
   settings: CleanupSettings,
+  excludedFolderPaths: readonly string[] = [],
 ): Promise<CleanupAnalysis> {
   if (!existsSync(indexPath)) {
     return {
@@ -237,6 +239,7 @@ export async function analyzeCleanupFromIndex(
       try { rec = JSON.parse(line); } catch { continue; }
       if (!rec || typeof rec.p !== "string" || rec.t === "d" || typeof rec.s !== "number") continue;
       if (rec.h === 1) continue;
+      if (isPathExcluded(rec.p, excludedFolderPaths)) continue;
       const ext = Path.extname(rec.p).toLowerCase() || "(no ext)";
       const mtime = typeof rec.m === "number" ? rec.m : now;
 
@@ -245,8 +248,7 @@ export async function analyzeCleanupFromIndex(
         if (LOG_EXTENSIONS.has(ext)) addToBucket(buckets.logs, rec.p, rec.s);
       }
       if (settings.autoDetectCaches) {
-        const dirName = Path.basename(Path.dirname(rec.p));
-        if (BUILD_CACHE_DIRS.has(dirName)) addToBucket(buckets.caches, Path.dirname(rec.p), rec.s);
+        if (pathHasCacheSegment(rec.p)) addToBucket(buckets.caches, cacheRootForPath(rec.p), rec.s);
         const pathNorm = normalizePath(rec.p);
         if (BROWSER_CACHE_PATHS.some((bp) => pathNorm.includes(normalizePath(bp ?? "")))) {
           addToBucket(buckets.caches, rec.p, rec.s);
@@ -289,6 +291,21 @@ export async function analyzeCleanupFromIndex(
     analyzedAt: now,
     scanRootPath: rootPath,
   };
+}
+
+function pathHasCacheSegment(filePath: string): boolean {
+  return filePath.split(/[\\/]+/).some((seg) => BUILD_CACHE_DIRS.has(seg));
+}
+
+function cacheRootForPath(filePath: string): string {
+  const parts = filePath.split(/[\\/]+/).filter(Boolean);
+  const idx = parts.findIndex((seg) => BUILD_CACHE_DIRS.has(seg));
+  if (idx < 0) return Path.dirname(filePath);
+  const sep = filePath.includes("\\") ? "\\" : "/";
+  if (/^[A-Za-z]:/.test(filePath)) return parts.slice(0, idx + 1).join(sep);
+  if (filePath.startsWith("/")) return "/" + parts.slice(0, idx + 1).join("/");
+  if (filePath.startsWith("\\\\")) return "\\\\" + parts.slice(0, idx + 1).join("\\");
+  return parts.slice(0, idx + 1).join(sep);
 }
 
 function emptyBucket(): { paths: string[]; size: number; files: number } {

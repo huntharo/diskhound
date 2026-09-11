@@ -40,10 +40,10 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FileBasicInfo, FileStandardInfo, GetFileInformationByHandleEx,
-    GetFinalPathNameByHandleW, OpenFileById, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_ID_TYPE, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
-    OPEN_EXISTING,
+    GetFinalPathNameByHandleW, OpenFileById, FILE_ATTRIBUTE_DIRECTORY, FILE_BASIC_INFO,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_ID_TYPE,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_STANDARD_INFO, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::Ioctl::{
     FSCTL_QUERY_USN_JOURNAL, FSCTL_READ_USN_JOURNAL, USN_JOURNAL_DATA_V0,
@@ -125,7 +125,10 @@ enum OutputLine {
         #[serde(rename = "reasonMask")]
         reason_mask: u32,
         timestamp: u64,
-        size: u64,
+        /// Allocated size when FileStandardInfo succeeded. Omitted so the
+        /// Node side can stat instead of recording a false 0-byte file.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        size: Option<u64>,
         mtime: u64,
         #[serde(rename = "isDirectory")]
         is_directory: bool,
@@ -321,9 +324,9 @@ where
 
 struct ResolvedFile {
     path: String,
-    allocated_size: u64,
+    allocated_size: Option<u64>,
     mtime_ms: u64,
-    is_directory: bool,
+    is_directory: Option<bool>,
 }
 
 fn file_standard_info(handle: HANDLE) -> Option<FILE_STANDARD_INFO> {
@@ -392,12 +395,8 @@ fn resolve_file(volume: HANDLE, file_ref: u64) -> Option<ResolvedFile> {
     let basic = file_basic_info(handle);
     let allocated_size = standard
         .as_ref()
-        .map(|info| info.AllocationSize.max(0) as u64)
-        .unwrap_or(0);
-    let is_directory = standard
-        .as_ref()
-        .map(|info| info.Directory != 0)
-        .unwrap_or(false);
+        .map(|info| info.AllocationSize.max(0) as u64);
+    let is_directory = standard.as_ref().map(|info| info.Directory != 0);
     let mtime_ms = basic
         .map(|info| windows_filetime_to_unix_ms(info.LastWriteTime))
         .unwrap_or(0);
@@ -493,6 +492,9 @@ pub fn run_journal_mode(drive_letter: char, start_cursor: Option<i64>) -> Result
             .unwrap_or("");
         let _ = basename; // used to assert basename == _name in a stricter build
 
+        let is_directory = resolved.is_directory.unwrap_or(
+            (record.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0,
+        );
         let line = OutputLine::JournalRecord {
             op: JournalOp::from_reason(record.Reason),
             path: resolved.path,
@@ -503,7 +505,7 @@ pub fn run_journal_mode(drive_letter: char, start_cursor: Option<i64>) -> Result
             timestamp: windows_filetime_to_unix_ms(record.TimeStamp),
             size: resolved.allocated_size,
             mtime: resolved.mtime_ms,
-            is_directory: resolved.is_directory,
+            is_directory,
         };
         let _ = emit(&line);
         emitted += 1;
@@ -540,4 +542,36 @@ pub fn query_cursor(drive_letter: char) -> Result<(), String> {
 
     unsafe { CloseHandle(volume) };
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(size: Option<u64>) -> OutputLine {
+        OutputLine::JournalRecord {
+            op: JournalOp::Modify,
+            path: r"C:\tmp\file.bin".into(),
+            file_ref: 1,
+            parent_ref: 2,
+            usn: 3,
+            reason_mask: 0,
+            timestamp: 0,
+            size,
+            mtime: 0,
+            is_directory: false,
+        }
+    }
+
+    #[test]
+    fn journal_record_omits_size_when_standard_info_failed() {
+        let json = serde_json::to_string(&record(None)).unwrap();
+        assert!(!json.contains("\"size\""), "unexpected size in {json}");
+    }
+
+    #[test]
+    fn journal_record_keeps_zero_allocated_size() {
+        let json = serde_json::to_string(&record(Some(0))).unwrap();
+        assert!(json.contains("\"size\":0"), "missing zero size in {json}");
+    }
 }

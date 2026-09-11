@@ -77,10 +77,13 @@ function splitSegments(filePath: string): string[] {
 }
 
 function joinSegments(original: string, count: number): string {
+  const parts = splitSegments(original).slice(0, count);
+  if (original.startsWith("\\\\") || original.startsWith("//")) {
+    return "\\\\" + parts.join("\\");
+  }
   const sep = original.includes("\\") ? "\\" : "/";
   const isAbsWin = /^[A-Za-z]:/.test(original);
   const isAbsPosix = original.startsWith("/");
-  const parts = splitSegments(original).slice(0, count);
   if (isAbsWin) return parts.join(sep);
   if (isAbsPosix) return sep + parts.join(sep);
   return parts.join(sep);

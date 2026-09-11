@@ -840,13 +840,13 @@ function OverviewInsights({ snapshot, onViewDev }: { snapshot: ScanSnapshot; onV
         </button>
       )}
       {showCleanup && cleanup && (
-        <button className="overview-insight-card" onClick={() => onViewDev?.()}>
+        <div className="overview-insight-card">
           <span className="overview-insight-kicker">Cleanup from this scan</span>
           <span className="overview-insight-value">{formatBytes(cleanup.totalReclaimableBytes)}</span>
           <span className="overview-insight-sub">
-            {formatCount(cleanup.suggestions.length)} groups · temps, caches, old installers
+            {cleanup.suggestions.slice(0, 3).map((s) => s.title).join(" · ")}
           </span>
-        </button>
+        </div>
       )}
     </div>
   );

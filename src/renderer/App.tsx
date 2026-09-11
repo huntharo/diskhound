@@ -51,7 +51,7 @@ const TABS: { id: AppView; label: string; key: string }[] = [
   { id: "settings", label: "Settings", key: "0" },
 ];
 
-const SEARCHABLE_VIEWS: readonly AppView[] = ["files", "folders", "overview", "dev"];
+const SEARCHABLE_VIEWS: readonly AppView[] = ["files"];
 
 function isEditableElement(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;

@@ -19,6 +19,7 @@ export function DevView({ snapshot }: Props) {
   const [groupBy, setGroupBy] = useState<GroupBy>("kind");
   const [kindFilter, setKindFilter] = useState<DevArtifactKind | "all">("all");
   const [busyPath, setBusyPath] = useState<string | null>(null);
+  const [trashed, setTrashed] = useState<Set<string>>(() => new Set());
 
   const load = useCallback(async () => {
     if (!root) {
@@ -40,10 +41,11 @@ export function DevView({ snapshot }: Props) {
 
   const rows = useMemo(() => {
     if (!report) return [];
+    const visible = report.artifacts.filter((a) => !trashed.has(a.path));
     return kindFilter === "all"
-      ? report.artifacts
-      : report.artifacts.filter((a) => a.kind === kindFilter);
-  }, [report, kindFilter]);
+      ? visible
+      : visible.filter((a) => a.kind === kindFilter);
+  }, [report, kindFilter, trashed]);
 
   const groups = useMemo(() => {
     const map = new Map<string, DevArtifact[]>();
@@ -69,7 +71,7 @@ export function DevView({ snapshot }: Props) {
       const result = await nativeApi.trashPath(path);
       if (result?.ok) {
         toast("success", "Moved to trash", path);
-        void load();
+        setTrashed((prev) => new Set(prev).add(path));
       } else {
         toast("error", "Could not trash", result?.message ?? path);
       }

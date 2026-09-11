@@ -36,4 +36,11 @@ describe("classifyArtifactPath", () => {
   it("ignores ordinary documents", () => {
     expect(classifyArtifactPath("C:\\Users\\thoma\\Documents\\tax-2025.pdf")).toBeNull();
   });
+
+  it("keeps UNC prefixes", () => {
+    expect(classifyArtifactPath("\\\\nas\\share\\app\\node_modules\\x\\index.js")).toEqual({
+      root: "\\\\nas\\share\\app\\node_modules",
+      kind: "node-modules",
+    });
+  });
 });

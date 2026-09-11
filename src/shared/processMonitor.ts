@@ -134,7 +134,6 @@ async function sampleProcessesNative(): Promise<ProcessInfo[] | null> {
       exePath: row.exePath,
       commandLine: row.commandLine,
       parentPid: row.parentPid,
-      cpuTimeMs: 0,
     }));
     return attachParentNames(processes);
   } catch {

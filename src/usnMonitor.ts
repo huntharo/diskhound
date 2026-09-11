@@ -485,7 +485,7 @@ async function applyDeltasToIndex(
   const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
   for await (const line of rl) {
     if (!line) continue;
-    let rec: { p?: string; s?: number; m?: number; t?: string };
+    let rec: { p?: string; s?: number; m?: number; t?: string; h?: number };
     try { rec = JSON.parse(line); } catch { continue; }
     if (!rec || typeof rec.p !== "string") continue;
 
@@ -506,14 +506,14 @@ async function applyDeltasToIndex(
 
     const update = pendingAdds.get(norm);
     if (update) {
-      writeLine({ p: rec.p, s: update.size, m: update.mtime });
+      writeLine({ p: rec.p, s: update.size, m: update.mtime, ...(rec.h === 1 ? { h: 1 } : {}) });
       pendingAdds.delete(norm);
       modifications += 1;
       continue;
     }
 
-    // Unchanged: pass through
-    writeLine({ p: rec.p, s: rec.s ?? 0, m: rec.m ?? 0 });
+    // Unchanged: pass through, including extra-hardlink occupancy flag.
+    writeLine({ p: rec.p, s: rec.s ?? 0, m: rec.m ?? 0, ...(rec.h === 1 ? { h: 1 } : {}) });
   }
 
   // Anything still in pendingAdds is a new file not previously in the index.

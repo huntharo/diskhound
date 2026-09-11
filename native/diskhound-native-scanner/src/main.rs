@@ -212,13 +212,13 @@ impl IndexWriter {
         Ok(())
     }
 
-    fn write_entry(&mut self, path: &str, size: u64, mtime: u64) -> io::Result<()> {
+    fn write_entry(&mut self, path: &str, size: u64, mtime: u64, extra_hardlink: bool) -> io::Result<()> {
         if let Some(tx) = self.tx.as_ref() {
             tx.send(IndexWriteMsg::File {
                 path: path.to_string(),
                 size,
                 mtime,
-                extra_hardlink: false,
+                extra_hardlink,
             })
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "index writer thread exited"))?;
         }
@@ -485,6 +485,8 @@ impl Baseline {
             t: Option<String>,
             #[serde(default)]
             m: Option<u64>,
+            #[serde(default)]
+            h: Option<u64>,
         }
 
         for line in reader.lines() {
@@ -514,6 +516,7 @@ impl Baseline {
                 continue;
             };
             file_records += 1;
+            let occupancy = if rec.h == Some(1) { 0 } else { size };
 
             // Bubble the file's size/count up to every ancestor directory.
             // This gives us O(1) "how much is under dir D" lookups during
@@ -524,7 +527,7 @@ impl Baseline {
                     break;
                 }
                 *dir_file_counts.entry(dir.clone()).or_insert(0) += 1;
-                *dir_total_sizes.entry(dir.clone()).or_insert(0) += size;
+                *dir_total_sizes.entry(dir.clone()).or_insert(0) += occupancy;
                 let parent = Path::new(&dir).parent().map(normalize_path);
                 if parent.as_deref().map(str::is_empty).unwrap_or(true)
                     || parent.as_deref() == Some(dir.as_str())
@@ -677,6 +680,7 @@ fn stream_inherited_files_into(
             continue;
         };
         let mtime = value.get("m").and_then(|v| v.as_u64()).unwrap_or(0);
+        let extra_hardlink = value.get("h").and_then(|v| v.as_u64()) == Some(1);
 
         let name = Path::new(path_str)
             .file_name()
@@ -688,7 +692,7 @@ fn stream_inherited_files_into(
         // Write to new index so the index remains a complete baseline for
         // the NEXT scan.
         if let Some(writer) = state.index_writer.as_mut() {
-            let _ = writer.write_entry(&normalized, size, mtime);
+            let _ = writer.write_entry(&normalized, size, mtime, extra_hardlink);
         }
 
         // Update top-N + extension aggregates. Note: directory_totals +
@@ -707,8 +711,10 @@ fn stream_inherited_files_into(
             size,
             modified_at: mtime,
         };
-        upsert_ranked_file(&mut state.largest_files, file_record, state.input.top_file_limit);
-        rollup_extension(&mut state.extension_totals, &extension, size);
+        if !extra_hardlink {
+            upsert_ranked_file(&mut state.largest_files, file_record, state.input.top_file_limit);
+            rollup_extension(&mut state.extension_totals, &extension, size);
+        }
 
         // Populate the folder-tree sidecar accumulator. Walker's
         // inheritance branch doesn't call `record_file` (which is where
@@ -3284,7 +3290,7 @@ fn record_file(state: &mut ScanState, file_record: ScanFileRecord) -> Result<(),
     // snapshot protocol keep working.
     if let Some(writer) = state.index_writer.as_mut() {
         if writer
-            .write_entry(&file_record.path, file_record.size, file_record.modified_at)
+            .write_entry(&file_record.path, file_record.size, file_record.modified_at, false)
             .is_err()
         {
             state.index_writer = None;
@@ -4229,9 +4235,11 @@ fn windows_find_data_occupancy(
     windows_allocated_size(&directory_path.join(file_name)).unwrap_or(logical)
 }
 
-/// Explorer "Size on disk" via GetCompressedFileSizeW — allocated clusters
-/// after NTFS sparse holes and compression. For ordinary files this equals
-/// logical size (not cluster-rounded).
+/// Explorer "Size on disk" via GetCompressedFileSizeW (cluster-rounded
+/// allocated bytes after sparse holes and compression). The walker only
+/// calls this for sparse/compressed/offline/cloud files; ordinary files
+/// stay at FindFirstFile logical size. Elevated MFT scans use $DATA
+/// allocated_size for every non-resident file.
 #[cfg(windows)]
 fn windows_allocated_size(path: &Path) -> Option<u64> {
     let wide = windows_wide_string(&windows_extended_path(path));

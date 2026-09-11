@@ -59,10 +59,11 @@ function isFileIndexRecord(value: unknown): value is FileIndexRecord {
     return false;
   }
 
-  const candidate = value as { p?: unknown; s?: unknown; t?: unknown };
+  const candidate = value as { p?: unknown; s?: unknown; t?: unknown; h?: unknown };
   return typeof candidate.p === "string"
     && typeof candidate.s === "number"
-    && candidate.t !== "d";
+    && candidate.t !== "d"
+    && candidate.h !== 1;
 }
 
 async function streamFileIndexRecords(
@@ -499,7 +500,7 @@ export async function runFullDiffWorker(
         // the crash log line reads as a diagnosis rather than a
         // generic "exited with code 1."
         const detail = code === 1
-          ? `Full diff worker out of memory (exit code 1). The inputs may exceed the worker's 12 GB heap — this drive is at the edge of what the in-memory diff can handle. The fast top-N summary still works.`
+          ? `Full diff worker out of memory (exit code 1). The streaming merge still needs headroom for sort chunks — the fast top-N summary still works.`
           : `Full diff worker exited with code ${code}`;
         settle(() => reject(new Error(detail)));
       }
