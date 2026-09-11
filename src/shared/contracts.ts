@@ -473,6 +473,17 @@ export interface DevArtifactReport {
   rootPath: string;
 }
 
+/** Live progress for `rescanDevArtifacts`. Not a full drive scan. */
+export interface DevArtifactsRescanProgress {
+  rootPath: string;
+  treesWalked: number;
+  treesTotal: number;
+  currentPath: string;
+  filesSoFar: number;
+  bytesSoFar: number;
+  elapsedMs: number;
+}
+
 export interface IndexSearchQuery {
   query: string;
   minSizeBytes?: number;
@@ -1126,6 +1137,9 @@ export interface DiskhoundNativeApi {
   getDevArtifacts: (rootPath: string, options?: { sidecarOnly?: boolean }) => Promise<DevArtifactReport | null>;
   /** Re-walk known artifact trees on disk (not a full drive scan). */
   rescanDevArtifacts: (rootPath: string) => Promise<DevArtifactReport | null>;
+  /** Stop an in-flight Dev tree walk. Does not start or cancel a drive scan. */
+  cancelDevArtifactsRescan: (rootPath: string) => Promise<void>;
+  onDevArtifactsProgress: (listener: (progress: DevArtifactsRescanProgress) => void) => () => void;
 
   // Easy Move
   easyMove: (sourcePath: string, destinationDir: string) => Promise<EasyMoveResult>;

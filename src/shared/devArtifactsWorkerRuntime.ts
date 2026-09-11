@@ -2,8 +2,10 @@ import * as Path from "node:path";
 import { Worker } from "node:worker_threads";
 
 import type { DevArtifactReport } from "./contracts";
+import type { DevArtifactsRescanProgress } from "./devArtifactSidecar";
 import type {
   DevArtifactsClassifyInput,
+  DevArtifactsLoadInput,
   DevArtifactsRescanInput,
   DevArtifactsWorkerInput,
   DevArtifactsWorkerRequest,
@@ -17,12 +19,13 @@ export function resolveBundledDevArtifactsWorkerPath(baseDir: string): string {
 export interface RunDevArtifactsWorkerOptions {
   workerPath: string;
   signal?: AbortSignal;
+  onProgress?: (progress: DevArtifactsRescanProgress) => void;
 }
 
 function runDevArtifactsRequest(
   request: DevArtifactsWorkerRequest,
   options: RunDevArtifactsWorkerOptions,
-): Promise<DevArtifactReport> {
+): Promise<DevArtifactReport | null> {
   const worker = new Worker(options.workerPath, {
     resourceLimits: {
       maxOldGenerationSizeMb: 4096,
@@ -30,7 +33,7 @@ function runDevArtifactsRequest(
     },
   });
 
-  return new Promise<DevArtifactReport>((resolve, reject) => {
+  return new Promise<DevArtifactReport | null>((resolve, reject) => {
     let settled = false;
 
     const settle = (callback: () => void) => {
@@ -55,6 +58,10 @@ function runDevArtifactsRequest(
 
     const onMessage = (message: DevArtifactsWorkerResponse) => {
       if (!message || message.requestId !== request.requestId) return;
+      if (message.type === "progress") {
+        options.onProgress?.(message.progress);
+        return;
+      }
       void worker.terminate().finally(() => {
         if (message.type === "result") {
           settle(() => resolve(message.report));
@@ -85,44 +92,46 @@ function runDevArtifactsRequest(
   });
 }
 
+async function requireReport(
+  request: DevArtifactsWorkerRequest,
+  options: RunDevArtifactsWorkerOptions,
+): Promise<DevArtifactReport> {
+  const report = await runDevArtifactsRequest(request, options);
+  if (!report) throw new Error("Dev artifacts worker returned no report");
+  return report;
+}
+
+function nextRequestId(): string {
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 export async function runDevArtifactsWorker(
   input: DevArtifactsWorkerInput,
   options: RunDevArtifactsWorkerOptions,
 ): Promise<DevArtifactReport> {
-  return runDevArtifactsRequest(
-    {
-      type: "analyze",
-      requestId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      input,
-    },
-    options,
-  );
+  return requireReport({ type: "analyze", requestId: nextRequestId(), input }, options);
 }
 
 export async function runDevArtifactsRescanWorker(
   input: DevArtifactsRescanInput,
   options: RunDevArtifactsWorkerOptions,
 ): Promise<DevArtifactReport> {
-  return runDevArtifactsRequest(
-    {
-      type: "rescan",
-      requestId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      input,
-    },
-    options,
-  );
+  return requireReport({ type: "rescan", requestId: nextRequestId(), input }, options);
 }
 
 export async function runDevArtifactsClassifyWorker(
   input: DevArtifactsClassifyInput,
   options: RunDevArtifactsWorkerOptions,
 ): Promise<DevArtifactReport> {
+  return requireReport({ type: "classify", requestId: nextRequestId(), input }, options);
+}
+
+export async function runDevArtifactsLoadWorker(
+  input: DevArtifactsLoadInput,
+  options: RunDevArtifactsWorkerOptions,
+): Promise<DevArtifactReport | null> {
   return runDevArtifactsRequest(
-    {
-      type: "classify",
-      requestId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      input,
-    },
+    { type: "load", requestId: nextRequestId(), input },
     options,
   );
 }

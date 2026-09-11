@@ -5,11 +5,13 @@ import {
   readDevArtifactSidecar,
   reportFromSidecar,
   rescanDevArtifactSidecar,
+  resolveDevArtifactSidecar,
   sidecarFromFolderTreeFile,
   writeDevArtifactSidecar,
 } from "../shared/devArtifactSidecar";
 import type {
   DevArtifactsClassifyInput,
+  DevArtifactsLoadInput,
   DevArtifactsRescanInput,
   DevArtifactsWorkerRequest,
   DevArtifactsWorkerResponse,
@@ -27,31 +29,59 @@ async function classifyFromFolderTree(input: DevArtifactsClassifyInput) {
   return reportFromSidecar(sidecar, previous);
 }
 
-async function rescanKnownTrees(input: DevArtifactsRescanInput) {
+async function loadSidecarReport(input: DevArtifactsLoadInput) {
+  const sidecar = await resolveDevArtifactSidecar(
+    input.destSidecarPath,
+    input.scanRoot,
+    input.pendingPaths,
+  );
+  if (!sidecar) return null;
+  const previous = input.previousSidecarPath
+    ? await readDevArtifactSidecar(input.previousSidecarPath)
+    : null;
+  return reportFromSidecar(sidecar, previous);
+}
+
+async function rescanKnownTrees(input: DevArtifactsRescanInput, requestId: string) {
   const sidecar = await readDevArtifactSidecar(input.sidecarPath);
   if (!sidecar) {
     throw new Error(
       "No Dev Artifacts sidecar to refresh. Run a full scan, or open Dev Artifacts after Folders has loaded.",
     );
   }
-  const next = await rescanDevArtifactSidecar(sidecar);
+  const next = await rescanDevArtifactSidecar(sidecar, (progress) => {
+    const response: DevArtifactsWorkerResponse = {
+      type: "progress",
+      requestId,
+      progress,
+    };
+    parentPort?.postMessage(response);
+  });
   await writeDevArtifactSidecar(input.sidecarPath, next);
   return reportFromSidecar(next, sidecar);
 }
 
 if (parentPort) {
   parentPort.on("message", (message: DevArtifactsWorkerRequest) => {
-    if (!message || (message.type !== "analyze" && message.type !== "rescan" && message.type !== "classify")) return;
+    if (
+      !message
+      || (message.type !== "analyze"
+        && message.type !== "rescan"
+        && message.type !== "classify"
+        && message.type !== "load")
+    ) return;
 
     const work = message.type === "classify"
       ? classifyFromFolderTree(message.input)
       : message.type === "rescan"
-        ? rescanKnownTrees(message.input)
-        : analyzeDevArtifacts(
-            message.input.rootPath,
-            message.input.currentIndexPath,
-            message.input.previousIndexPath,
-          );
+        ? rescanKnownTrees(message.input, message.requestId)
+        : message.type === "load"
+          ? loadSidecarReport(message.input)
+          : analyzeDevArtifacts(
+              message.input.rootPath,
+              message.input.currentIndexPath,
+              message.input.previousIndexPath,
+            );
 
     void work
       .then((report) => {

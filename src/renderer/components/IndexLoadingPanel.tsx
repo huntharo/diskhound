@@ -67,8 +67,8 @@ export const DEV_FOLDER_TREE_STAGES: Stage[] = [
 ];
 
 export const DEV_RESCAN_STAGES: Stage[] = [
-  { afterSec: 0, label: "Walking known artifact trees on disk…" },
+  { afterSec: 0, label: "Walking known artifact trees on this scan…" },
   { afterSec: 3, label: "Refreshing node_modules, targets, and caches…" },
-  { afterSec: 12, label: "Checking project folders for new trees…" },
-  { afterSec: 30, label: "Still walking — large package trees take a bit." },
+  { afterSec: 12, label: "Large package trees can take several minutes." },
+  { afterSec: 30, label: "Still walking known trees. This is not a full drive scan." },
 ];

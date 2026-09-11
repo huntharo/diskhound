@@ -38,7 +38,10 @@ const PROJECT_MARKERS = new Set([
   "package.swift",
 ]);
 
-const PROJECT_CHILD_HINTS = [
+/** Names the full scanner looks for under a project. Rescan does not
+ *  expand these — 4k projects × 17 hints used to enqueue tens of
+ *  thousands of walks. New trees show up on the next full scan. */
+export const PROJECT_CHILD_HINTS = [
   "node_modules",
   "target",
   ".next",
@@ -56,6 +59,15 @@ const PROJECT_CHILD_HINTS = [
   ".ruff_cache",
   "obj",
 ];
+
+export interface DevArtifactsRescanProgress {
+  treesWalked: number;
+  treesTotal: number;
+  currentPath: string;
+  filesSoFar: number;
+  bytesSoFar: number;
+  elapsedMs: number;
+}
 
 export function isProjectMarkerName(fileName: string): boolean {
   return PROJECT_MARKERS.has(fileName.toLowerCase());
@@ -213,20 +225,26 @@ export function sidecarFromAcc(acc: DevAcc, rootPath: string): DevArtifactSideca
   };
 }
 
-function nearestProject(artifactPath: string, projects: string[]): string | null {
-  const normalized = artifactPath.replace(/[\\/]+$/, "");
-  let best: string | null = null;
+function projectLookup(projects: string[]): Map<string, string> {
+  const map = new Map<string, string>();
   for (const project of projects) {
-    const prefix = project.replace(/[\\/]+$/, "");
-    const sep = artifactPath.includes("\\") ? "\\" : "/";
-    if (normalized === prefix || normalized.startsWith(prefix + sep) || normalized.startsWith(prefix + "/")) {
-      if (!best || prefix.length > best.length) best = project;
-    }
+    map.set(normalizeDir(project).toLowerCase(), project);
   }
-  return best;
+  return map;
 }
 
-function keepArtifact(root: string, projects: string[]): boolean {
+function nearestProject(artifactPath: string, projects: Map<string, string>): string | null {
+  let cursor = normalizeDir(artifactPath);
+  while (true) {
+    const hit = projects.get(cursor.toLowerCase());
+    if (hit) return hit;
+    const parent = Path.dirname(cursor);
+    if (parent === cursor) return null;
+    cursor = parent;
+  }
+}
+
+function keepArtifact(root: string, projects: Map<string, string>): boolean {
   const last = Path.basename(root).toLowerCase();
   if (last === "dist" || last === "build" || last === "out") {
     return nearestProject(root, projects) !== null;
@@ -239,11 +257,12 @@ export function reportFromSidecar(
   previous?: DevArtifactSidecar | null,
 ): DevArtifactReport {
   const prevByPath = new Map((previous?.roots ?? []).map((r) => [r.path, r.size]));
+  const projects = projectLookup(sidecar.projects);
   const artifacts: DevArtifact[] = [];
   for (const rec of sidecar.roots) {
     if (rec.size <= 0) continue;
-    if (!keepArtifact(rec.path, sidecar.projects)) continue;
-    const projectPath = nearestProject(rec.path, sidecar.projects);
+    if (!keepArtifact(rec.path, projects)) continue;
+    const projectPath = nearestProject(rec.path, projects);
     const previousSize = prevByPath.get(rec.path) ?? null;
     artifacts.push({
       path: rec.path,
@@ -327,7 +346,10 @@ export async function writeDevArtifactSidecar(filePath: string, sidecar: DevArti
   await FSP.rename(tmp, filePath);
 }
 
-async function walkTreeOccupancy(root: string): Promise<{ size: number; files: number } | null> {
+async function walkTreeOccupancy(
+  root: string,
+  onTick?: (delta: { files: number; size: number }) => void,
+): Promise<{ size: number; files: number } | null> {
   try {
     const st = await FSP.lstat(root);
     if (st.isSymbolicLink() || !st.isDirectory()) return null;
@@ -336,6 +358,18 @@ async function walkTreeOccupancy(root: string): Promise<{ size: number; files: n
   }
   let size = 0;
   let files = 0;
+  let tickFiles = 0;
+  let tickSize = 0;
+  let lastTick = Date.now();
+  const flush = (force = false) => {
+    if (!onTick || (tickFiles === 0 && tickSize === 0)) return;
+    const now = Date.now();
+    if (!force && now - lastTick < 250 && tickFiles < 2_000) return;
+    onTick({ files: tickFiles, size: tickSize });
+    tickFiles = 0;
+    tickSize = 0;
+    lastTick = now;
+  };
   const stack = [root];
   while (stack.length > 0) {
     const dir = stack.pop()!;
@@ -355,35 +389,82 @@ async function walkTreeOccupancy(root: string): Promise<{ size: number; files: n
       if (!entry.isFile()) continue;
       try {
         const st = await FSP.stat(full);
-        size += occupancyBytes(st);
+        const occ = occupancyBytes(st);
+        size += occ;
         files += 1;
+        tickFiles += 1;
+        tickSize += occ;
+        flush();
       } catch {
         /* vanished */
       }
     }
+    if (files > 0 && (files & 8191) === 0) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
   }
+  flush(true);
   return { size, files };
 }
 
-export async function rescanDevArtifactSidecar(sidecar: DevArtifactSidecar): Promise<DevArtifactSidecar> {
+function pathKey(p: string): string {
+  return normalizeDir(p).toLowerCase();
+}
+
+/** Known sidecar roots only. Do not expand project×hint paths. */
+export function planRescanTargets(sidecar: DevArtifactSidecar): string[] {
+  const seen = new Set<string>();
+  const targets: string[] = [];
+  for (const rec of sidecar.roots) {
+    const key = pathKey(rec.path);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    targets.push(rec.path);
+  }
+  return targets;
+}
+
+export async function rescanDevArtifactSidecar(
+  sidecar: DevArtifactSidecar,
+  onProgress?: (progress: DevArtifactsRescanProgress) => void,
+): Promise<DevArtifactSidecar> {
   const acc = createDevAcc();
   for (const project of sidecar.projects) {
     acc.projects.add(project);
   }
-  const seen = new Set<string>();
-  const queue: string[] = sidecar.roots.map((r) => r.path);
-  for (const project of sidecar.projects) {
-    for (const hint of PROJECT_CHILD_HINTS) {
-      queue.push(Path.join(project, hint));
-    }
-  }
-  for (const path of queue) {
-    if (seen.has(path)) continue;
-    seen.add(path);
-    const walked = await walkTreeOccupancy(path);
+  const targets = planRescanTargets(sidecar);
+  const kindByPath = new Map(sidecar.roots.map((r) => [pathKey(r.path), r.kind]));
+  const started = Date.now();
+  let filesSoFar = 0;
+  let bytesSoFar = 0;
+  let lastEmit = 0;
+
+  const emit = (walked: number, currentPath: string, force = false) => {
+    const now = Date.now();
+    if (!force && walked > 0 && walked < targets.length && now - lastEmit < 200) return;
+    lastEmit = now;
+    onProgress?.({
+      treesWalked: walked,
+      treesTotal: targets.length,
+      currentPath,
+      filesSoFar,
+      bytesSoFar,
+      elapsedMs: now - started,
+    });
+  };
+
+  emit(0, targets[0] ?? sidecar.rootPath, true);
+
+  for (let i = 0; i < targets.length; i++) {
+    const path = targets[i]!;
+    emit(i, path, i === 0);
+    const walked = await walkTreeOccupancy(path, (delta) => {
+      filesSoFar += delta.files;
+      bytesSoFar += delta.size;
+      emit(i, path);
+    });
     if (!walked || walked.size <= 0) continue;
-    const kind = sidecar.roots.find((r) => r.path === path)?.kind
-      ?? classifyArtifactPath(path)?.kind;
+    const kind = kindByPath.get(pathKey(path)) ?? classifyArtifactPath(path)?.kind;
     if (!kind) continue;
     const existing = acc.artifacts.get(path);
     if (existing) {
@@ -393,5 +474,7 @@ export async function rescanDevArtifactSidecar(sidecar: DevArtifactSidecar): Pro
       acc.artifacts.set(path, { kind, size: walked.size, files: walked.files });
     }
   }
+
+  emit(targets.length, targets[targets.length - 1] ?? sidecar.rootPath, true);
   return sidecarFromAcc(acc, sidecar.rootPath);
 }

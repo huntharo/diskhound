@@ -5,6 +5,7 @@ import type {
   DiskDelta,
   DiskhoundNativeApi,
   DiskhoundPlatform,
+  DevArtifactsRescanProgress,
   DuplicateAnalysis,
   DuplicateScanProgress,
   EasyMoveProgress,
@@ -30,6 +31,7 @@ const EASY_MOVE_PROGRESS_CHANNEL = "diskhound:easy-move-progress";
 const NOTIFICATION_CHANNEL = "diskhound:notification";
 const DUPLICATE_PROGRESS_CHANNEL = "diskhound:duplicate-progress";
 const DUPLICATE_RESULT_CHANNEL = "diskhound:duplicate-result";
+const DEV_ARTIFACTS_PROGRESS_CHANNEL = "diskhound:dev-artifacts-progress";
 const SETTINGS_UPDATED_CHANNEL = "diskhound:settings-updated";
 const NAVIGATE_VIEW_CHANNEL = "diskhound:navigate-view";
 
@@ -101,6 +103,15 @@ const api: DiskhoundNativeApi = {
     ipcRenderer.invoke("diskhound:get-dev-artifacts", rootPath, options),
   rescanDevArtifacts: (rootPath) =>
     ipcRenderer.invoke("diskhound:rescan-dev-artifacts", rootPath),
+  cancelDevArtifactsRescan: (rootPath) =>
+    ipcRenderer.invoke("diskhound:cancel-dev-artifacts-rescan", rootPath),
+  onDevArtifactsProgress: (listener) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, progress: DevArtifactsRescanProgress) => {
+      listener(progress);
+    };
+    ipcRenderer.on(DEV_ARTIFACTS_PROGRESS_CHANNEL, wrapped);
+    return () => { ipcRenderer.removeListener(DEV_ARTIFACTS_PROGRESS_CHANNEL, wrapped); };
+  },
 
   // Duplicate Detection
   startDuplicateScan: (rootPath, options) => ipcRenderer.invoke("diskhound:start-duplicate-scan", rootPath, options),

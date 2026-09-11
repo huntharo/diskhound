@@ -163,4 +163,68 @@ describe("reportFromSidecar", () => {
     expect(report.totalBytes).toBe(14_000_000);
     expect(report.artifacts.map((a) => a.kind).sort()).toEqual(["js-build", "node-modules"]);
   });
+
+  it("picks the nearest project among thousands", async () => {
+    const { reportFromSidecar } = await import("../devArtifactSidecar");
+    const projects = Array.from({ length: 3_000 }, (_, i) => `C:\\p${i}\\app`);
+    projects.push("C:\\real\\app");
+    const report = reportFromSidecar({
+      version: 1,
+      rootPath: "C:\\",
+      generatedAt: 1,
+      roots: [
+        { path: "C:\\real\\app\\node_modules", kind: "node-modules", size: 10, files: 1 },
+      ],
+      projects,
+    });
+    expect(report.artifacts[0]?.projectPath).toBe("C:\\real\\app");
+  });
+});
+
+describe("planRescanTargets", () => {
+  it("walks known roots only and does not expand project hints", async () => {
+    const { planRescanTargets, PROJECT_CHILD_HINTS } = await import("../devArtifactSidecar");
+    expect(PROJECT_CHILD_HINTS.length).toBeGreaterThan(5);
+    const projects = Array.from({ length: 200 }, (_, i) => `C:\\p${i}`);
+    const targets = planRescanTargets({
+      version: 1,
+      rootPath: "C:\\",
+      generatedAt: 1,
+      roots: [
+        { path: "C:\\a\\node_modules", kind: "node-modules", size: 1, files: 1 },
+        { path: "C:\\a\\node_modules", kind: "node-modules", size: 1, files: 1 },
+        { path: "C:\\b\\target", kind: "rust-target", size: 2, files: 2 },
+      ],
+      projects,
+    });
+    expect(targets).toEqual(["C:\\a\\node_modules", "C:\\b\\target"]);
+    expect(targets.length).toBeLessThan(projects.length);
+  });
+});
+
+describe("rescanDevArtifactSidecar", () => {
+  it("re-walks a known root and emits progress", async () => {
+    const { writeDevArtifactSidecar, readDevArtifactSidecar, rescanDevArtifactSidecar } = await import("../devArtifactSidecar");
+    const tree = Path.join(tempDir, "proj", "node_modules", "pkg");
+    await FSP.mkdir(tree, { recursive: true });
+    await FSP.writeFile(Path.join(tree, "index.js"), "x".repeat(100));
+    const sidecarPath = Path.join(tempDir, "scan.dev-artifacts.json");
+    await writeDevArtifactSidecar(sidecarPath, {
+      version: 1,
+      rootPath: tempDir,
+      generatedAt: 1,
+      roots: [{ path: Path.join(tempDir, "proj", "node_modules"), kind: "node-modules", size: 1, files: 1 }],
+      projects: [Path.join(tempDir, "proj")],
+    });
+    const sidecar = await readDevArtifactSidecar(sidecarPath);
+    const ticks: number[] = [];
+    const next = await rescanDevArtifactSidecar(sidecar!, (progress) => {
+      ticks.push(progress.treesWalked);
+      expect(progress.treesTotal).toBe(1);
+    });
+    expect(next.roots[0]?.files).toBe(1);
+    expect(next.roots[0]?.size).toBeGreaterThanOrEqual(100);
+    expect(ticks.length).toBeGreaterThan(0);
+    expect(ticks[0]).toBe(0);
+  });
 });

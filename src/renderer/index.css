@@ -8894,6 +8894,12 @@ body.system-widget-body #app {
   background: rgba(245, 158, 11, 0.08);
   border-bottom: 1px solid rgba(245, 158, 11, 0.18);
 }
+.dev-rescan-banner-detail {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
 .dev-toolbar {
   display: flex;
   flex-wrap: wrap;

@@ -111,13 +111,9 @@ import { parseFolderTreeSidecarLine } from "./shared/folderTreeSidecarParse";
 import {
   resolveBundledDevArtifactsWorkerPath,
   runDevArtifactsClassifyWorker,
+  runDevArtifactsLoadWorker,
   runDevArtifactsRescanWorker,
 } from "./shared/devArtifactsWorkerRuntime";
-import {
-  readDevArtifactSidecar,
-  reportFromSidecar,
-  resolveDevArtifactSidecar,
-} from "./shared/devArtifactSidecar";
 import {
   deleteFullDiffCachesForScan,
   hasFullDiffCache,
@@ -146,6 +142,7 @@ const DISK_DELTA_CHANNEL = "diskhound:disk-delta";
 const NOTIFICATION_CHANNEL = "diskhound:notification";
 const DUPLICATE_PROGRESS_CHANNEL = "diskhound:duplicate-progress";
 const DUPLICATE_RESULT_CHANNEL = "diskhound:duplicate-result";
+const DEV_ARTIFACTS_PROGRESS_CHANNEL = "diskhound:dev-artifacts-progress";
 /** Broadcast from main to every renderer window after settings
  *  are persisted. Replaces the widget's prior 12 s poll — see the
  *  `settingsStore.subscribe` wiring in whenReady. */
@@ -3089,18 +3086,17 @@ void (async () => {
   });
   const devArtifactCache = new Map<string, DevArtifactReport>();
   const devArtifactInflight = new Map<string, Promise<DevArtifactReport | null>>();
+  const devRescanAbort = new Map<string, AbortController>();
 
-  const previousSidecarFor = async (history: { id: string }[]) => {
-    const previous = history[1];
-    if (!previous) return null;
-    return readDevArtifactSidecar(devArtifactsSidecarPath(previous.id));
-  };
-
-  const sidecarForScan = (scanId: string, scanRoot: string) =>
-    resolveDevArtifactSidecar(
-      devArtifactsSidecarPath(scanId),
-      scanRoot,
-      listPendingDevArtifactSidecars(),
+  const loadDevReportInWorker = (scanId: string, scanRoot: string, previousId?: string) =>
+    runDevArtifactsLoadWorker(
+      {
+        destSidecarPath: devArtifactsSidecarPath(scanId),
+        scanRoot,
+        pendingPaths: listPendingDevArtifactSidecars(),
+        previousSidecarPath: previousId ? devArtifactsSidecarPath(previousId) : null,
+      },
+      { workerPath: devArtifactsWorkerEntry },
     );
 
   ipcMain.handle("diskhound:get-dev-artifacts", async (_event, rootPath: string, options?: { sidecarOnly?: boolean }) => {
@@ -3109,23 +3105,35 @@ void (async () => {
     if (!current) return null;
     const cached = devArtifactCache.get(current.id);
     if (cached) return cached;
-    if (options?.sidecarOnly) {
-      const sidecar = await sidecarForScan(current.id, rootPath);
-      if (!sidecar) return null;
-      const report = reportFromSidecar(sidecar, await previousSidecarFor(history));
-      if (report.artifacts.length > 0) devArtifactCache.set(current.id, report);
-      return report;
+
+    const loadKey = `${current.id}:load`;
+    let loadPromise = devArtifactInflight.get(loadKey);
+    if (!loadPromise) {
+      loadPromise = loadDevReportInWorker(current.id, rootPath, history[1]?.id)
+        .then((report) => {
+          if (report && report.artifacts.length > 0) devArtifactCache.set(current.id, report);
+          return report;
+        })
+        .catch((err) => {
+          writeCrashLog(
+            "dev-artifacts",
+            err instanceof Error ? (err.stack ?? err.message) : String(err),
+          );
+          return null;
+        })
+        .finally(() => {
+          devArtifactInflight.delete(loadKey);
+        });
+      devArtifactInflight.set(loadKey, loadPromise);
     }
+    if (options?.sidecarOnly) return loadPromise;
+
     const inflight = devArtifactInflight.get(current.id);
     if (inflight) return inflight;
 
     const pending = (async () => {
-      const sidecar = await sidecarForScan(current.id, rootPath);
-      if (sidecar) {
-        const report = reportFromSidecar(sidecar, await previousSidecarFor(history));
-        if (report.artifacts.length > 0) devArtifactCache.set(current.id, report);
-        return report;
-      }
+      const report = await loadPromise;
+      if (report) return report;
 
       // Old scans have no Dev sidecar. Classify from the folder-tree
       // sidecar in a worker — never stream the 7M-file index, and
@@ -3134,7 +3142,7 @@ void (async () => {
       if (!FS_SYNC.existsSync(treePath)) return null;
 
       writeCrashLog("dev-artifacts-classify", `scanId=${current.id} via folder-tree worker`);
-      const report = await runDevArtifactsClassifyWorker(
+      const classified = await runDevArtifactsClassifyWorker(
         {
           rootPath,
           folderTreePath: treePath,
@@ -3143,8 +3151,8 @@ void (async () => {
         },
         { workerPath: devArtifactsWorkerEntry },
       );
-      if (report.artifacts.length > 0) devArtifactCache.set(current.id, report);
-      return report;
+      if (classified.artifacts.length > 0) devArtifactCache.set(current.id, classified);
+      return classified;
     })().catch((err) => {
       writeCrashLog(
         "dev-artifacts",
@@ -3158,10 +3166,20 @@ void (async () => {
     return pending;
   });
 
+  ipcMain.handle("diskhound:cancel-dev-artifacts-rescan", (_event, rootPath: string) => {
+    const key = scanKey(rootPath);
+    const ac = devRescanAbort.get(key);
+    if (ac) ac.abort();
+  });
+
   ipcMain.handle("diskhound:rescan-dev-artifacts", async (_event, rootPath: string) => {
     const history = getScanHistory(rootPath);
     const current = history[0];
     if (!current) return null;
+    const key = scanKey(rootPath);
+    devRescanAbort.get(key)?.abort();
+    const ac = new AbortController();
+    devRescanAbort.set(key, ac);
     try {
       const report = await runDevArtifactsRescanWorker(
         {
@@ -3169,17 +3187,37 @@ void (async () => {
           sidecarPath: devArtifactsSidecarPath(current.id),
           indexPath: indexFilePath(current.id),
         },
-        { workerPath: devArtifactsWorkerEntry },
+        {
+          workerPath: devArtifactsWorkerEntry,
+          signal: ac.signal,
+          onProgress: (progress) => {
+            mainWindow?.webContents.send(DEV_ARTIFACTS_PROGRESS_CHANNEL, {
+              ...progress,
+              rootPath,
+            });
+          },
+        },
       );
+      const latest = getScanHistory(rootPath)[0];
+      if (latest && latest.id !== current.id) {
+        const adopted = await loadDevReportInWorker(latest.id, rootPath, getScanHistory(rootPath)[1]?.id);
+        if (adopted && adopted.artifacts.length > 0) {
+          devArtifactCache.set(latest.id, adopted);
+          return adopted;
+        }
+      }
       if (report.artifacts.length > 0) devArtifactCache.set(current.id, report);
       else devArtifactCache.delete(current.id);
       return report;
     } catch (err) {
+      if (ac.signal.aborted) return null;
       writeCrashLog(
         "dev-artifacts-rescan",
         err instanceof Error ? (err.stack ?? err.message) : String(err),
       );
       return null;
+    } finally {
+      if (devRescanAbort.get(key) === ac) devRescanAbort.delete(key);
     }
   });
 
@@ -3797,13 +3835,10 @@ void (async () => {
         const nextDev = devArtifactsSidecarPath(historyId);
         if (FS_SYNC.existsSync(prevDev) && !FS_SYNC.existsSync(nextDev)) {
           await FS.copyFile(prevDev, nextDev);
-        } else if (!FS_SYNC.existsSync(nextDev)) {
-          await resolveDevArtifactSidecar(
-            nextDev,
-            rootPath,
-            listPendingDevArtifactSidecars(),
-          );
         }
+        // Do not JSON.parse the Dev sidecar here. That blocked the
+        // window on large C: sidecars. Dev open adopts a pending
+        // file in the worker.
       } catch (err) {
         writeCrashLog(
           "folder-tree-sidecar-carry-forward",

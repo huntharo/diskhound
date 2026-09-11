@@ -269,7 +269,7 @@ export function FolderList({ snapshot }: Props) {
       <div className="folder-explorer">
         <div className="empty-view">
           <span className="scan-root-chip">{formatScanRoot(rootPath)}</span>
-          <span>{formatScanRoot(rootPath)} has not been scanned yet.</span>
+          <span>This drive has not been scanned yet.</span>
           <span className="empty-view-sub">Use Overview or Rescan in the header to scan this drive.</span>
         </div>
       </div>
@@ -281,7 +281,7 @@ export function FolderList({ snapshot }: Props) {
       <div className="folder-explorer">
         <div className="empty-view">
           <span className="scan-root-chip">{formatScanRoot(rootPath)}</span>
-          <span>Scanning {formatScanRoot(rootPath)}…</span>
+          <span>Scanning this drive…</span>
           <span className="empty-view-sub">Folders for this drive will be ready when the scan finishes.</span>
         </div>
       </div>
@@ -356,7 +356,7 @@ export function FolderList({ snapshot }: Props) {
           <IndexLoadingPanel
             compact
             eyebrow={formatScanRoot(rootPath)}
-            title={`Loading folders on ${formatScanRoot(rootPath)}`}
+            title="Loading folders on this scan"
             stages={FOLDER_LOADING_STAGES}
             elapsedSec={loadingElapsedSec}
           />
