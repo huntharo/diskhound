@@ -54,7 +54,10 @@ in-memory map.
 
 The Windows installer no longer crashes on launch with
 `require_main.__toESM is not a function`. The main process is a single
-CJS file instead of circular code-split chunks.
+CJS file instead of circular code-split chunks. Checking "Run DiskHound"
+on the finish page actually starts the app (the default NSIS helper is a
+no-op from a per-user installer, and the admin scheduled-task handoff
+no longer quits that first launch).
 
 ### Relaunch focuses the existing window (#1)
 

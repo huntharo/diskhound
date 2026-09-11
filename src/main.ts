@@ -715,10 +715,15 @@ void (async () => {
     // know not to relaunch AGAIN).
     const launchedByTask = process.argv.includes("--launched-by-task");
     const relaunchedAsAdmin = process.argv.includes("--relaunched-as-admin");
+    const launchedFromInstaller = process.argv.includes("--launched-from-installer");
+    const launchedAfterUpdate = process.argv.includes("--updated");
     writeStartupLog(
-      `elevation-probe: argv flags launchedByTask=${launchedByTask} relaunchedAsAdmin=${relaunchedAsAdmin} pid=${process.pid}`,
+      `elevation-probe: argv flags launchedByTask=${launchedByTask} relaunchedAsAdmin=${relaunchedAsAdmin} launchedFromInstaller=${launchedFromInstaller} launchedAfterUpdate=${launchedAfterUpdate} pid=${process.pid}`,
     );
-    if (!launchedByTask) {
+    // Installer/update "run the app" must not hand off to the scheduled
+    // task: that quits this process and the elevated sibling often never
+    // surfaces (stale task path, window behind the installer, lock race).
+    if (!launchedByTask && !launchedFromInstaller && !launchedAfterUpdate) {
       try {
         const [elevated, taskRegistered] = await Promise.all([
           elevationModule.isElevated(),
