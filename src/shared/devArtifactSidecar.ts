@@ -11,6 +11,10 @@ import { attachPipeErrorHandlers } from "./streamSafety";
 import { normPath } from "./pathUtils";
 
 export const DEV_ARTIFACTS_SIDECAR_SUFFIX = ".dev-artifacts.json";
+/** Largest trees kept on disk and in the Dev list. Native used to write
+ *  ~30k roots + every project marker (~17 MB on C:). Parsing that in the
+ *  load worker exited 1; Dev then classified the 1.1M-line folder tree. */
+export const DEV_SIDECAR_ROOT_CAP = 2_500;
 
 export interface DevArtifactRootRec {
   path: string;
@@ -252,15 +256,44 @@ function keepArtifact(root: string, projects: Map<string, string>): boolean {
   return true;
 }
 
+/** Keep the largest trees and only the projects that own them. */
+export function compactDevArtifactSidecar(sidecar: DevArtifactSidecar): DevArtifactSidecar {
+  const roots = sidecar.roots
+    .filter((rec) => rec.size > 0)
+    .sort((a, b) => b.size - a.size || a.path.localeCompare(b.path));
+  const kept = roots.length > DEV_SIDECAR_ROOT_CAP
+    ? roots.slice(0, DEV_SIDECAR_ROOT_CAP)
+    : roots;
+  const projects = projectLookup(sidecar.projects);
+  const keptProjects: string[] = [];
+  const seen = new Set<string>();
+  for (const rec of kept) {
+    const project = nearestProject(rec.path, projects);
+    if (!project) continue;
+    const key = normalizeDir(project).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    keptProjects.push(project);
+  }
+  return {
+    version: 1,
+    rootPath: sidecar.rootPath,
+    generatedAt: sidecar.generatedAt,
+    roots: kept,
+    projects: keptProjects,
+  };
+}
+
 export function reportFromSidecar(
   sidecar: DevArtifactSidecar,
   previous?: DevArtifactSidecar | null,
 ): DevArtifactReport {
-  const prevByPath = new Map((previous?.roots ?? []).map((r) => [r.path, r.size]));
-  const projects = projectLookup(sidecar.projects);
+  const current = compactDevArtifactSidecar(sidecar);
+  const prior = previous ? compactDevArtifactSidecar(previous) : null;
+  const prevByPath = new Map((prior?.roots ?? []).map((r) => [r.path, r.size]));
+  const projects = projectLookup(current.projects);
   const artifacts: DevArtifact[] = [];
-  for (const rec of sidecar.roots) {
-    if (rec.size <= 0) continue;
+  for (const rec of current.roots) {
     if (!keepArtifact(rec.path, projects)) continue;
     const projectPath = nearestProject(rec.path, projects);
     const previousSize = prevByPath.get(rec.path) ?? null;
@@ -276,8 +309,6 @@ export function reportFromSidecar(
     });
   }
   artifacts.sort((a, b) => b.size - a.size);
-  const LIST_CAP = 2_500;
-  const listed = artifacts.length > LIST_CAP ? artifacts.slice(0, LIST_CAP) : artifacts;
   const kindMap = new Map<DevArtifactKind, { size: number; count: number }>();
   for (const artifact of artifacts) {
     const entry = kindMap.get(artifact.kind) ?? { size: 0, count: 0 };
@@ -286,15 +317,15 @@ export function reportFromSidecar(
     kindMap.set(artifact.kind, entry);
   }
   return {
-    artifacts: listed,
+    artifacts,
     totalBytes: artifacts.reduce((sum, a) => sum + a.size, 0),
     totalFiles: artifacts.reduce((sum, a) => sum + a.fileCount, 0),
     projectCount: new Set(artifacts.map((a) => a.projectPath).filter(Boolean)).size,
     kindTotals: [...kindMap.entries()]
       .map(([kind, stats]) => ({ kind, size: stats.size, count: stats.count }))
       .sort((a, b) => b.size - a.size),
-    generatedAt: sidecar.generatedAt,
-    rootPath: sidecar.rootPath,
+    generatedAt: current.generatedAt,
+    rootPath: current.rootPath,
   };
 }
 
@@ -342,7 +373,7 @@ export async function resolveDevArtifactSidecar(
 export async function writeDevArtifactSidecar(filePath: string, sidecar: DevArtifactSidecar): Promise<void> {
   await FSP.mkdir(Path.dirname(filePath), { recursive: true });
   const tmp = `${filePath}.tmp`;
-  await FSP.writeFile(tmp, JSON.stringify(sidecar));
+  await FSP.writeFile(tmp, JSON.stringify(compactDevArtifactSidecar(sidecar)));
   await FSP.rename(tmp, filePath);
 }
 

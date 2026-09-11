@@ -10,6 +10,8 @@ import { toast } from "./Toasts";
 
 interface Props {
   snapshot: ScanSnapshot;
+  onStartScan?: () => void;
+  otherScannedRoots?: string[];
 }
 
 type GroupBy = "kind" | "project";
@@ -26,7 +28,7 @@ function truncatePath(path: string, max = 56): string {
   return `…${path.slice(-(max - 1))}`;
 }
 
-export function DevView({ snapshot }: Props) {
+export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props) {
   const root = snapshot.rootPath;
   const [report, setReport] = useState<DevArtifactReport | null>(null);
   const [loading, setLoading] = useState(false);
@@ -315,13 +317,23 @@ export function DevView({ snapshot }: Props) {
   };
 
   const rootLabel = root ? formatScanRoot(root) : null;
+  const otherDriveNote = otherScannedRoots.length > 0
+    ? "A finished scan is on another drive. Switch with the header drive pills."
+    : null;
+  const scanButton = rootLabel && onStartScan && snapshot.status !== "running" ? (
+    <button className="action-btn primary" onClick={onStartScan}>
+      Scan {rootLabel}
+    </button>
+  ) : null;
 
   if (!root) {
     return (
       <div className="dev-view">
         <div className="empty-view">
           <span>Scan a drive to find worktrees, node_modules, Rust targets, and other developer bloat.</span>
-          <span className="empty-view-sub">Pick a drive on Overview. Dev Artifacts always follows that scan, not the whole PC.</span>
+          <span className="empty-view-sub">
+            {otherDriveNote ?? "Pick a drive in the header. Dev Artifacts follows that drive, not the whole PC."}
+          </span>
         </div>
       </div>
     );
@@ -332,8 +344,11 @@ export function DevView({ snapshot }: Props) {
       <div className="dev-view">
         <div className="empty-view">
           <span className="scan-root-chip">{rootLabel}</span>
-          <span>This drive has not been scanned yet.</span>
-          <span className="empty-view-sub">Use Overview or Rescan in the header. Other drives stay on their own scan.</span>
+          <span>Dev Artifacts needs a full scan of {rootLabel} — not the whole PC.</span>
+          <span className="empty-view-sub">
+            {otherDriveNote ?? "This tab only binds the selected drive. History on another drive stays on that pill."}
+          </span>
+          {scanButton}
         </div>
       </div>
     );
@@ -374,7 +389,10 @@ export function DevView({ snapshot }: Props) {
         <div className="empty-view">
           <span className="scan-root-chip">{rootLabel}</span>
           <span>{loadError}</span>
-          <span className="empty-view-sub">This tab follows the selected drive. Scan a different one from Overview.</span>
+          <span className="empty-view-sub">
+            {otherDriveNote ?? "This tab follows the selected drive. Scan this drive, or switch with the header pills."}
+          </span>
+          {scanButton}
           <button className="action-btn" onClick={() => void load()}>Retry</button>
         </div>
       </div>

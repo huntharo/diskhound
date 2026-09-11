@@ -457,29 +457,32 @@ function writeStartupLog(message: string): void {
   writeCrashLog("startup", message);
 }
 
-/** Native used to write the Dev sidecar after Done. Retry the rename
- *  so a late file still lands on the history id. */
-function adoptTempDevSidecar(tempPath: string, destPath: string): void {
-  void (async () => {
-    const deadline = Date.now() + 20_000;
-    while (Date.now() < deadline) {
+/** Native writes the Dev sidecar before Done. Rename pending → history
+ *  id before the UI can open Dev. Brief retry covers a flush race. */
+async function adoptTempDevSidecar(tempPath: string, destPath: string): Promise<void> {
+  const deadline = Date.now() + 4_000;
+  while (Date.now() < deadline) {
+    try {
+      await FS.access(tempPath);
+      await FS.rename(tempPath, destPath);
+      writeCrashLog(
+        "dev-artifacts-sidecar",
+        `renamed ${Path.basename(tempPath)} -> ${Path.basename(destPath)}`,
+      );
+      return;
+    } catch {
       try {
-        await FS.access(tempPath);
-        await FS.rename(tempPath, destPath);
-        writeCrashLog(
-          "dev-artifacts-sidecar",
-          `renamed ${Path.basename(tempPath)} -> ${Path.basename(destPath)}`,
-        );
+        await FS.access(destPath);
         return;
       } catch {
-        await new Promise((resolve) => setTimeout(resolve, 250));
+        await new Promise((resolve) => setTimeout(resolve, 100));
       }
     }
-    writeCrashLog(
-      "dev-artifacts-sidecar",
-      `rename missed ${Path.basename(tempPath)}; Dev open will adopt a matching pending sidecar`,
-    );
-  })();
+  }
+  writeCrashLog(
+    "dev-artifacts-sidecar",
+    `rename missed ${Path.basename(tempPath)}; Dev open will adopt a matching pending sidecar`,
+  );
 }
 
 // Errors codes that we treat as "routine, not user-actionable":
@@ -1040,7 +1043,7 @@ void (async () => {
           }
         }
         if (historyId && session.tempDevArtifactsPath) {
-          adoptTempDevSidecar(
+          await adoptTempDevSidecar(
             session.tempDevArtifactsPath,
             devArtifactsSidecarPath(historyId),
           );
@@ -3134,6 +3137,17 @@ void (async () => {
     const pending = (async () => {
       const report = await loadPromise;
       if (report) return report;
+
+      // A sidecar on disk is the post-scan path. Do not classify the
+      // 1.1M-line folder tree because load returned empty — that was
+      // the 55s C: open after the worker exited 1 on a 17 MB file.
+      if (FS_SYNC.existsSync(devArtifactsSidecarPath(current.id))) {
+        writeCrashLog(
+          "dev-artifacts",
+          `scanId=${current.id} sidecar present but load returned empty; skipping folder-tree classify`,
+        );
+        return null;
+      }
 
       // Old scans have no Dev sidecar. Classify from the folder-tree
       // sidecar in a worker — never stream the 7M-file index, and

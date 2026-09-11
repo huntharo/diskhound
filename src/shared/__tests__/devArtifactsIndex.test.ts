@@ -147,6 +147,32 @@ describe("resolveDevArtifactSidecar", () => {
   });
 });
 
+describe("compactDevArtifactSidecar", () => {
+  it("keeps the largest trees and only projects that own them", async () => {
+    const { compactDevArtifactSidecar, DEV_SIDECAR_ROOT_CAP } = await import("../devArtifactSidecar");
+    const roots = Array.from({ length: DEV_SIDECAR_ROOT_CAP + 40 }, (_, i) => ({
+      path: `C:\\p${i}\\node_modules`,
+      kind: "node-modules" as const,
+      size: i + 1,
+      files: 1,
+    }));
+    const compact = compactDevArtifactSidecar({
+      version: 1,
+      rootPath: "C:\\",
+      generatedAt: 1,
+      roots,
+      projects: [
+        ...Array.from({ length: DEV_SIDECAR_ROOT_CAP + 40 }, (_, i) => `C:\\p${i}`),
+        "C:\\orphan",
+      ],
+    });
+    expect(compact.roots).toHaveLength(DEV_SIDECAR_ROOT_CAP);
+    expect(compact.roots[0]?.path).toBe(`C:\\p${DEV_SIDECAR_ROOT_CAP + 39}\\node_modules`);
+    expect(compact.projects).toHaveLength(DEV_SIDECAR_ROOT_CAP);
+    expect(compact.projects).not.toContain("C:\\orphan");
+  });
+});
+
 describe("reportFromSidecar", () => {
   it("keeps dist/ only when a project marker exists", async () => {
     const { reportFromSidecar } = await import("../devArtifactSidecar");

@@ -109,6 +109,8 @@ struct SidecarRoot {
     files: u64,
 }
 
+const ROOT_CAP: usize = 2500;
+
 pub fn write_sidecar(output: &Path, scan_root: &str, acc: &DevArtifactAcc) -> io::Result<()> {
     let mut roots: Vec<SidecarRoot> = acc
         .artifacts
@@ -121,7 +123,11 @@ pub fn write_sidecar(output: &Path, scan_root: &str, acc: &DevArtifactAcc) -> io
             files: rec.files,
         })
         .collect();
-    roots.sort_by(|a, b| b.size.cmp(&a.size));
+    roots.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
+    if roots.len() > ROOT_CAP {
+        roots.truncate(ROOT_CAP);
+    }
+    let projects = projects_for_roots(&acc.projects, &roots);
     let generated_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -131,7 +137,7 @@ pub fn write_sidecar(output: &Path, scan_root: &str, acc: &DevArtifactAcc) -> io
         root_path: scan_root.to_string(),
         generated_at,
         roots,
-        projects: acc.projects.iter().cloned().collect(),
+        projects,
     };
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent)?;
@@ -244,6 +250,32 @@ fn file_name(path: &str) -> Option<&str> {
     path.rsplit(['\\', '/']).find(|s| !s.is_empty())
 }
 
+fn trim_slash(path: &str) -> &str {
+    path.trim_end_matches(['\\', '/'])
+}
+
+fn projects_for_roots(projects: &HashSet<String>, roots: &[SidecarRoot]) -> Vec<String> {
+    let by_lower: HashMap<String, String> = projects
+        .iter()
+        .map(|project| (trim_slash(project).to_ascii_lowercase(), project.clone()))
+        .collect();
+    let mut kept = HashSet::new();
+    for root in roots {
+        let mut cursor = trim_slash(&root.path).to_string();
+        loop {
+            if let Some(orig) = by_lower.get(&cursor.to_ascii_lowercase()) {
+                kept.insert(orig.clone());
+                break;
+            }
+            match parent_path(&cursor) {
+                Some(parent) if parent != cursor => cursor = parent,
+                _ => break,
+            }
+        }
+    }
+    kept.into_iter().collect()
+}
+
 fn parent_path(path: &str) -> Option<String> {
     let idx = path.rfind(['\\', '/'])?;
     if idx == 0 {
@@ -281,6 +313,28 @@ mod tests {
         let raw = std::fs::read_to_string(&out).unwrap();
         assert!(raw.contains("node-modules"));
         assert!(raw.contains("rootPath"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_sidecar_keeps_largest_roots_and_their_projects() {
+        let mut acc = DevArtifactAcc::new();
+        for i in 0..3_000 {
+            let project = format!(r"C:\p{i}");
+            acc.projects.insert(project.clone());
+            acc.add(&format!(r"{project}\node_modules\x.js"), 1_000 + i as u64, false);
+        }
+        let dir = std::env::temp_dir().join(format!("dh-dev-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("scan.dev-artifacts.json");
+        write_sidecar(&out, r"C:\", &acc).unwrap();
+        let raw = std::fs::read_to_string(&out).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let roots = parsed["roots"].as_array().unwrap();
+        assert_eq!(roots.len(), 2500);
+        let projects = parsed["projects"].as_array().unwrap();
+        assert!(projects.len() <= 2500);
+        assert!(projects.len() > 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

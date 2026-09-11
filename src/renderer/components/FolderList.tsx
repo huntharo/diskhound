@@ -13,6 +13,8 @@ import { PathContextMenu } from "./PathContextMenu";
 
 interface Props {
   snapshot: ScanSnapshot;
+  onStartScan?: () => void;
+  otherScannedRoots?: string[];
 }
 
 /**
@@ -87,7 +89,7 @@ function buildBreadcrumbs(currentPath: string, rootPath: string): { label: strin
 
 // ── Component ───────────────────────────────────────────────
 
-export function FolderList({ snapshot }: Props) {
+export function FolderList({ snapshot, onStartScan, otherScannedRoots = [] }: Props) {
   const rootPath = snapshot.rootPath ?? "";
   const [currentPath, setCurrentPath] = useState(rootPath);
   const [children, setChildren] = useState<FolderChild[]>([]);
@@ -265,12 +267,21 @@ export function FolderList({ snapshot }: Props) {
   }
 
   if (snapshot.status === "idle") {
+    const rootLabel = formatScanRoot(rootPath);
+    const otherNote = otherScannedRoots.length > 0
+      ? "A finished scan is on another drive. Switch with the header drive pills."
+      : "This tab only binds the selected drive.";
     return (
       <div className="folder-explorer">
         <div className="empty-view">
-          <span className="scan-root-chip">{formatScanRoot(rootPath)}</span>
-          <span>This drive has not been scanned yet.</span>
-          <span className="empty-view-sub">Use Overview or Rescan in the header to scan this drive.</span>
+          <span className="scan-root-chip">{rootLabel}</span>
+          <span>Folders needs a full scan of {rootLabel} — not the whole PC.</span>
+          <span className="empty-view-sub">{otherNote}</span>
+          {onStartScan && (
+            <button className="action-btn primary" onClick={onStartScan}>
+              Scan {rootLabel}
+            </button>
+          )}
         </div>
       </div>
     );

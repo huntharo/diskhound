@@ -54,13 +54,19 @@ in-memory map.
 
 Full scans write a compact Dev Artifacts sidecar while indexing, so the
 tab opens instantly and does not re-scan when you leave and come back.
+The sidecar keeps the largest 2,500 trees and only the projects that
+own them. A 17 MB C: sidecar (≈29k trees + every project marker)
+crashed the load worker (exit 1); Dev then classified the 1.1M-line
+folder tree for ~55s and said “reading the folder tree.” That fallback
+is for old scans with no sidecar file. A sidecar on disk is loaded as
+JSON — never reclassified from the folder tree. Fat sidecars already
+on disk are slimmed on first successful open.
 **Rescan trees** walks those artifact folders on disk without a full
-drive scan. Overview's tile reads the sidecar only. Older scans without
-a sidecar classify from the folder tree (directory rollups already on
-disk or in memory) instead of streaming millions of file-index lines.
-Opening Dev before that tree exists shows a retryable empty state rather
-than a stuck blank report. **Rescan trees** only walks known roots; it
-does not fall back to the file index.
+drive scan. Overview's tile reads the sidecar only. Dev Artifacts and
+Folders can start the same full scan Overview uses when the selected
+drive has no usable scan (`Scan C:`). History is per drive in
+`%APPDATA%/DiskHound`; a reinstall does not wipe it, and this tab
+only binds the selected drive.
 
 You can select trees, trash selected, or trash all. Folders and Dev
 Artifacts show a staged spinner the first time a large tree is opened.

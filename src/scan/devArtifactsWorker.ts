@@ -2,6 +2,7 @@ import { parentPort } from "node:worker_threads";
 
 import { analyzeDevArtifacts } from "../shared/devArtifactsIndex";
 import {
+  compactDevArtifactSidecar,
   readDevArtifactSidecar,
   reportFromSidecar,
   rescanDevArtifactSidecar,
@@ -36,10 +37,17 @@ async function loadSidecarReport(input: DevArtifactsLoadInput) {
     input.pendingPaths,
   );
   if (!sidecar) return null;
+  const compact = compactDevArtifactSidecar(sidecar);
+  if (
+    compact.roots.length !== sidecar.roots.length
+    || compact.projects.length !== sidecar.projects.length
+  ) {
+    await writeDevArtifactSidecar(input.destSidecarPath, compact);
+  }
   const previous = input.previousSidecarPath
     ? await readDevArtifactSidecar(input.previousSidecarPath)
     : null;
-  return reportFromSidecar(sidecar, previous);
+  return reportFromSidecar(compact, previous);
 }
 
 async function rescanKnownTrees(input: DevArtifactsRescanInput, requestId: string) {

@@ -26,12 +26,17 @@ function runDevArtifactsRequest(
   request: DevArtifactsWorkerRequest,
   options: RunDevArtifactsWorkerOptions,
 ): Promise<DevArtifactReport | null> {
-  const worker = new Worker(options.workerPath, {
-    resourceLimits: {
-      maxOldGenerationSizeMb: 4096,
-      maxYoungGenerationSizeMb: 256,
-    },
-  });
+  const worker = new Worker(
+    options.workerPath,
+    request.type === "load"
+      ? {}
+      : {
+          resourceLimits: {
+            maxOldGenerationSizeMb: 4096,
+            maxYoungGenerationSizeMb: 256,
+          },
+        },
+  );
 
   return new Promise<DevArtifactReport | null>((resolve, reject) => {
     let settled = false;

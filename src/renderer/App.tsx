@@ -153,6 +153,16 @@ export function App() {
     return currentRoot ? { ...idle, rootPath: currentRoot } : idle;
   }, [snapshotsByRoot, currentRoot]);
 
+  const otherScannedRoots = useMemo(() => {
+    const current = rootKey(currentRoot);
+    const roots: string[] = [];
+    for (const [key, snap] of snapshotsByRoot) {
+      if (key === current) continue;
+      if (snap.status === "done" && snap.rootPath) roots.push(snap.rootPath);
+    }
+    return roots;
+  }, [snapshotsByRoot, currentRoot]);
+
   // Setter used by the rest of the app — mirrors the old "rootPath" getter.
   const rootPath = currentRoot;
   const setRootPath = (path: string) => setCurrentRoot(path);
@@ -1282,8 +1292,28 @@ export function App() {
             <>
               {view === "overview" && <ErrorBoundary name="Overview"><Overview snapshot={snapshot} onFilterExtension={onFilterExtension} onViewChanges={() => setView("changes")} onViewDev={() => setView("dev")} scanPercent={currentScanPercent} /></ErrorBoundary>}
               {view === "files" && <ErrorBoundary name="File List"><FileList snapshot={indexSearchSnapshot} initialFilter={filterExt} /></ErrorBoundary>}
-              {view === "folders" && <ErrorBoundary name="Folders"><FolderList snapshot={snapshot} /></ErrorBoundary>}
-              {view === "dev" && <ErrorBoundary name="Dev Artifacts"><DevView snapshot={snapshot} /></ErrorBoundary>}
+              {view === "folders" && (
+                <ErrorBoundary name="Folders">
+                  <FolderList
+                    snapshot={snapshot}
+                    onStartScan={() => {
+                      if (snapshot.rootPath) void doScan(snapshot.rootPath);
+                    }}
+                    otherScannedRoots={otherScannedRoots}
+                  />
+                </ErrorBoundary>
+              )}
+              {view === "dev" && (
+                <ErrorBoundary name="Dev Artifacts">
+                  <DevView
+                    snapshot={snapshot}
+                    onStartScan={() => {
+                      if (snapshot.rootPath) void doScan(snapshot.rootPath);
+                    }}
+                    otherScannedRoots={otherScannedRoots}
+                  />
+                </ErrorBoundary>
+              )}
               {view === "duplicates" && (
                 <ErrorBoundary name="Duplicates">
                   <DuplicatesView
