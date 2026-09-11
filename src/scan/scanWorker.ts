@@ -23,9 +23,13 @@ import { occupancyBytes } from "../shared/allocatedSize";
  * baseline's, we inherit all those file records without re-walking the
  * subtree.
  */
+interface BaselineFileRecord extends ScanFileRecord {
+  extraHardlink?: boolean;
+}
+
 interface Baseline {
   dirMtimes: Map<string, number>;
-  filesByParent: Map<string, ScanFileRecord[]>;
+  filesByParent: Map<string, BaselineFileRecord[]>;
   /** Set of all directory paths known in the baseline (for subtree inheritance). */
   dirs: Set<string>;
 }
@@ -100,10 +104,12 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
       indexGzip = null;
     }
   }
-  const writeIndexEntry = (path: string, size: number, mtime: number) => {
+  const writeIndexEntry = (path: string, size: number, mtime: number, extraHardlink = false) => {
     if (!indexGzip) return;
     try {
-      indexGzip.write(JSON.stringify({ p: path, s: size, m: mtime }) + "\n");
+      indexGzip.write(JSON.stringify(
+        extraHardlink ? { p: path, s: size, m: mtime, h: 1 } : { p: path, s: size, m: mtime },
+      ) + "\n");
     } catch {
       indexGzip = null;
     }
@@ -209,11 +215,14 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
         const inherited = inheritSubtree(directoryPath, baseline);
         for (const fileRecord of inherited) {
           filesVisited += 1;
-          bytesSeen += fileRecord.size;
-          upsertRankedFile(largestFiles, fileRecord, TOP_FILE_LIMIT);
-          rollupDirectorySize(rootPath, fileRecord.parentPath, fileRecord.size, directoryTotals, hottestDirectories, TOP_DIRECTORY_LIMIT);
-          rollupExtension(extensionTotals, fileRecord.extension, fileRecord.size);
-          writeIndexEntry(fileRecord.path, fileRecord.size, fileRecord.modifiedAt);
+          const occupancy = fileRecord.extraHardlink ? 0 : fileRecord.size;
+          bytesSeen += occupancy;
+          if (!fileRecord.extraHardlink) {
+            upsertRankedFile(largestFiles, fileRecord, TOP_FILE_LIMIT);
+            rollupDirectorySize(rootPath, fileRecord.parentPath, occupancy, directoryTotals, hottestDirectories, TOP_DIRECTORY_LIMIT);
+            rollupExtension(extensionTotals, fileRecord.extension, occupancy);
+          }
+          writeIndexEntry(fileRecord.path, fileRecord.size, fileRecord.modifiedAt, fileRecord.extraHardlink);
         }
         // Also re-emit the directory entries under the subtree so the new
         // index remains self-contained for the next scan's baseline.
@@ -466,7 +475,7 @@ async function loadBaseline(filePath: string): Promise<Baseline> {
   const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
   for await (const line of rl) {
     if (!line) continue;
-    let rec: { p?: string; s?: number; m?: number; t?: string };
+    let rec: { p?: string; s?: number; m?: number; t?: string; h?: number };
     try {
       rec = JSON.parse(line);
     } catch { continue; }
@@ -485,13 +494,14 @@ async function loadBaseline(filePath: string): Promise<Baseline> {
 
     const name = Path.basename(rec.p);
     const parentPath = Path.resolve(Path.dirname(rec.p));
-    const fileRecord: ScanFileRecord = {
+    const fileRecord: BaselineFileRecord = {
       path: normalized,
       name,
       parentPath,
       extension: getExtension(name),
       size: rec.s,
       modifiedAt: rec.m,
+      extraHardlink: rec.h === 1,
     };
 
     let list = filesByParent.get(parentPath);
@@ -509,9 +519,9 @@ async function loadBaseline(filePath: string): Promise<Baseline> {
  * Return all file records under the given directory (direct + descendants)
  * from the baseline. Used when we skip walking an unchanged subtree.
  */
-function inheritSubtree(dirPath: string, baseline: Baseline): ScanFileRecord[] {
+function inheritSubtree(dirPath: string, baseline: Baseline): BaselineFileRecord[] {
   const norm = Path.resolve(dirPath);
-  const out: ScanFileRecord[] = [];
+  const out: BaselineFileRecord[] = [];
   const prefix = norm.endsWith(Path.sep) ? norm : norm + Path.sep;
 
   // Direct children first (hot path — avoid iterating the full map when

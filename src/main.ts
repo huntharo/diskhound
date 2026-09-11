@@ -124,7 +124,7 @@ import { resolveNativeScannerBinary } from "./nativeScanner";
 import { initNativeProcessSample } from "./nativeProcessSample";
 import { searchIndexFile } from "./shared/scanIndex";
 import { analyzeCleanupFromIndex } from "./shared/suggestions";
-import { analyzeDevArtifacts } from "./shared/devArtifacts";
+import { analyzeDevArtifacts } from "./shared/devArtifactsIndex";
 import { createNativeScannerSession, type NativeScannerSession } from "./nativeScanner";
 import * as elevationModule from "./elevation";
 
@@ -562,12 +562,12 @@ function bringWindowToFront(win: BrowserWindow): void {
 }
 
 function focusOrShowMainWindow(): void {
+  pendingSecondInstanceFocus = true;
   const win = mainWindow;
   if (win && !win.isDestroyed()) {
     bringWindowToFront(win);
     return;
   }
-  pendingSecondInstanceFocus = true;
   void ensureMainWindow()
     .then(() => {
       if (!pendingSecondInstanceFocus) return;
@@ -587,6 +587,12 @@ function hideMainWindow(): void {
   const win = mainWindow;
   if (!win || win.isDestroyed()) return;
   win.hide();
+}
+
+function showMainWindowIfPresent(): void {
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) return;
+  bringWindowToFront(win);
 }
 
 function registerSecondInstanceHandler(): void {
@@ -1229,7 +1235,11 @@ void (async () => {
     const worker = new Worker(scanWorkerEntry);
     const startingSnapshot = buildRunningSnapshot(rootPath, scanOptions, "js-worker");
     const tempIndexPath = indexFilePath(`pending-${randomUUID()}`);
-    const baselineIndex = resolveBaselineIndexFor(rootPath);
+    // Windows JS-worker occupancy is logical `stat.size`. An allocated MFT
+    // baseline would mix size semantics and drop `h:1` on inherit.
+    const baselineIndex = process.platform === "win32"
+      ? undefined
+      : resolveBaselineIndexFor(rootPath);
 
     const session: WorkerScanSession = {
       kind: "worker",
@@ -4062,7 +4072,7 @@ void (async () => {
     canLaunchToTray && wasAutoStarted && settings.general.startMinimized;
   if (pendingSecondInstanceFocus) {
     pendingSecondInstanceFocus = false;
-    focusOrShowMainWindow();
+    showMainWindowIfPresent();
   } else if (launchMinimized) {
     hideMainWindow();
   }

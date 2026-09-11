@@ -429,6 +429,10 @@ struct Baseline {
     /// Set of all dir paths present in the baseline — used for re-emitting
     /// dir entries under inherited subtrees in the new index.
     dirs: HashSet<String>,
+    /// Extra NTFS names (`h:1`) from the previous index. The walker cannot
+    /// see link counts, so a re-walk of a touched directory keeps this flag
+    /// when the same path is still present.
+    extra_hardlink_paths: HashSet<String>,
 }
 
 impl Baseline {
@@ -451,6 +455,7 @@ impl Baseline {
         let mut dirs: HashSet<String> = HashSet::new();
         let mut dir_file_counts: HashMap<String, u64> = HashMap::new();
         let mut dir_total_sizes: HashMap<String, u64> = HashMap::new();
+        let mut extra_hardlink_paths: HashSet<String> = HashSet::new();
         let mut lines_read: u64 = 0;
         // Separately count files so we can detect truncated baselines
         // — one of 0.4.3's fixed bugs (strong_count=2 skipping the
@@ -516,7 +521,11 @@ impl Baseline {
                 continue;
             };
             file_records += 1;
-            let occupancy = if rec.h == Some(1) { 0 } else { size };
+            let extra_hardlink = rec.h == Some(1);
+            if extra_hardlink {
+                extra_hardlink_paths.insert(normalized.clone());
+            }
+            let occupancy = if extra_hardlink { 0 } else { size };
 
             // Bubble the file's size/count up to every ancestor directory.
             // This gives us O(1) "how much is under dir D" lookups during
@@ -584,6 +593,7 @@ impl Baseline {
             dir_file_counts,
             dir_total_sizes,
             dirs,
+            extra_hardlink_paths,
         })
     }
 
@@ -3232,35 +3242,44 @@ fn enumerate_windows_directory(
 }
 
 fn record_file(state: &mut ScanState, file_record: ScanFileRecord) -> Result<(), String> {
+    let extra_hardlink = state
+        .baseline
+        .as_ref()
+        .is_some_and(|baseline| baseline.extra_hardlink_paths.contains(&file_record.path));
+    let occupancy = if extra_hardlink { 0 } else { file_record.size };
     state.files_visited += 1;
-    state.bytes_seen += file_record.size;
+    state.bytes_seen += occupancy;
     let file_limit = state.input.top_file_limit;
     let dir_limit = state.input.top_directory_limit;
-    upsert_ranked_file(&mut state.largest_files, file_record.clone(), file_limit);
+    if !extra_hardlink {
+        upsert_ranked_file(&mut state.largest_files, file_record.clone(), file_limit);
+    }
     if state.defer_hottest_dir_ranking {
         // Cheap path: just tally into the HashMap, skip the per-file
         // top-N sort. Finalized once at end of emit.
         rollup_directory_size_tallies_only(
             &state.root_path_string,
             &file_record.parent_path,
-            file_record.size,
+            occupancy,
             &mut state.directory_totals,
         );
     } else {
         rollup_directory_size(
             &state.root_path_string,
             &file_record.parent_path,
-            file_record.size,
+            occupancy,
             &mut state.directory_totals,
             &mut state.hottest_directories,
             dir_limit,
         );
     }
-    rollup_extension(
-        &mut state.extension_totals,
-        &file_record.extension,
-        file_record.size,
-    );
+    if !extra_hardlink {
+        rollup_extension(
+            &mut state.extension_totals,
+            &file_record.extension,
+            occupancy,
+        );
+    }
     // Folder-tree sidecar accumulator. Only populate when the caller
     // requested an output path — otherwise this is pure waste. Bucket
     // by parent_path so Node can render each folder's top files
@@ -3290,7 +3309,7 @@ fn record_file(state: &mut ScanState, file_record: ScanFileRecord) -> Result<(),
     // snapshot protocol keep working.
     if let Some(writer) = state.index_writer.as_mut() {
         if writer
-            .write_entry(&file_record.path, file_record.size, file_record.modified_at, false)
+            .write_entry(&file_record.path, file_record.size, file_record.modified_at, extra_hardlink)
             .is_err()
         {
             state.index_writer = None;

@@ -132,6 +132,9 @@ enum OutputLine {
         mtime: u64,
         #[serde(rename = "isDirectory")]
         is_directory: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "linkCount")]
+        link_count: Option<u32>,
     },
     JournalCursor {
         cursor: i64,
@@ -327,6 +330,7 @@ struct ResolvedFile {
     allocated_size: Option<u64>,
     mtime_ms: u64,
     is_directory: Option<bool>,
+    number_of_links: Option<u32>,
 }
 
 fn file_standard_info(handle: HANDLE) -> Option<FILE_STANDARD_INFO> {
@@ -397,6 +401,7 @@ fn resolve_file(volume: HANDLE, file_ref: u64) -> Option<ResolvedFile> {
         .as_ref()
         .map(|info| info.AllocationSize.max(0) as u64);
     let is_directory = standard.as_ref().map(|info| info.Directory != 0);
+    let number_of_links = standard.as_ref().map(|info| info.NumberOfLinks);
     let mtime_ms = basic
         .map(|info| windows_filetime_to_unix_ms(info.LastWriteTime))
         .unwrap_or(0);
@@ -422,6 +427,7 @@ fn resolve_file(volume: HANDLE, file_ref: u64) -> Option<ResolvedFile> {
         allocated_size,
         mtime_ms,
         is_directory,
+        number_of_links,
     })
 }
 
@@ -506,6 +512,7 @@ pub fn run_journal_mode(drive_letter: char, start_cursor: Option<i64>) -> Result
             size: resolved.allocated_size,
             mtime: resolved.mtime_ms,
             is_directory,
+            link_count: resolved.number_of_links,
         };
         let _ = emit(&line);
         emitted += 1;
@@ -560,6 +567,7 @@ mod tests {
             size,
             mtime: 0,
             is_directory: false,
+            link_count: None,
         }
     }
 
@@ -573,5 +581,11 @@ mod tests {
     fn journal_record_keeps_zero_allocated_size() {
         let json = serde_json::to_string(&record(Some(0))).unwrap();
         assert!(json.contains("\"size\":0"), "missing zero size in {json}");
+    }
+
+    #[test]
+    fn journal_record_omits_link_count_when_unknown() {
+        let json = serde_json::to_string(&record(Some(1))).unwrap();
+        assert!(!json.contains("linkCount"), "unexpected linkCount in {json}");
     }
 }

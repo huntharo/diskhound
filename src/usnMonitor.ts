@@ -49,6 +49,8 @@ interface JournalRecord {
   /** File last-write time in unix ms, when resolved from the handle. */
   mtime?: number;
   isDirectory?: boolean;
+  /** FILE_STANDARD_INFO.NumberOfLinks when the handle could be queried. */
+  linkCount?: number;
 }
 
 interface JournalCursorEnd {
@@ -181,7 +183,7 @@ export async function runIncrementalScan(params: {
   // Prefer allocated size from the journal reader (open-by-id handle).
   // Stat anything the native side couldn't size — Node's Windows stat
   // is logical-only, so this is a last resort.
-  const freshEntries = new Map<string, { size: number; mtime: number }>();
+  const freshEntries = new Map<string, { size: number; mtime: number; extraHardlink?: boolean }>();
   const needStat: string[] = [];
   for (const path of createOrModify) {
     const rec = byPath.get(path);
@@ -189,6 +191,7 @@ export async function runIncrementalScan(params: {
       freshEntries.set(path, {
         size: Math.max(0, rec.size),
         mtime: typeof rec.mtime === "number" && rec.mtime > 0 ? rec.mtime : rec.timestamp,
+        extraHardlink: typeof rec.linkCount === "number" && rec.linkCount > 1,
       });
     } else {
       needStat.push(path);
@@ -452,7 +455,7 @@ async function applyDeltasToIndex(
   newPath: string,
   deltas: {
     deletes: Set<string>;
-    updates: Map<string, { size: number; mtime: number }>;
+    updates: Map<string, { size: number; mtime: number; extraHardlink?: boolean }>;
   },
 ): Promise<{ additions: number; modifications: number; deletions: number }> {
   // Work with a copy of `updates` so we can remove entries as we see them —
@@ -519,7 +522,7 @@ async function applyDeltasToIndex(
   // Anything still in pendingAdds is a new file not previously in the index.
   let additions = 0;
   for (const [path, fresh] of pendingAdds) {
-    writeLine({ p: path, s: fresh.size, m: fresh.mtime });
+    writeLine({ p: path, s: fresh.size, m: fresh.mtime, ...(fresh.extraHardlink ? { h: 1 } : {}) });
     additions += 1;
   }
 

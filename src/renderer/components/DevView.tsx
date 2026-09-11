@@ -39,13 +39,36 @@ export function DevView({ snapshot }: Props) {
     void load();
   }, [load]);
 
-  const rows = useMemo(() => {
+  const remaining = useMemo(() => {
     if (!report) return [];
-    const visible = report.artifacts.filter((a) => !trashed.has(a.path));
+    return report.artifacts.filter((a) => !trashed.has(a.path));
+  }, [report, trashed]);
+
+  const rows = useMemo(() => {
     return kindFilter === "all"
-      ? visible
-      : visible.filter((a) => a.kind === kindFilter);
-  }, [report, kindFilter, trashed]);
+      ? remaining
+      : remaining.filter((a) => a.kind === kindFilter);
+  }, [remaining, kindFilter]);
+
+  const summary = useMemo(() => ({
+    totalBytes: remaining.reduce((sum, a) => sum + a.size, 0),
+    trees: remaining.length,
+    totalFiles: remaining.reduce((sum, a) => sum + a.fileCount, 0),
+    projectCount: new Set(remaining.map((a) => a.projectPath).filter(Boolean)).size,
+  }), [remaining]);
+
+  const kindTotals = useMemo(() => {
+    const map = new Map<DevArtifactKind, { size: number; count: number }>();
+    for (const artifact of remaining) {
+      const entry = map.get(artifact.kind) ?? { size: 0, count: 0 };
+      entry.size += artifact.size;
+      entry.count += 1;
+      map.set(artifact.kind, entry);
+    }
+    return [...map.entries()]
+      .map(([kind, stats]) => ({ kind, size: stats.size, count: stats.count }))
+      .sort((a, b) => b.size - a.size);
+  }, [remaining]);
 
   const groups = useMemo(() => {
     const map = new Map<string, DevArtifact[]>();
@@ -98,7 +121,7 @@ export function DevView({ snapshot }: Props) {
     );
   }
 
-  if (!report || report.artifacts.length === 0) {
+  if (!report || remaining.length === 0) {
     return (
       <div className="dev-view">
         <div className="empty-view">
@@ -112,21 +135,21 @@ export function DevView({ snapshot }: Props) {
     <div className="dev-view">
       <div className="dev-summary">
         <div className="dev-summary-net">
-          <span className="changes-delta-big">{formatBytes(report.totalBytes)}</span>
+          <span className="changes-delta-big">{formatBytes(summary.totalBytes)}</span>
           <span className="changes-delta-label">developer artifacts on disk</span>
         </div>
         <div className="changes-summary-stats">
           <div className="summary-item">
             <div className="summary-item-label">Projects</div>
-            <div className="summary-item-value">{formatCount(report.projectCount)}</div>
+            <div className="summary-item-value">{formatCount(summary.projectCount)}</div>
           </div>
           <div className="summary-item">
             <div className="summary-item-label">Trees</div>
-            <div className="summary-item-value">{formatCount(report.artifacts.length)}</div>
+            <div className="summary-item-value">{formatCount(summary.trees)}</div>
           </div>
           <div className="summary-item">
             <div className="summary-item-label">Files</div>
-            <div className="summary-item-value">{formatCount(report.totalFiles)}</div>
+            <div className="summary-item-value">{formatCount(summary.totalFiles)}</div>
           </div>
         </div>
       </div>
@@ -138,7 +161,7 @@ export function DevView({ snapshot }: Props) {
         </div>
         <div className="chip-group">
           <button className={`chip ${kindFilter === "all" ? "active" : ""}`} onClick={() => setKindFilter("all")}>All</button>
-          {report.kindTotals.slice(0, 6).map((entry) => (
+          {kindTotals.slice(0, 6).map((entry) => (
             <button
               key={entry.kind}
               className={`chip ${kindFilter === entry.kind ? "active" : ""}`}

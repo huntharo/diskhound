@@ -859,7 +859,8 @@ export function App() {
     const timer = window.setTimeout(() => {
       void nativeApi.searchIndex(snapshot.rootPath!, { query: q, limit: 400 }).then((result) => {
         if (cancelled || !result) return;
-        setIndexSearchHits(result.hits);
+        // Missing/empty index: fall back to the in-memory top-N filter.
+        setIndexSearchHits(result.filesScanned === 0 ? null : result.hits);
       });
     }, 220);
     return () => {

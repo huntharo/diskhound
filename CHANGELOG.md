@@ -17,15 +17,21 @@ removed `wmic.exe` tool.
 Windows occupancy uses allocated size (see #2). Extra NTFS hardlinks stay
 visible as paths but no longer inflate totals, the treemap, or folder
 rollups. The `h` flag survives mtime-skip inheritance and USN rewrites.
-Unelevated FindFirstFile walks still cannot see link counts. USN records
-omit size when handle metadata is unavailable so Node can stat instead of
-storing a 0-byte file.
+Unelevated FindFirstFile walks still cannot see link counts, but a re-walk
+keeps `h` from the previous index for the same path. New USN hardlink
+creates (`NumberOfLinks > 1`) are stored as extra names. USN records omit
+size when handle metadata is unavailable so Node can stat instead of
+storing a 0-byte file. Windows JS-worker fallbacks do not inherit an
+allocated MFT baseline.
 
 ### Index search and cleanup
 
 Ctrl+F searches the full scan index, not only the top-N largest files.
 Cleanup suggestions now stream that index (temps, caches, old installers,
-large media) and surface on Overview when they are large enough.
+large media) and surface on Overview when they are large enough. Cache
+matching uses unambiguous trees (`node_modules`, `target`, `obj`, …) and
+does not treat `dist`/`build`/`out`/`bin` as reclaimable. Ctrl+F falls
+back to the live top-N list when the index is not on disk yet.
 
 ### Dev artifacts
 
@@ -52,7 +58,9 @@ late). Relaunch now restores and focuses the existing window, including
 from the tray. The first hide-to-tray shows a balloon so it is obvious
 the app is still running. New installs default "Minimize to tray" off;
 existing settings are left alone. A second launch during first window
-creation reuses the in-flight window instead of opening another.
+creation reuses the in-flight window instead of opening another. A
+second launch while the first window is still loading will not hide it
+behind autostart-minimized.
 
 ### Windows size on disk for sparse files (#2)
 
