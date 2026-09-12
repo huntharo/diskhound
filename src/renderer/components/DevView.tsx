@@ -610,23 +610,58 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
         </div>
       )}
       <div className="dev-toolbar">
-        <span className="dev-toolbar-label" id="dev-group-by-label">Group</span>
-        <div className="chip-group" role="radiogroup" aria-labelledby="dev-group-by-label">
-          <button className={`chip ${groupBy === "all" ? "active" : ""}`} onClick={() => setGroupBy("all")}>All</button>
-          <button className={`chip ${groupBy === "kind" ? "active" : ""}`} onClick={() => setGroupBy("kind")}>By kind</button>
-          <button className={`chip ${groupBy === "project" ? "active" : ""}`} onClick={() => setGroupBy("project")}>By project</button>
+        <div className="dev-toolbar-cluster">
+          <span className="dev-toolbar-label" id="dev-group-by-label">Group</span>
+          <div className="chip-group" role="radiogroup" aria-labelledby="dev-group-by-label">
+            <button
+              type="button"
+              role="radio"
+              aria-checked={groupBy === "all"}
+              className={`chip ${groupBy === "all" ? "active" : ""}`}
+              onClick={() => setGroupBy("all")}
+            >
+              All
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={groupBy === "kind"}
+              className={`chip ${groupBy === "kind" ? "active" : ""}`}
+              onClick={() => setGroupBy("kind")}
+            >
+              By kind
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={groupBy === "project"}
+              className={`chip ${groupBy === "project" ? "active" : ""}`}
+              onClick={() => setGroupBy("project")}
+            >
+              By project
+            </button>
+          </div>
         </div>
         {reportHasChangeData && (
-          <>
+          <div className="dev-toolbar-cluster">
             <span className="dev-toolbar-label" id="dev-sort-by-label">Sort</span>
             <div className="chip-group" role="radiogroup" aria-labelledby="dev-sort-by-label">
               <button
+                type="button"
+                role="radio"
+                aria-checked={listSort === "size"}
                 className={`chip ${listSort === "size" ? "active" : ""}`}
                 onClick={() => setSortBy("size")}
               >
                 Largest
               </button>
               <button
+                type="button"
+                role="radio"
+                aria-checked={sortBy === "increase" && filterHasIncrease}
+                aria-label={filterHasIncrease
+                  ? "Largest increase"
+                  : "Largest increase, unavailable. No since-last-scan change for this kind"}
                 className={`chip ${sortBy === "increase" && filterHasIncrease ? "active" : ""}`}
                 disabled={!filterHasIncrease}
                 title={filterHasIncrease ? undefined : "No since-last-scan change for this kind"}
@@ -635,7 +670,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                 Largest increase
               </button>
             </div>
-          </>
+          </div>
         )}
       </div>
 
@@ -722,9 +757,14 @@ function KindTape({
   const toggle = (kind: DevArtifactKind) => {
     onFilter(kindFilter === kind ? "all" : kind);
   };
+  const filtered = kindFilter !== "all";
   return (
     <div className="dev-tape">
-      <div className="dev-spectrum" role="list" aria-label="Reclaimable bytes by kind">
+      <div
+        className={`dev-spectrum ${filtered ? "is-filtered" : ""}`}
+        role="list"
+        aria-label="Reclaimable bytes by kind"
+      >
         {totals.map((entry) => (
           <button
             key={entry.kind}
@@ -740,10 +780,16 @@ function KindTape({
           />
         ))}
       </div>
-      <div className="dev-kind-rail" role="toolbar" aria-label="Filter by kind">
+      <div
+        className={`dev-kind-rail ${filtered ? "is-filtered" : ""}`}
+        role="toolbar"
+        aria-label="Filter by kind"
+      >
         <button
           type="button"
-          className={`dev-kind-cell ${kindFilter === "all" ? "active" : ""}`}
+          className={`dev-kind-cell dev-kind-cell-all ${kindFilter === "all" ? "active" : ""}`}
+          aria-pressed={kindFilter === "all"}
+          title="Show every kind"
           onClick={() => onFilter("all")}
         >
           <span className="dev-kind-cell-label">All kinds</span>
@@ -751,21 +797,24 @@ function KindTape({
         </button>
         {totals.map((entry) => {
           const share = totalBytes > 0 ? entry.size / totalBytes : 0;
+          const selected = kindFilter === entry.kind;
           return (
             <button
               key={entry.kind}
               type="button"
-              className={`dev-kind-cell ${kindFilter === entry.kind ? "active" : ""}`}
+              className={`dev-kind-cell ${selected ? "active" : ""}`}
+              aria-pressed={selected}
               onClick={() => toggle(entry.kind)}
               title={DEV_KIND_LABEL[entry.kind]}
+              style={{ "--cell-kind": devKindCssVar(entry.kind) }}
             >
               <span className="dev-kind-cell-top">
-                <span className="dev-row-pip" style={{ background: devKindCssVar(entry.kind) }} aria-hidden="true" />
+                <span className="dev-kind-swatch" aria-hidden="true" />
                 <span className="dev-kind-cell-label">{DEV_KIND_SHORT[entry.kind]}</span>
                 <span className="dev-kind-cell-size">{formatBytes(entry.size)}</span>
               </span>
               <span className="dev-kind-cell-bar" aria-hidden="true">
-                <span className="dev-kind-cell-fill" style={{ width: `${Math.max(share * 100, 3)}%`, background: devKindCssVar(entry.kind) }} />
+                <span className="dev-kind-cell-fill" style={{ width: `${Math.max(share * 100, 3)}%` }} />
               </span>
             </button>
           );
