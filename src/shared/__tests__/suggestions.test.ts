@@ -70,4 +70,21 @@ describe("analyzeCleanupFromIndex", () => {
     expect(caches).toBeTruthy();
     expect(caches!.totalSize).toBe(8_000_000);
   });
+
+  it("splits DiagOutputDir ETL traces out of generic logs", async () => {
+    const filePath = indexFilePath("scan-diag");
+    const { stream, finalize } = openIndexWriter(filePath);
+    stream.write(`${JSON.stringify({ p: "C:\\Users\\thoma\\AppData\\Local\\Temp\\DiagOutputDir\\RdClientAutoTrace\\a.etl", s: 4_000_000_000, m: 1 })}\n`);
+    stream.write(`${JSON.stringify({ p: "C:\\Users\\thoma\\AppData\\Local\\Temp\\DiagOutputDir\\b.etl", s: 1_000_000_000, m: 1 })}\n`);
+    stream.write(`${JSON.stringify({ p: "C:\\app\\debug.log", s: 20, m: 1 })}\n`);
+    await finalize();
+
+    const result = await analyzeCleanupFromIndex("C:\\", filePath, defaultSettings().cleanup);
+    const diag = result.suggestions.find((s) => s.category === "diag-logs");
+    const logs = result.suggestions.find((s) => s.category === "logs");
+    expect(diag?.title).toBe("DiagOutputDir RDP trace logs");
+    expect(diag?.totalSize).toBe(5_000_000_000);
+    expect(diag?.paths).toEqual(["C:\\Users\\thoma\\AppData\\Local\\Temp\\DiagOutputDir"]);
+    expect(logs?.totalSize).toBe(20);
+  });
 });

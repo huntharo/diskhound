@@ -70,18 +70,61 @@ export function analyzeForCleanup(
   // Group files by category
   if (settings.autoDetectTempFiles) {
     const tempFiles = files.filter(
-      (f) => TEMP_EXTENSIONS.has(f.extension) || matchesTempPath(f.path),
+      (f) => (TEMP_EXTENSIONS.has(f.extension) || matchesTempPath(f.path))
+        && classifyArtifactPath(f.path)?.kind !== "diag-logs",
     );
     if (tempFiles.length > 0) {
       suggestions.push(buildSuggestion("temp-files", "safe", "Temporary Files", tempFiles,
         "Temporary files created by applications and the OS. Safe to remove."));
     }
 
-    const logFiles = files.filter((f) => LOG_EXTENSIONS.has(f.extension));
+    const logFiles = files.filter((f) => (
+      LOG_EXTENSIONS.has(f.extension) && classifyArtifactPath(f.path)?.kind !== "diag-logs"
+    ));
     if (logFiles.length > 0) {
       suggestions.push(buildSuggestion("logs", "low", "Log Files", logFiles,
         "Application and system log files. Usually safe to remove, but check if you need them for debugging."));
     }
+  }
+
+  const diagRoots = new Map<string, DirectoryHotspot>();
+  for (const dir of directories) {
+    const match = classifyArtifactPath(dir.path);
+    if (!match || match.kind !== "diag-logs") continue;
+    const key = match.root.replace(/[\\/]+$/, "").toLowerCase();
+    const exact = dir.path.replace(/[\\/]+$/, "").toLowerCase() === key;
+    const prev = diagRoots.get(key);
+    if (!prev || exact || dir.size > prev.size) {
+      diagRoots.set(key, {
+        path: match.root,
+        size: exact || !prev ? dir.size : Math.max(prev.size, dir.size),
+        fileCount: exact || !prev ? dir.fileCount : Math.max(prev.fileCount, dir.fileCount),
+        depth: dir.depth,
+      });
+    }
+  }
+  if (diagRoots.size === 0) {
+    for (const file of files) {
+      const match = classifyArtifactPath(file.path);
+      if (!match || match.kind !== "diag-logs") continue;
+      const key = match.root.replace(/[\\/]+$/, "").toLowerCase();
+      const prev = diagRoots.get(key);
+      if (!prev) {
+        diagRoots.set(key, { path: match.root, size: file.size, fileCount: 1, depth: 0 });
+      } else {
+        prev.size += file.size;
+        prev.fileCount += 1;
+      }
+    }
+  }
+  if (diagRoots.size > 0) {
+    suggestions.push(buildDirSuggestion(
+      "diag-logs",
+      "safe",
+      "DiagOutputDir RDP trace logs",
+      [...diagRoots.values()],
+      "Remote Desktop and Windows diagnostic ETL traces in Temp\\DiagOutputDir. They grow without a cap and are safe to remove.",
+    ));
   }
 
   if (settings.autoDetectCaches) {
@@ -100,7 +143,8 @@ export function analyzeForCleanup(
     }
 
     const systemTempDirs = directories.filter((d) =>
-      SYSTEM_TEMP_PATHS.some((sp) => normalizePath(d.path).includes(normalizePath(sp))),
+      SYSTEM_TEMP_PATHS.some((sp) => normalizePath(d.path).includes(normalizePath(sp)))
+      && classifyArtifactPath(d.path)?.kind !== "diag-logs",
     );
     if (systemTempDirs.length > 0) {
       suggestions.push(buildDirSuggestion("system-cache", "low", "System Temp & Crash Dumps", systemTempDirs,
@@ -225,6 +269,7 @@ export async function analyzeCleanupFromIndex(
   const buckets = {
     temp: emptyBucket(),
     logs: emptyBucket(),
+    diagLogs: emptyBucket(),
     caches: emptyBucket(),
     installers: emptyBucket(),
     downloads: emptyBucket(),
@@ -248,7 +293,10 @@ export async function analyzeCleanupFromIndex(
       const ext = Path.extname(rec.p).toLowerCase() || "(no ext)";
       const mtime = typeof rec.m === "number" ? rec.m : now;
 
-      if (settings.autoDetectTempFiles) {
+      const classified = classifyArtifactPath(rec.p);
+      if (classified?.kind === "diag-logs") {
+        addToBucket(buckets.diagLogs, classified.root, rec.s);
+      } else if (settings.autoDetectTempFiles) {
         if (TEMP_EXTENSIONS.has(ext) || matchesTempPath(rec.p)) addToBucket(buckets.temp, rec.p, rec.s);
         if (LOG_EXTENSIONS.has(ext)) addToBucket(buckets.logs, rec.p, rec.s);
       }
@@ -277,6 +325,8 @@ export async function analyzeCleanupFromIndex(
   const suggestions: CleanupSuggestion[] = [];
   pushBucket(suggestions, buckets.temp, "temp-files", "safe", "Temporary Files",
     "Temporary files created by applications and the OS. Safe to remove.");
+  pushBucket(suggestions, buckets.diagLogs, "diag-logs", "safe", "DiagOutputDir RDP trace logs",
+    "Remote Desktop and Windows diagnostic ETL traces in Temp\\DiagOutputDir. They grow without a cap and are safe to remove.");
   pushBucket(suggestions, buckets.logs, "logs", "low", "Log Files",
     "Application and system log files. Usually safe to remove, but check if you need them for debugging.");
   pushBucket(suggestions, buckets.caches, "build-cache", "low", "Build & Package Caches",

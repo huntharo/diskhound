@@ -15,7 +15,29 @@ export const DEV_KIND_LABEL: Record<DevArtifactKind, string> = {
   dotnet: "NuGet / .NET",
   "compiler-cache": "Compiler caches",
   "cmake-build": "CMake build trees",
+  "diag-logs": "RDP / diag traces",
 };
+
+/** Short rail labels. Full names stay on group headers and tooltips. */
+export const DEV_KIND_SHORT: Record<DevArtifactKind, string> = {
+  worktree: "Worktrees",
+  "node-modules": "node_modules",
+  "package-cache": "Pkg cache",
+  "rust-target": "Rust target",
+  "cargo-registry": "Cargo",
+  "js-build": "JS build",
+  python: "Python",
+  "go-module": "Go cache",
+  jvm: "Gradle",
+  dotnet: ".NET",
+  "compiler-cache": "ccache",
+  "cmake-build": "CMake",
+  "diag-logs": "RDP / diag",
+};
+
+export function devKindCssVar(kind: DevArtifactKind): string {
+  return `var(--dev-k-${kind})`;
+}
 
 const SEGMENT_KIND: Record<string, DevArtifactKind> = {
   node_modules: "node-modules",
@@ -46,6 +68,8 @@ const SEGMENT_KIND: Record<string, DevArtifactKind> = {
   ccache: "compiler-cache",
   sccache: "compiler-cache",
   ".worktrees": "worktree",
+  diagoutputdir: "diag-logs",
+  rdclientautotrace: "diag-logs",
 };
 
 function splitSegments(filePath: string): string[] {
@@ -108,4 +132,82 @@ export function classifyArtifactPath(filePath: string): { root: string; kind: De
     }
   }
   return null;
+}
+
+function pathKey(p: string): string {
+  return p.replace(/[\\/]+$/, "").toLowerCase();
+}
+
+export function emptyDevReport(rootPath: string): DevArtifactReport {
+  return {
+    artifacts: [],
+    totalBytes: 0,
+    totalFiles: 0,
+    projectCount: 0,
+    kindTotals: [],
+    generatedAt: 0,
+    rootPath,
+  };
+}
+
+/**
+ * Add DiagOutputDir / RdClientAutoTrace trees from scan directory
+ * rollups when an older sidecar never classified them. Same
+ * `classifyArtifactPath` roots as a new native write. Does not
+ * stream the file index.
+ */
+export function mergeDiagLogHotspots(
+  report: DevArtifactReport,
+  dirs: ReadonlyArray<{ path: string; size: number; fileCount?: number; files?: number }>,
+): DevArtifactReport {
+  const existing = new Set(report.artifacts.map((a) => pathKey(a.path)));
+  const found = new Map<string, DevArtifact>();
+
+  for (const dir of dirs) {
+    const match = classifyArtifactPath(dir.path);
+    if (!match || match.kind !== "diag-logs") continue;
+    const key = pathKey(match.root);
+    if (existing.has(key)) continue;
+    const files = dir.fileCount ?? dir.files ?? 0;
+    const exact = pathKey(dir.path) === key;
+    const prev = found.get(key);
+    if (!prev) {
+      found.set(key, {
+        path: match.root,
+        kind: match.kind,
+        projectPath: null,
+        projectName: "Unscoped",
+        size: dir.size,
+        fileCount: files,
+        previousSize: null,
+        deltaBytes: null,
+      });
+      continue;
+    }
+    if (exact || dir.size > prev.size) {
+      prev.size = exact ? dir.size : Math.max(prev.size, dir.size);
+      prev.fileCount = Math.max(prev.fileCount, files);
+    }
+  }
+
+  if (found.size === 0) return report;
+
+  const artifacts = [...report.artifacts, ...found.values()].sort((a, b) => b.size - a.size);
+  const kindMap = new Map<DevArtifactKind, { size: number; count: number }>();
+  for (const artifact of artifacts) {
+    const entry = kindMap.get(artifact.kind) ?? { size: 0, count: 0 };
+    entry.size += artifact.size;
+    entry.count += 1;
+    kindMap.set(artifact.kind, entry);
+  }
+  return {
+    ...report,
+    artifacts,
+    totalBytes: artifacts.reduce((sum, a) => sum + a.size, 0),
+    totalFiles: artifacts.reduce((sum, a) => sum + a.fileCount, 0),
+    projectCount: new Set(artifacts.map((a) => a.projectPath).filter(Boolean)).size,
+    kindTotals: [...kindMap.entries()]
+      .map(([kind, stats]) => ({ kind, size: stats.size, count: stats.count }))
+      .sort((a, b) => b.size - a.size),
+  };
 }

@@ -169,6 +169,10 @@ export function App() {
 
   const [scanOptions, setScanOptions] = useState<ScanOptions>(defaultScanOptions());
   const [view, setView] = useState<AppView>("overview");
+  const [devTabMounted, setDevTabMounted] = useState(false);
+  useEffect(() => {
+    if (view === "dev") setDevTabMounted(true);
+  }, [view]);
   const { drives, refresh: refreshDiskSpace } = useLiveDiskSpace();
   const [filterExt, setFilterExt] = useState<string | undefined>();
   // null = still loading the initial snapshot; prevents a flash of the picker
@@ -1303,16 +1307,21 @@ export function App() {
                   />
                 </ErrorBoundary>
               )}
-              {view === "dev" && (
-                <ErrorBoundary name="Dev Artifacts">
-                  <DevView
-                    snapshot={snapshot}
-                    onStartScan={() => {
-                      if (snapshot.rootPath) void doScan(snapshot.rootPath);
-                    }}
-                    otherScannedRoots={otherScannedRoots}
-                  />
-                </ErrorBoundary>
+              {(view === "dev" || devTabMounted) && (
+                <div
+                  className="view-pane"
+                  hidden={view !== "dev"}
+                >
+                  <ErrorBoundary name="Dev Artifacts">
+                    <DevView
+                      snapshot={snapshot}
+                      onStartScan={() => {
+                        if (snapshot.rootPath) void doScan(snapshot.rootPath);
+                      }}
+                      otherScannedRoots={otherScannedRoots}
+                    />
+                  </ErrorBoundary>
+                </div>
               )}
               {view === "duplicates" && (
                 <ErrorBoundary name="Duplicates">

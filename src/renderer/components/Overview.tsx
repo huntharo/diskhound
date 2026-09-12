@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import type { DevArtifactReport, ExtensionBucket, ScanDiffResult, ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
+import { mergeDiagLogHotspots } from "../../shared/devArtifacts";
 import {
   deletedPathLabel,
   deletedPathTitle,
@@ -14,6 +15,12 @@ import {
   colorForExtension,
   type TreemapFeaturedItem,
 } from "../lib/treemap";
+import {
+  FILE_CATEGORY_CHIPS,
+  FILTER_EXTS,
+  fileMatchesCategory,
+  type FileCategoryFilter,
+} from "../lib/fileQuickFilters";
 import { nativeApi } from "../nativeApi";
 import { FileIcon } from "./FileIcon";
 import { toast } from "./Toasts";
@@ -135,6 +142,7 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
   // user's preference survives reopens.
   const [recentOn, setRecentOn] = useState<boolean>(getInitialRecentOn);
   const [recentWindow, setRecentWindow] = useState<OverviewRecentWindow>(getInitialRecentWindow);
+  const [typeFilter, setTypeFilter] = useState<FileCategoryFilter>("all");
   const [dominantExpanded, setDominantExpanded] = useState(false);
   const [denseFiles, setDenseFiles] = useState<ScanFileRecord[] | null>(null);
   const [latestDiff, setLatestDiff] = useState<ScanDiffResult | null>(null);
@@ -214,12 +222,24 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
   // rects. Cutoff is computed once per render so we don't drift mid-
   // session as Date.now() advances.
   const sourceFiles = useMemo(() => {
-    if (!recentOn) return sourceFilesRaw;
-    const ms = OVERVIEW_RECENT_WINDOWS.find((w) => w.id === recentWindow)?.ms
-      ?? OVERVIEW_RECENT_WINDOWS[1].ms;
-    const cutoff = Date.now() - ms;
-    return sourceFilesRaw.filter((f) => f.modifiedAt >= cutoff);
-  }, [sourceFilesRaw, recentOn, recentWindow]);
+    let files = sourceFilesRaw;
+    if (recentOn) {
+      const ms = OVERVIEW_RECENT_WINDOWS.find((w) => w.id === recentWindow)?.ms
+        ?? OVERVIEW_RECENT_WINDOWS[1].ms;
+      const cutoff = Date.now() - ms;
+      files = files.filter((f) => f.modifiedAt >= cutoff);
+    }
+    if (typeFilter !== "all") {
+      files = files.filter((f) => fileMatchesCategory(f, typeFilter));
+    }
+    return files;
+  }, [sourceFilesRaw, recentOn, recentWindow, typeFilter]);
+
+  const visibleExtensions = useMemo(() => {
+    if (typeFilter === "all") return snapshot.topExtensions;
+    const allowed = FILTER_EXTS[typeFilter];
+    return snapshot.topExtensions.filter((bucket) => allowed.has(bucket.extension.toLowerCase()));
+  }, [snapshot.topExtensions, typeFilter]);
 
   const treemapComposition = useMemo(
     () => buildTreemapComposition(sourceFiles),
@@ -414,6 +434,20 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
                 )}
               </div>
             </div>
+            <div className="overview-filter-chips chip-group" role="radiogroup" aria-label="Filter overview by type">
+              {FILE_CATEGORY_CHIPS.map((chip) => (
+                <button
+                  key={chip.id}
+                  type="button"
+                  className={`chip ${typeFilter === chip.id ? "active" : ""}`}
+                  aria-pressed={typeFilter === chip.id}
+                  title={chip.id === "all" ? "Show every file type" : `Show only ${chip.label.toLowerCase()}`}
+                  onClick={() => setTypeFilter(chip.id)}
+                >
+                  {chip.label}
+                </button>
+              ))}
+            </div>
 
             {condensedMode && (
               <div className={`treemap-featured ${dominantExpanded ? "expanded" : "collapsed"}`}>
@@ -595,6 +629,16 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
                     );
                   })()}
                 </div>
+              ) : typeFilter !== "all" && treemapFiles.length === 0 && snapshot.status === "done" ? (
+                <div className="treemap-empty">
+                  <div className="treemap-empty-icon">&#x25A6;</div>
+                  <div style={{ fontSize: 13, color: "var(--text)" }}>
+                    No {FILE_CATEGORY_CHIPS.find((chip) => chip.id === typeFilter)?.label.toLowerCase() ?? "files"} in this overview
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                    Clear the type filter or pick All to see the full map.
+                  </div>
+                </div>
               ) : snapshot.status === "idle" && snapshot.rootPath && treemapFiles.length === 0 ? (
                 // Valid root selected but never scanned — offer a clear CTA.
                 <div className="treemap-empty">
@@ -649,12 +693,12 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
                 </button>
               </div>
               <div className="ext-sidebar-list">
-                {snapshot.topExtensions.length === 0 ? (
+                {visibleExtensions.length === 0 ? (
                   <div className="empty-view" style={{ height: "100%" }}>
-                    <span>No data yet</span>
+                    <span>{snapshot.topExtensions.length === 0 ? "No data yet" : "No extensions in this filter"}</span>
                   </div>
                 ) : (
-                  snapshot.topExtensions.map((b) => (
+                  visibleExtensions.map((b) => (
                     <ExtRow
                       key={b.extension}
                       bucket={b}
@@ -815,20 +859,23 @@ function DevCleanupTile({ snapshot, onViewDev }: { snapshot: ScanSnapshot; onVie
   }, [snapshot.rootPath, snapshot.finishedAt, snapshot.status]);
 
   if (snapshot.status !== "done") return null;
-  if (!dev || dev.totalBytes <= 0) return null;
-  const topKind = dev.kindTotals[0]?.kind;
+  const display = dev
+    ? mergeDiagLogHotspots(dev, snapshot.hottestDirectories ?? [])
+    : null;
+  if (!display || display.totalBytes <= 0) return null;
+  const topKind = display.kindTotals[0]?.kind;
   return (
     <button
       type="button"
       className="metric metric-dev-tile"
       onClick={() => onViewDev?.()}
-      title="Open Dev Artifacts to trash worktrees, node_modules, and build caches"
+      title="Open Dev Artifacts to trash worktrees, node_modules, build caches, and RDP traces"
     >
-      <span className="metric-value accent">{formatBytes(dev.totalBytes)}</span>
+      <span className="metric-value accent">{formatBytes(display.totalBytes)}</span>
       <span className="metric-label">dev artifacts</span>
       <span className="metric-dev-meta">
-        {formatCount(dev.projectCount)} proj
-        {topKind ? ` · ${formatCount(dev.kindTotals[0]!.count)} trees` : ""}
+        {formatCount(display.projectCount)} proj
+        {topKind ? ` · ${formatCount(display.kindTotals[0]!.count)} trees` : ""}
       </span>
     </button>
   );

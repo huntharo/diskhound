@@ -266,6 +266,52 @@ describe("planRescanTargets", () => {
     expect(targets).toEqual(["C:\\a\\node_modules", "C:\\b\\target"]);
     expect(targets.length).toBeLessThan(projects.length);
   });
+
+  it("adds a seeded DiagOutputDir that is not already a sidecar root", async () => {
+    const { planRescanTargets } = await import("../devArtifactSidecar");
+    const targets = planRescanTargets({
+      version: 1,
+      rootPath: "C:\\",
+      generatedAt: 1,
+      roots: [{ path: "C:\\a\\node_modules", kind: "node-modules", size: 1, files: 1 }],
+      projects: [],
+    }, ["C:\\Users\\thoma\\AppData\\Local\\Temp\\DiagOutputDir"]);
+    expect(targets).toEqual([
+      "C:\\a\\node_modules",
+      "C:\\Users\\thoma\\AppData\\Local\\Temp\\DiagOutputDir",
+    ]);
+  });
+
+  it("drops a nested RdClientAutoTrace seed under DiagOutputDir", async () => {
+    const { planRescanTargets } = await import("../devArtifactSidecar");
+    const targets = planRescanTargets({
+      version: 1,
+      rootPath: "C:\\",
+      generatedAt: 1,
+      roots: [{
+        path: "C:\\Users\\thoma\\AppData\\Local\\Temp\\DiagOutputDir",
+        kind: "diag-logs",
+        size: 1,
+        files: 1,
+      }],
+      projects: [],
+    }, [
+      "C:\\Users\\thoma\\AppData\\Local\\Temp\\DiagOutputDir",
+      "C:\\Users\\thoma\\AppData\\Local\\Temp\\DiagOutputDir\\RdClientAutoTrace",
+    ]);
+    expect(targets).toEqual(["C:\\Users\\thoma\\AppData\\Local\\Temp\\DiagOutputDir"]);
+  });
+});
+
+describe("discoverDiagLogRoots", () => {
+  it("finds DiagOutputDir under a fake Users profile", async () => {
+    const { discoverDiagLogRoots } = await import("../devArtifactSidecar");
+    const drive = Path.join(tempDir, "drive");
+    const diag = Path.join(drive, "Users", "thoma", "AppData", "Local", "Temp", "DiagOutputDir");
+    await FSP.mkdir(diag, { recursive: true });
+    const found = discoverDiagLogRoots(drive);
+    expect(found.some((p) => p.toLowerCase().endsWith("diagoutputdir"))).toBe(true);
+  });
 });
 
 describe("rescanDevArtifactSidecar", () => {

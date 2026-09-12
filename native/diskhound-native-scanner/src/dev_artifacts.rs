@@ -24,6 +24,7 @@ enum Kind {
     Dotnet,
     CompilerCache,
     CmakeBuild,
+    DiagLogs,
 }
 
 impl Kind {
@@ -41,6 +42,7 @@ impl Kind {
             Kind::Dotnet => "dotnet",
             Kind::CompilerCache => "compiler-cache",
             Kind::CmakeBuild => "cmake-build",
+            Kind::DiagLogs => "diag-logs",
         }
     }
 }
@@ -222,6 +224,7 @@ fn mapped_kind(lower: &str) -> Option<Kind> {
         "cmakefiles" | "cmake-build-debug" | "cmake-build-release" => Kind::CmakeBuild,
         "ccache" | "sccache" => Kind::CompilerCache,
         ".worktrees" => Kind::Worktree,
+        "diagoutputdir" | "rdclientautotrace" => Kind::DiagLogs,
         _ => return None,
     })
 }
@@ -300,6 +303,24 @@ mod tests {
         let (root, kind) = classify("/home/dev/diskhound/target/debug/diskhound").unwrap();
         assert_eq!(root, "/home/dev/diskhound/target/debug");
         assert!(matches!(kind, Kind::RustTarget));
+    }
+
+    #[test]
+    fn classifies_diag_output_dir_before_nested_rdp_trace() {
+        let (root, kind) = classify(
+            r"C:\Users\thoma\AppData\Local\Temp\DiagOutputDir\RdClientAutoTrace\a.etl",
+        )
+        .unwrap();
+        assert_eq!(root, r"C:\Users\thoma\AppData\Local\Temp\DiagOutputDir");
+        assert!(matches!(kind, Kind::DiagLogs));
+    }
+
+    #[test]
+    fn classifies_standalone_rdclient_auto_trace() {
+        let (root, kind) =
+            classify(r"C:\Users\thoma\AppData\Local\Temp\RdClientAutoTrace\a.etl").unwrap();
+        assert_eq!(root, r"C:\Users\thoma\AppData\Local\Temp\RdClientAutoTrace");
+        assert!(matches!(kind, Kind::DiagLogs));
     }
 
     #[test]

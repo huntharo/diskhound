@@ -417,7 +417,8 @@ export type SuggestionCategory =
   | "logs"
   | "browser-cache"
   | "system-cache"
-  | "installer-leftovers";
+  | "installer-leftovers"
+  | "diag-logs";
 
 export interface CleanupSuggestion {
   id: string;
@@ -450,7 +451,8 @@ export type DevArtifactKind =
   | "jvm"
   | "dotnet"
   | "compiler-cache"
-  | "cmake-build";
+  | "cmake-build"
+  | "diag-logs";
 
 export interface DevArtifact {
   path: string;

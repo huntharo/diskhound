@@ -1,8 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import type { DevArtifact, DevArtifactKind, DevArtifactReport, DevArtifactsRescanProgress, ScanSnapshot } from "../../shared/contracts";
-import { DEV_KIND_LABEL } from "../../shared/devArtifacts";
+import {
+  DEV_KIND_LABEL,
+  DEV_KIND_SHORT,
+  devKindCssVar,
+  emptyDevReport,
+  mergeDiagLogHotspots,
+} from "../../shared/devArtifacts";
 import { formatScanRoot } from "../../shared/pathUtils";
+import { artifactHeadline, artifactTail } from "../lib/devArtifactDisplay";
+import {
+  groupDevArtifacts,
+  isUsefulDevReport,
+  reportKey,
+  resolveDevPaint,
+  seedDevViewState,
+  type DevGroupBy,
+} from "../lib/devArtifactViewState";
 import { formatBytes, formatCount } from "../lib/format";
 import { nativeApi } from "../nativeApi";
 import { DEV_FOLDER_TREE_STAGES, DEV_RESCAN_STAGES, DEV_SIDECAR_STAGES, IndexLoadingPanel } from "./IndexLoadingPanel";
@@ -14,31 +29,32 @@ interface Props {
   otherScannedRoots?: string[];
 }
 
-type GroupBy = "kind" | "project";
 
 let sessionReport: { key: string; report: DevArtifactReport } | null = null;
+let lastGood: { root: string; report: DevArtifactReport } | null = null;
+let settledEmptyKey: string | null = null;
 let sessionLoadStarted: { key: string; at: number } | null = null;
 
-function reportKey(root: string | null, finishedAt: number | null): string {
-  return `${root ?? ""}|${finishedAt ?? 0}`;
+function rememberReport(root: string, key: string, next: DevArtifactReport | null, completedEmpty: boolean): void {
+  if (isUsefulDevReport(next)) {
+    sessionReport = { key, report: next };
+    lastGood = { root, report: next };
+    settledEmptyKey = null;
+    return;
+  }
+  if (completedEmpty) {
+    sessionReport = next ? { key, report: next } : null;
+    if (lastGood?.root === root) lastGood = null;
+    settledEmptyKey = key;
+  }
 }
 
-/** First paint must not look like an empty sidecar. Show a cached
- *  report for this root+scan, or start on the loading panel. */
 function seedViewState(
   root: string | null,
   finishedAt: number | null,
   status: ScanSnapshot["status"],
-): { report: DevArtifactReport | null; loading: boolean; startedAt: number | null } {
-  const key = reportKey(root, finishedAt);
-  if (sessionReport?.key === key) {
-    return { report: sessionReport.report, loading: false, startedAt: null };
-  }
-  if (status === "done" && root) {
-    if (sessionLoadStarted?.key !== key) sessionLoadStarted = { key, at: Date.now() };
-    return { report: null, loading: true, startedAt: sessionLoadStarted.at };
-  }
-  return { report: null, loading: false, startedAt: null };
+) {
+  return seedDevViewState(root, finishedAt, status, sessionReport, lastGood, settledEmptyKey);
 }
 
 function truncatePath(path: string, max = 56): string {
@@ -53,12 +69,13 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
   const [heldKey, setHeldKey] = useState(key);
   const [report, setReport] = useState<DevArtifactReport | null>(boot.report);
   const [loading, setLoading] = useState(boot.loading);
+  const [settled, setSettled] = useState(boot.settled);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadingStartedAt, setLoadingStartedAt] = useState<number | null>(boot.startedAt);
   const [loadingElapsedSec, setLoadingElapsedSec] = useState(() => (
     boot.startedAt ? Math.floor((Date.now() - boot.startedAt) / 1000) : 0
   ));
-  const [groupBy, setGroupBy] = useState<GroupBy>("kind");
+  const [groupBy, setGroupBy] = useState<DevGroupBy>("all");
   const [kindFilter, setKindFilter] = useState<DevArtifactKind | "all">("all");
   const [busyPaths, setBusyPaths] = useState<Set<string>>(() => new Set());
   const [trashed, setTrashed] = useState<Set<string>>(() => new Set());
@@ -76,6 +93,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     const next = seedViewState(root, snapshot.finishedAt, snapshot.status);
     setReport(next.report);
     setLoading(next.loading);
+    setSettled(next.settled);
     setLoadError(null);
     setLoadingStartedAt(next.startedAt);
     setLoadingElapsedSec(next.startedAt ? Math.floor((Date.now() - next.startedAt) / 1000) : 0);
@@ -84,26 +102,33 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
   const load = useCallback(async () => {
     if (!root) {
       setReport(null);
+      setSettled(true);
       return;
     }
     const loadKey = reportKey(root, snapshot.finishedAt);
     const gen = ++loadGenRef.current;
-    if (sessionReport?.key === loadKey) {
+    if (sessionReport?.key === loadKey && isUsefulDevReport(sessionReport.report)) {
       setReport(sessionReport.report);
       setLoadError(null);
       setLoading(false);
-      // Cheap sidecar reread — keep the cached report on screen.
+      setSettled(true);
+      // Cheap sidecar reread — keep last-good on screen unless the
+      // reread returns a useful replacement. Empty/null must not wipe it.
       void nativeApi.getDevArtifacts(root, { sidecarOnly: true }).then((fast) => {
         if (gen !== loadGenRef.current) return;
-        if (!fast) return;
+        if (!isUsefulDevReport(fast)) return;
         setReport(fast);
-        sessionReport = { key: loadKey, report: fast };
+        rememberReport(root, loadKey, fast, false);
       }).catch(() => {
         /* keep the session report */
       });
       return;
     }
+    if (lastGood?.root === root && isUsefulDevReport(lastGood.report)) {
+      setReport(lastGood.report);
+    }
     setLoading(true);
+    setSettled(false);
     setLoadError(null);
     if (sessionLoadStarted?.key !== loadKey) sessionLoadStarted = { key: loadKey, at: Date.now() };
     setLoadingStartedAt(sessionLoadStarted.at);
@@ -112,20 +137,26 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     try {
       const fast = await nativeApi.getDevArtifacts(root, { sidecarOnly: true });
       if (gen !== loadGenRef.current) return;
-      if (fast) {
+      if (isUsefulDevReport(fast)) {
         setReport(fast);
-        sessionReport = { key: loadKey, report: fast };
+        rememberReport(root, loadKey, fast, false);
         sessionLoadStarted = null;
+        setSettled(true);
         return;
       }
       setLoadPath("folder-tree");
       const next = await nativeApi.getDevArtifacts(root);
       if (gen !== loadGenRef.current) return;
-      setReport(next);
-      if (next) {
-        sessionReport = { key: loadKey, report: next };
+      if (isUsefulDevReport(next)) {
+        setReport(next);
+        rememberReport(root, loadKey, next, false);
         sessionLoadStarted = null;
+        setSettled(true);
+        return;
       }
+      rememberReport(root, loadKey, next, true);
+      setReport(next);
+      setSettled(true);
       if (!next) {
         setLoadError(
           `No Dev Artifacts sidecar for ${formatScanRoot(root)}. Run a full scan of this drive, or open Folders first on an older scan so DiskHound can classify from the folder tree.`,
@@ -133,8 +164,11 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
       }
     } catch (err) {
       if (gen !== loadGenRef.current) return;
-      setReport(null);
+      if (!(lastGood?.root === root && isUsefulDevReport(lastGood.report))) {
+        setReport(null);
+      }
       setLoadError(err instanceof Error ? err.message : String(err));
+      setSettled(true);
     } finally {
       if (gen !== loadGenRef.current) return;
       setLoading(false);
@@ -153,12 +187,13 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
         rescanGenRef.current += 1;
         await nativeApi.cancelDevArtifactsRescan(scanRoot);
         setReport(next);
-        sessionReport = { key: reportKey(scanRoot, snapshot.finishedAt), report: next };
+        rememberReport(scanRoot, reportKey(scanRoot, snapshot.finishedAt), next, false);
         sessionLoadStarted = null;
         rescanningRef.current = false;
         setRescanning(false);
         setRescanProgress(null);
         setLoading(false);
+        setSettled(true);
         setLoadingStartedAt(null);
         toast("info", "Scan finished", "Using the new sidecar for this drive.");
       })();
@@ -182,10 +217,26 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     });
   }, [root]);
 
+  const displayReport = useMemo(() => {
+    if (report) return mergeDiagLogHotspots(report, snapshot.hottestDirectories ?? []);
+    if (settled && root) {
+      return mergeDiagLogHotspots(emptyDevReport(root), snapshot.hottestDirectories ?? []);
+    }
+    return null;
+  }, [report, settled, root, snapshot.hottestDirectories]);
+
   const remaining = useMemo(() => {
-    if (!report) return [];
-    return report.artifacts.filter((a) => !trashed.has(a.path));
-  }, [report, trashed]);
+    if (!displayReport) return [];
+    return displayReport.artifacts.filter((a) => !trashed.has(a.path));
+  }, [displayReport, trashed]);
+
+  const paint = resolveDevPaint({
+    report: remaining.length > 0 ? (displayReport ?? report) : report,
+    remainingCount: remaining.length,
+    loading,
+    settled,
+    loadError,
+  });
 
   const rows = useMemo(() => {
     return kindFilter === "all"
@@ -213,23 +264,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
       .sort((a, b) => b.size - a.size);
   }, [remaining]);
 
-  const groups = useMemo(() => {
-    const map = new Map<string, DevArtifact[]>();
-    for (const artifact of rows) {
-      const key = groupBy === "kind" ? artifact.kind : (artifact.projectPath ?? "unscoped");
-      const list = map.get(key) ?? [];
-      list.push(artifact);
-      map.set(key, list);
-    }
-    return [...map.entries()].map(([key, artifacts]) => ({
-      key,
-      label: groupBy === "kind"
-        ? DEV_KIND_LABEL[key as DevArtifactKind]
-        : (artifacts[0]?.projectName ?? "Unscoped"),
-      size: artifacts.reduce((sum, a) => sum + a.size, 0),
-      artifacts,
-    })).sort((a, b) => b.size - a.size);
-  }, [rows, groupBy]);
+  const groups = useMemo(() => groupDevArtifacts(rows, groupBy), [rows, groupBy]);
 
   const selectedVisible = useMemo(
     () => rows.filter((a) => selected.has(a.path)),
@@ -337,11 +372,19 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     try {
       const next = await nativeApi.rescanDevArtifacts(root);
       if (gen !== rescanGenRef.current) return;
-      if (next) {
+      if (isUsefulDevReport(next)) {
         setReport(next);
-        sessionReport = { key: reportKey(root, snapshot.finishedAt), report: next };
+        rememberReport(root, reportKey(root, snapshot.finishedAt), next, false);
         setTrashed(new Set());
         setSelected(new Set());
+        setSettled(true);
+        toast("success", "Dev artifacts refreshed from disk");
+      } else if (next) {
+        rememberReport(root, reportKey(root, snapshot.finishedAt), next, true);
+        setReport(next);
+        setTrashed(new Set());
+        setSelected(new Set());
+        setSettled(true);
         toast("success", "Dev artifacts refreshed from disk");
       } else if (!hadReport) {
         setLoadError("Rescan failed. Try a full drive scan.");
@@ -378,7 +421,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     return (
       <div className="dev-view">
         <div className="empty-view">
-          <span>Scan a drive to find worktrees, node_modules, Rust targets, and other developer bloat.</span>
+          <span>Scan a drive to find worktrees, node_modules, Rust targets, and RDP/diag traces.</span>
           <span className="empty-view-sub">
             {otherDriveNote ?? "Pick a drive in the header. Dev Artifacts follows that drive, not the whole PC."}
           </span>
@@ -414,10 +457,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     );
   }
 
-  // First paint and Retry stay on this panel until a sidecar (or
-  // folder-tree) read has finished. `!loadError` covers the gap before
-  // useEffect starts the load so we never flash Scan C: / Retry.
-  if (!report && snapshot.status === "done" && (loading || !loadError)) {
+  if (paint === "loading") {
     return (
       <div className="dev-view">
         <IndexLoadingPanel
@@ -434,7 +474,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     );
   }
 
-  if (loadError && !report) {
+  if (paint === "error") {
     return (
       <div className="dev-view">
         <div className="empty-view">
@@ -450,13 +490,13 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     );
   }
 
-  if (!report || remaining.length === 0) {
+  if (paint === "empty") {
     return (
       <div className="dev-view">
         <div className="empty-view">
           <span className="scan-root-chip">{rootLabel}</span>
           <span>No developer artifacts left on this scan.</span>
-          <span className="empty-view-sub">DiskHound looks for worktrees, package trees, Rust targets, venvs, and compiler caches on this scan. Switch drives in the header to see another root.</span>
+          <span className="empty-view-sub">Looks for worktrees, package trees, Rust targets, venvs, compiler caches, and DiagOutputDir RDP traces on this scan. Switch drives in the header to see another root.</span>
           {report ? (
             <button
               className="action-btn"
@@ -531,6 +571,15 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
         </div>
       </div>
 
+      {kindTotals.length > 0 && (
+        <KindTape
+          totals={kindTotals}
+          totalBytes={summary.totalBytes}
+          kindFilter={kindFilter}
+          onFilter={setKindFilter}
+        />
+      )}
+
       {rescanning && (
         <div className="dev-rescan-banner" role="status" aria-live="polite">
           {rescanProgress
@@ -554,30 +603,22 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
         </div>
       )}
       <div className="dev-toolbar">
-        <div className="chip-group" role="radiogroup" aria-label="Group by">
+        <span className="dev-toolbar-label" id="dev-group-by-label">Group</span>
+        <div className="chip-group" role="radiogroup" aria-labelledby="dev-group-by-label">
+          <button className={`chip ${groupBy === "all" ? "active" : ""}`} onClick={() => setGroupBy("all")}>All</button>
           <button className={`chip ${groupBy === "kind" ? "active" : ""}`} onClick={() => setGroupBy("kind")}>By kind</button>
           <button className={`chip ${groupBy === "project" ? "active" : ""}`} onClick={() => setGroupBy("project")}>By project</button>
-        </div>
-        <div className="chip-group">
-          <button className={`chip ${kindFilter === "all" ? "active" : ""}`} onClick={() => setKindFilter("all")}>All</button>
-          {kindTotals.slice(0, 6).map((entry) => (
-            <button
-              key={entry.kind}
-              className={`chip ${kindFilter === entry.kind ? "active" : ""}`}
-              onClick={() => setKindFilter(entry.kind)}
-              title={formatBytes(entry.size)}
-            >
-              {DEV_KIND_LABEL[entry.kind]}
-            </button>
-          ))}
         </div>
       </div>
 
       <div className="dev-list">
         {groups.map((group) => {
           const groupAll = group.artifacts.every((a) => selected.has(a.path));
+          const groupKind = groupBy === "kind" ? group.artifacts[0]?.kind : undefined;
+          const flat = groupBy === "all";
           return (
             <section key={group.key} className="dev-group">
+              {!flat && (
               <header className="dev-group-header">
                 <label className="dev-group-select">
                   <input
@@ -586,10 +627,14 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                     checked={groupAll}
                     onChange={() => toggleGroup(group.artifacts)}
                   />
+                  {groupKind ? (
+                    <span className="dev-row-pip" style={{ background: devKindCssVar(groupKind) }} aria-hidden="true" />
+                  ) : null}
                   <span className="dev-group-title">{group.label}</span>
                 </label>
                 <span className="dev-group-size">{formatBytes(group.size)}</span>
               </header>
+              )}
               {group.artifacts.map((artifact) => (
                 <div key={artifact.path} className={`dev-row ${selected.has(artifact.path) ? "selected" : ""}`}>
                   <label className="dev-row-check">
@@ -600,11 +645,12 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                       onChange={() => toggleOne(artifact.path)}
                     />
                   </label>
+                  <span className="dev-row-pip" style={{ background: devKindCssVar(artifact.kind) }} aria-hidden="true" />
                   <div className="dev-row-main">
-                    <div className="dev-row-name" title={artifact.path}>{artifact.path}</div>
+                    <div className="dev-row-name" title={artifact.path}>{artifactHeadline(artifact)}</div>
                     <div className="dev-row-meta">
-                      {DEV_KIND_LABEL[artifact.kind]}
-                      {artifact.projectName !== "Unscoped" ? ` · ${artifact.projectName}` : ""}
+                      <span className="dev-row-tail" title={artifact.path}>{artifactTail(artifact)}</span>
+                      {groupBy !== "kind" ? ` · ${DEV_KIND_SHORT[artifact.kind]}` : ""}
                       {` · ${formatCount(artifact.fileCount)} files`}
                       {artifact.deltaBytes != null && artifact.deltaBytes !== 0 ? (
                         <span className={artifact.deltaBytes > 0 ? "dev-delta-up" : "dev-delta-down"}>
@@ -627,6 +673,73 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                 </div>
               ))}
             </section>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function KindTape({
+  totals,
+  totalBytes,
+  kindFilter,
+  onFilter,
+}: {
+  totals: Array<{ kind: DevArtifactKind; size: number; count: number }>;
+  totalBytes: number;
+  kindFilter: DevArtifactKind | "all";
+  onFilter: (kind: DevArtifactKind | "all") => void;
+}) {
+  const toggle = (kind: DevArtifactKind) => {
+    onFilter(kindFilter === kind ? "all" : kind);
+  };
+  return (
+    <div className="dev-tape">
+      <div className="dev-spectrum" role="list" aria-label="Reclaimable bytes by kind">
+        {totals.map((entry) => (
+          <button
+            key={entry.kind}
+            type="button"
+            role="listitem"
+            className={`dev-spectrum-seg ${kindFilter === entry.kind ? "active" : ""}`}
+            style={{
+              flexGrow: Math.max(entry.size, 1),
+              background: devKindCssVar(entry.kind),
+            }}
+            title={`${DEV_KIND_LABEL[entry.kind]} · ${formatBytes(entry.size)}`}
+            onClick={() => toggle(entry.kind)}
+          />
+        ))}
+      </div>
+      <div className="dev-kind-rail" role="toolbar" aria-label="Filter by kind">
+        <button
+          type="button"
+          className={`dev-kind-cell ${kindFilter === "all" ? "active" : ""}`}
+          onClick={() => onFilter("all")}
+        >
+          <span className="dev-kind-cell-label">All kinds</span>
+          <span className="dev-kind-cell-size">{formatBytes(totalBytes)}</span>
+        </button>
+        {totals.map((entry) => {
+          const share = totalBytes > 0 ? entry.size / totalBytes : 0;
+          return (
+            <button
+              key={entry.kind}
+              type="button"
+              className={`dev-kind-cell ${kindFilter === entry.kind ? "active" : ""}`}
+              onClick={() => toggle(entry.kind)}
+              title={DEV_KIND_LABEL[entry.kind]}
+            >
+              <span className="dev-kind-cell-top">
+                <span className="dev-row-pip" style={{ background: devKindCssVar(entry.kind) }} aria-hidden="true" />
+                <span className="dev-kind-cell-label">{DEV_KIND_SHORT[entry.kind]}</span>
+                <span className="dev-kind-cell-size">{formatBytes(entry.size)}</span>
+              </span>
+              <span className="dev-kind-cell-bar" aria-hidden="true">
+                <span className="dev-kind-cell-fill" style={{ width: `${Math.max(share * 100, 3)}%`, background: devKindCssVar(entry.kind) }} />
+              </span>
+            </button>
           );
         })}
       </div>

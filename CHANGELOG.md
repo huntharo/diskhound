@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Dev Artifacts: RDP traces and kind tape
+
+Windows `DiagOutputDir` / `RdClientAutoTrace` folders (the Disk Cleanup
+"DiagOutputDir RDP trace logs" heap) classify as `diag-logs` in the
+native sidecar and JS path walker. Dev shows them on the type tape
+and in the list. Cleanup analysis keeps them as their own suggestion
+instead of mixing them into generic logs. An older sidecar can still
+pick the folder up from scan directory hotspots, or from Rescan trees.
+
+The Dev list leads with project name and a relative tail. A stacked
+occupancy strip plus kind rail replaces the old kind chips. Not a
+treemap. Group by All is a flat size-sorted list; By kind and By
+project still bucket. The kind rail "All kinds" control filters
+types. It is not the All group mode.
+
 ## 0.5.45 — 2026-09-11
 
 Size on disk, a Dev Artifacts tab, quieter first-run defaults, and a

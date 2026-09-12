@@ -475,8 +475,66 @@ function pathKey(p: string): string {
   return normalizeDir(p).toLowerCase();
 }
 
-/** Known sidecar roots only. Do not expand project×hint paths. */
-export function planRescanTargets(sidecar: DevArtifactSidecar): string[] {
+const SKIP_USER_PROFILES = new Set([
+  "public",
+  "default",
+  "default user",
+  "all users",
+]);
+
+/**
+ * Bounded probe for the Windows Disk Cleanup "DiagOutputDir RDP
+ * trace logs" folder. Used on rescan so a sidecar written before
+ * this kind existed can pick the tree up without a 7M-file stream.
+ */
+export function discoverDiagLogRoots(scanRoot: string): string[] {
+  const sep = scanRoot.includes("/") && !scanRoot.includes("\\") ? "/" : "\\";
+  const base = scanRoot.replace(/[\\/]+$/, "");
+  const found: string[] = [];
+  const seen = new Set<string>();
+
+  const pushIfDir = (candidate: string) => {
+    const key = pathKey(candidate);
+    if (seen.has(key)) return;
+    try {
+      if (FS.existsSync(candidate) && FS.statSync(candidate).isDirectory()) {
+        seen.add(key);
+        found.push(candidate);
+      }
+    } catch {
+      /* missing or unreadable */
+    }
+  };
+
+  pushIfDir(`${base}${sep}Windows${sep}Temp${sep}DiagOutputDir`);
+  pushIfDir(`${base}${sep}Windows${sep}Temp${sep}RdClientAutoTrace`);
+  pushIfDir(`${base}${sep}AppData${sep}Local${sep}Temp${sep}DiagOutputDir`);
+  pushIfDir(`${base}${sep}Temp${sep}DiagOutputDir`);
+
+  const usersDir = `${base}${sep}Users`;
+  let profiles: string[] = [];
+  try {
+    profiles = FS.readdirSync(usersDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .filter((name) => !SKIP_USER_PROFILES.has(name.toLowerCase()))
+      .slice(0, 32);
+  } catch {
+    /* not a drive root with Users */
+  }
+  for (const name of profiles) {
+    const temp = `${usersDir}${sep}${name}${sep}AppData${sep}Local${sep}Temp`;
+    pushIfDir(`${temp}${sep}DiagOutputDir`);
+    pushIfDir(`${temp}${sep}RdClientAutoTrace`);
+  }
+  return found;
+}
+
+/** Known sidecar roots, plus optional seeded trees. Nested seeds drop. */
+export function planRescanTargets(
+  sidecar: DevArtifactSidecar,
+  extraRoots: readonly string[] = [],
+): string[] {
   const seen = new Set<string>();
   const targets: string[] = [];
   for (const rec of sidecar.roots) {
@@ -484,6 +542,15 @@ export function planRescanTargets(sidecar: DevArtifactSidecar): string[] {
     if (seen.has(key)) continue;
     seen.add(key);
     targets.push(rec.path);
+  }
+  const extras = [...extraRoots].sort((a, b) => a.length - b.length);
+  for (const path of extras) {
+    const key = pathKey(path);
+    if (seen.has(key)) continue;
+    if (targets.some((parent) => dirIsUnder(parent, path) || dirsEqual(parent, path))) continue;
+    if (targets.some((child) => dirIsUnder(path, child))) continue;
+    seen.add(key);
+    targets.push(path);
   }
   return targets;
 }
@@ -496,7 +563,7 @@ export async function rescanDevArtifactSidecar(
   for (const project of sidecar.projects) {
     acc.projects.add(project);
   }
-  const targets = planRescanTargets(sidecar);
+  const targets = planRescanTargets(sidecar, discoverDiagLogRoots(sidecar.rootPath));
   const kindByPath = new Map(sidecar.roots.map((r) => [pathKey(r.path), r.kind]));
   const started = Date.now();
   let filesSoFar = 0;
