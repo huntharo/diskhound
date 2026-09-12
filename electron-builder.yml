@@ -41,7 +41,9 @@ asar: true
 asarUnpack:
   - "node_modules/blake2/**/*"
   # Worker threads cannot execute scripts inside app.asar. Unpack the
-  # scan workers so classify / rescan / folder-tree / full-diff spawn.
+  # scan workers so classify / rescan / folder-tree / full-diff / delete
+  # spawn. Workers are bundled with codeSplitting: false so they do not
+  # require sibling chunks that would stay inside the asar.
   - "dist-electron/scan/**"
 compression: maximum
 

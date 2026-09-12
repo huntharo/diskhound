@@ -2,9 +2,13 @@ import * as FS from "node:fs";
 import * as FSP from "node:fs/promises";
 import * as OS from "node:os";
 import * as Path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { resolveBundledWorkerScript } from "../bundledWorkerPath";
+import { runPermanentDeleteWorker } from "../permanentDeleteWorkerRuntime";
+
+const repoRoot = Path.resolve(Path.dirname(fileURLToPath(import.meta.url)), "../../..");
 
 let tempDir: string;
 
@@ -37,5 +41,45 @@ describe("resolveBundledWorkerScript", () => {
     expect(resolved).toBe(Path.join(unpackedScan, "devArtifactsWorker.cjs"));
     expect(FS.existsSync(resolved)).toBe(true);
     expect(FS.existsSync(packedScan)).toBe(false);
+  });
+});
+
+describe("packaged scan workers", () => {
+  it("builds each scan worker as a single entry without code splitting", () => {
+    const config = FS.readFileSync(Path.join(repoRoot, "tsdown.config.ts"), "utf8");
+    expect(config).toContain("codeSplitting: false");
+    expect(config).toContain("permanentDeleteWorker");
+    expect(config).toContain("scan/${name}");
+    expect(config).toContain("src/scan/${name}.ts");
+  });
+
+  it("unpacks the scan worker directory from the asar", () => {
+    const yml = FS.readFileSync(Path.join(repoRoot, "electron-builder.yml"), "utf8");
+    expect(yml).toContain("dist-electron/scan/**");
+  });
+
+  it("emits the delete worker without parent-dir chunk requires", () => {
+    const worker = Path.join(repoRoot, "dist-electron", "scan", "permanentDeleteWorker.cjs");
+    if (!FS.existsSync(worker)) return;
+    const source = FS.readFileSync(worker, "utf8");
+    expect(source).not.toMatch(/require\(\s*['"]\.\.\//);
+  });
+
+  it("loads the bundled delete worker and removes a tree", async () => {
+    const worker = Path.join(repoRoot, "dist-electron", "scan", "permanentDeleteWorker.cjs");
+    if (!FS.existsSync(worker)) return;
+    const tree = Path.join(tempDir, "node_modules");
+    await FSP.mkdir(tree);
+    await FSP.writeFile(Path.join(tree, "lock"), "x");
+    const seen: string[] = [];
+    await runPermanentDeleteWorker(tree, {
+      workerPath: worker,
+      onProgress: (progress) => {
+        seen.push(progress.path);
+      },
+    });
+    expect(FS.existsSync(tree)).toBe(false);
+    expect(seen[0]).toBe(Path.resolve(tree));
+    expect(seen.length).toBeGreaterThanOrEqual(2);
   });
 });

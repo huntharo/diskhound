@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+Packaged Dev Artifacts permanent delete no longer fails looking for
+`./chunk-*.cjs`. Scan workers are bundled without code splitting so the
+walk-then-unlink worker is one file next to the other unpacked workers.
+
 ## 0.6.0 — 2026-09-12
 
 Dev Artifacts after 0.5.45: DiagOutputDir rows, a kind tape, Group All,

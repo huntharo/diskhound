@@ -12,26 +12,43 @@ const shared = {
   external: ["electron", "electron-updater", "blake2"],
 };
 
+// Rolldown only allows this on a single entry. Shared chunks from a
+// multi-entry worker build land in dist-electron/ (chunk-*.cjs) while
+// electron-builder unpacks dist-electron/scan/**. The unpacked worker
+// then require('../chunk-….cjs') from app.asar.unpacked and crashes.
+const noCodeSplitting = {
+  outputOptions: {
+    codeSplitting: false,
+  },
+};
+
+const scanWorkers = [
+  "scanWorker",
+  "fullDiffWorker",
+  "folderTreeWorker",
+  "devArtifactsWorker",
+  "permanentDeleteWorker",
+] as const;
+
 export default defineConfig([
   {
     ...shared,
+    ...noCodeSplitting,
     entry: ["src/main.ts"],
     clean: true,
-    // Rolldown otherwise emits sampler/native chunks that `require('./main.cjs')`
-    // for `__toESM` while main.cjs is still loading → TypeError on startup.
-    outputOptions: {
-      codeSplitting: false,
-    },
   },
   {
     ...shared,
-    entry: [
-      "src/preload.ts",
-      "src/scan/scanWorker.ts",
-      "src/scan/fullDiffWorker.ts",
-      "src/scan/folderTreeWorker.ts",
-      "src/scan/devArtifactsWorker.ts",
-      "src/scan/permanentDeleteWorker.ts",
-    ],
+    entry: ["src/preload.ts"],
   },
+  ...scanWorkers.map((name) => ({
+    ...shared,
+    ...noCodeSplitting,
+    // Named output keeps files at dist-electron/scan/*.cjs. A bare
+    // `src/scan/*.ts` entry would flatten to dist-electron/*.cjs, which
+    // asarUnpack and resolveBundledWorkerScript would miss.
+    entry: {
+      [`scan/${name}`]: `src/scan/${name}.ts`,
+    },
+  })),
 ]);

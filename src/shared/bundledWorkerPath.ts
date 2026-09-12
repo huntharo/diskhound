@@ -5,6 +5,9 @@ import * as Path from "node:path";
  * Worker threads cannot execute scripts inside app.asar. electron-builder
  * copies `dist-electron/scan/**` to app.asar.unpacked; __dirname still
  * points at the asar, so rewrite when the unpacked file is present.
+ *
+ * tsdown must emit each worker as one file (codeSplitting: false). Shared
+ * chunks land in dist-electron/, not scan/, and stay inside the asar.
  */
 export function resolveBundledWorkerScript(baseDir: string, fileName: string): string {
   const packed = Path.join(baseDir, "scan", fileName);
