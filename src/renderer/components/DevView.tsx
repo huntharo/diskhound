@@ -5,6 +5,7 @@ import {
   DEV_KIND_LABEL,
   DEV_KIND_SHORT,
   devKindCssVar,
+  dropArtifactsFromReport,
   emptyDevReport,
   mergeDiagLogHotspots,
 } from "../../shared/devArtifacts";
@@ -22,6 +23,7 @@ import {
   type DevSortBy,
 } from "../lib/devArtifactViewState";
 import { formatBytes, formatCount } from "../lib/format";
+import { dispatchDevArtifactsUpdated } from "../lib/uiEvents";
 import { nativeApi } from "../nativeApi";
 import { DEV_FOLDER_TREE_STAGES, DEV_RESCAN_STAGES, DEV_SIDECAR_STAGES, IndexLoadingPanel } from "./IndexLoadingPanel";
 import { toast } from "./Toasts";
@@ -51,6 +53,34 @@ function rememberReport(root: string, key: string, next: DevArtifactReport | nul
     settledEmptyKey = key;
   }
 }
+
+const forgottenByScan = new Map<string, string[]>();
+
+function noteForgotten(scanKey: string, paths: string[]): void {
+  const prev = forgottenByScan.get(scanKey) ?? [];
+  const seen = new Set(prev.map((path) => path.replace(/[\\/]+$/, "").toLowerCase()));
+  const next = [...prev];
+  for (const path of paths) {
+    const key = path.replace(/[\\/]+$/, "").toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    next.push(path);
+  }
+  forgottenByScan.set(scanKey, next);
+}
+
+function overlayForgotten(report: DevArtifactReport, scanKey: string): DevArtifactReport {
+  return dropArtifactsFromReport(report, forgottenByScan.get(scanKey) ?? []);
+}
+
+type TrashProgress = {
+  index: number;
+  total: number;
+  path: string;
+  size: number;
+  movedBytes: number;
+  totalBytes: number;
+};
 
 function seedViewState(
   root: string | null,
@@ -82,9 +112,9 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
   const [sortBy, setSortBy] = useState<DevSortBy>("size");
   const [kindFilter, setKindFilter] = useState<DevArtifactKind | "all">("all");
   const [busyPaths, setBusyPaths] = useState<Set<string>>(() => new Set());
-  const [trashed, setTrashed] = useState<Set<string>>(() => new Set());
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [trashProgress, setTrashProgress] = useState<TrashProgress | null>(null);
   const [rescanning, setRescanning] = useState(false);
   const [rescanProgress, setRescanProgress] = useState<DevArtifactsRescanProgress | null>(null);
   const [loadPath, setLoadPath] = useState<"sidecar" | "folder-tree">("sidecar");
@@ -95,7 +125,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
   if (heldKey !== key) {
     setHeldKey(key);
     const next = seedViewState(root, snapshot.finishedAt, snapshot.status);
-    setReport(next.report);
+    setReport(next.report ? overlayForgotten(next.report, key) : next.report);
     setLoading(next.loading);
     setSettled(next.settled);
     setLoadError(null);
@@ -112,7 +142,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     const loadKey = reportKey(root, snapshot.finishedAt);
     const gen = ++loadGenRef.current;
     if (sessionReport?.key === loadKey && isUsefulDevReport(sessionReport.report)) {
-      setReport(sessionReport.report);
+      setReport(overlayForgotten(sessionReport.report, loadKey));
       setLoadError(null);
       setLoading(false);
       setSettled(true);
@@ -121,15 +151,16 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
       void nativeApi.getDevArtifacts(root, { sidecarOnly: true }).then((fast) => {
         if (gen !== loadGenRef.current) return;
         if (!isUsefulDevReport(fast)) return;
-        setReport(fast);
-        rememberReport(root, loadKey, fast, false);
+        const adopted = overlayForgotten(fast, loadKey);
+        setReport(adopted);
+        rememberReport(root, loadKey, adopted, adopted.artifacts.length === 0);
       }).catch(() => {
         /* keep the session report */
       });
       return;
     }
     if (lastGood?.root === root && isUsefulDevReport(lastGood.report)) {
-      setReport(lastGood.report);
+      setReport(overlayForgotten(lastGood.report, loadKey));
     }
     setLoading(true);
     setSettled(false);
@@ -142,8 +173,9 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
       const fast = await nativeApi.getDevArtifacts(root, { sidecarOnly: true });
       if (gen !== loadGenRef.current) return;
       if (isUsefulDevReport(fast)) {
-        setReport(fast);
-        rememberReport(root, loadKey, fast, false);
+        const adopted = overlayForgotten(fast, loadKey);
+        setReport(adopted);
+        rememberReport(root, loadKey, adopted, adopted.artifacts.length === 0);
         sessionLoadStarted = null;
         setSettled(true);
         return;
@@ -152,14 +184,16 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
       const next = await nativeApi.getDevArtifacts(root);
       if (gen !== loadGenRef.current) return;
       if (isUsefulDevReport(next)) {
-        setReport(next);
-        rememberReport(root, loadKey, next, false);
+        const adopted = overlayForgotten(next, loadKey);
+        setReport(adopted);
+        rememberReport(root, loadKey, adopted, adopted.artifacts.length === 0);
         sessionLoadStarted = null;
         setSettled(true);
         return;
       }
-      rememberReport(root, loadKey, next, true);
-      setReport(next);
+      const adopted = next ? overlayForgotten(next, loadKey) : next;
+      rememberReport(root, loadKey, adopted, true);
+      setReport(adopted);
       setSettled(true);
       if (!next) {
         setLoadError(
@@ -190,8 +224,10 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
         if (!next || next.artifacts.length === 0 || !rescanningRef.current) return;
         rescanGenRef.current += 1;
         await nativeApi.cancelDevArtifactsRescan(scanRoot);
-        setReport(next);
-        rememberReport(scanRoot, reportKey(scanRoot, snapshot.finishedAt), next, false);
+        const scanKey = reportKey(scanRoot, snapshot.finishedAt);
+        const adopted = overlayForgotten(next, scanKey);
+        setReport(adopted);
+        rememberReport(scanRoot, scanKey, adopted, adopted.artifacts.length === 0);
         sessionLoadStarted = null;
         rescanningRef.current = false;
         setRescanning(false);
@@ -229,10 +265,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     return null;
   }, [report, settled, root, snapshot.hottestDirectories]);
 
-  const remaining = useMemo(() => {
-    if (!displayReport) return [];
-    return displayReport.artifacts.filter((a) => !trashed.has(a.path));
-  }, [displayReport, trashed]);
+  const remaining = useMemo(() => displayReport?.artifacts ?? [], [displayReport]);
 
   const paint = resolveDevPaint({
     report: remaining.length > 0 ? (displayReport ?? report) : report,
@@ -314,50 +347,86 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
   };
 
   const trashMany = async (paths: string[], label: string) => {
-    if (paths.length === 0) return;
-    const bytes = remaining.filter((a) => paths.includes(a.path)).reduce((sum, a) => sum + a.size, 0);
+    if (paths.length === 0 || !root) return;
+    const targets = remaining.filter((artifact) => paths.includes(artifact.path));
+    if (targets.length === 0) return;
+    const totalBytes = targets.reduce((sum, artifact) => sum + artifact.size, 0);
     const ok = window.confirm(
-      `${label}\n\n${formatCount(paths.length)} trees · ${formatBytes(bytes)}\n\nMoved to the Recycle Bin. Protected folders are skipped.`,
+      `${label}\n\n${formatCount(targets.length)} trees · ${formatBytes(totalBytes)}\n\nMoved to the Recycle Bin. Empty the Recycle Bin to free disk space. Protected folders are skipped.`,
     );
     if (!ok) return;
     setBulkBusy(true);
     let succeeded = 0;
     let failed = 0;
-    const nextTrashed = new Set(trashed);
+    let movedBytes = 0;
+    const scanKey = reportKey(root, snapshot.finishedAt);
+    let live = report;
     try {
-      for (const path of paths) {
-        setBusyPaths((prev) => new Set(prev).add(path));
+      for (let i = 0; i < targets.length; i++) {
+        const artifact = targets[i]!;
+        setTrashProgress({
+          index: i + 1,
+          total: targets.length,
+          path: artifact.path,
+          size: artifact.size,
+          movedBytes,
+          totalBytes,
+        });
+        setBusyPaths((prev) => new Set(prev).add(artifact.path));
         try {
-          const result = await nativeApi.trashPath(path);
-          if (result?.ok) {
-            nextTrashed.add(path);
-            succeeded += 1;
-          } else {
+          const result = await nativeApi.trashPath(artifact.path);
+          if (!result?.ok) {
             failed += 1;
-            toast("error", "Could not trash", result?.message ?? path);
+            toast("error", "Could not trash", result?.message ?? artifact.path);
+            continue;
           }
+          succeeded += 1;
+          movedBytes += artifact.size;
+          noteForgotten(scanKey, [artifact.path]);
+          live = overlayForgotten(dropArtifactsFromReport(live ?? emptyDevReport(root), [artifact.path]), scanKey);
+          setReport(live);
+          rememberReport(root, scanKey, live, live.artifacts.length === 0);
+          setSelected((prev) => {
+            const next = new Set(prev);
+            next.delete(artifact.path);
+            return next;
+          });
+          const persisted = await nativeApi.forgetDevArtifactPaths(root, [artifact.path]);
+          if (persisted) {
+            live = overlayForgotten(persisted, scanKey);
+            setReport(live);
+            rememberReport(root, scanKey, live, live.artifacts.length === 0);
+          }
+          dispatchDevArtifactsUpdated(root);
+          setTrashProgress({
+            index: i + 1,
+            total: targets.length,
+            path: artifact.path,
+            size: artifact.size,
+            movedBytes,
+            totalBytes,
+          });
         } finally {
           setBusyPaths((prev) => {
-            const n = new Set(prev);
-            n.delete(path);
-            return n;
+            const next = new Set(prev);
+            next.delete(artifact.path);
+            return next;
           });
         }
       }
-      setTrashed(nextTrashed);
-      setSelected((prev) => {
-        const n = new Set(prev);
-        for (const path of nextTrashed) n.delete(path);
-        return n;
-      });
       if (succeeded > 0) {
-        toast("success", `Moved ${formatCount(succeeded)} tree${succeeded === 1 ? "" : "s"} to trash`);
+        toast(
+          "success",
+          `Moved ${formatCount(succeeded)} tree${succeeded === 1 ? "" : "s"} to the Recycle Bin`,
+          "Empty the Recycle Bin to free the disk space.",
+        );
       }
       if (failed > 0 && succeeded === 0) {
         toast("error", "Nothing was trashed", `${failed} failed`);
       }
     } finally {
       setBulkBusy(false);
+      setTrashProgress(null);
     }
   };
 
@@ -380,16 +449,16 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
       const next = await nativeApi.rescanDevArtifacts(root);
       if (gen !== rescanGenRef.current) return;
       if (isUsefulDevReport(next)) {
-        setReport(next);
-        rememberReport(root, reportKey(root, snapshot.finishedAt), next, false);
-        setTrashed(new Set());
+        const adopted = overlayForgotten(next, reportKey(root, snapshot.finishedAt));
+        setReport(adopted);
+        rememberReport(root, reportKey(root, snapshot.finishedAt), adopted, adopted.artifacts.length === 0);
         setSelected(new Set());
         setSettled(true);
         toast("success", "Dev artifacts refreshed from disk");
       } else if (next) {
-        rememberReport(root, reportKey(root, snapshot.finishedAt), next, true);
-        setReport(next);
-        setTrashed(new Set());
+        const adopted = overlayForgotten(next, reportKey(root, snapshot.finishedAt));
+        rememberReport(root, reportKey(root, snapshot.finishedAt), adopted, true);
+        setReport(adopted);
         setSelected(new Set());
         setSettled(true);
         toast("success", "Dev artifacts refreshed from disk");
@@ -556,7 +625,9 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
             disabled={selectedVisible.length === 0 || bulkBusy}
             onClick={() => void trashMany(selectedVisible.map((a) => a.path), "Trash selected trees?")}
           >
-            {selectedVisible.length > 0
+            {bulkBusy && trashProgress
+              ? `Trashing ${formatCount(trashProgress.index)} of ${formatCount(trashProgress.total)}`
+              : selectedVisible.length > 0
               ? `Trash selected (${formatCount(selectedVisible.length)} · ${formatBytes(selectedBytes)})`
               : "Trash selected"}
           </button>
@@ -565,7 +636,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
             disabled={remaining.length === 0 || bulkBusy}
             onClick={() => void trashMany(remaining.map((a) => a.path), "Trash all listed developer trees?")}
           >
-            Trash all
+            {bulkBusy && trashProgress ? "Trashing…" : "Trash all"}
           </button>
           <button
             className="action-btn"
@@ -587,6 +658,18 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
         />
       )}
 
+      {trashProgress && (
+        <div className="dev-rescan-banner" role="status" aria-live="polite">
+          <div>
+            Trashing {formatCount(trashProgress.index)} of {formatCount(trashProgress.total)} trees
+            {` · ${formatBytes(trashProgress.movedBytes)} of ${formatBytes(trashProgress.totalBytes)}`}
+          </div>
+          <div className="dev-rescan-banner-detail">
+            {truncatePath(trashProgress.path)}
+            {` · ${formatBytes(trashProgress.size)}`}
+          </div>
+        </div>
+      )}
       {rescanning && (
         <div className="dev-rescan-banner" role="status" aria-live="polite">
           {rescanProgress
@@ -699,12 +782,16 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
               </header>
               )}
               {group.artifacts.map((artifact) => (
-                <div key={artifact.path} className={`dev-row ${selected.has(artifact.path) ? "selected" : ""}`}>
+                <div
+                  key={artifact.path}
+                  className={`dev-row ${selected.has(artifact.path) ? "selected" : ""} ${busyPaths.has(artifact.path) ? "is-busy" : ""}`}
+                >
                   <label className="dev-row-check">
                     <input
                       type="checkbox"
                       className="dev-check"
                       checked={selected.has(artifact.path)}
+                      disabled={busyPaths.has(artifact.path)}
                       onChange={() => toggleOne(artifact.path)}
                     />
                   </label>
@@ -730,7 +817,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                       disabled={bulkBusy || busyPaths.has(artifact.path)}
                       onClick={() => void trashOne(artifact.path)}
                     >
-                      Trash
+                      {busyPaths.has(artifact.path) ? "Trashing…" : "Trash"}
                     </button>
                   </div>
                 </div>

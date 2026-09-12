@@ -9188,6 +9188,10 @@ body.system-widget-body #app {
   border-color: rgba(245, 158, 11, 0.35);
   background: rgba(245, 158, 11, 0.06);
 }
+.dev-row.is-busy {
+  border-color: rgba(245, 158, 11, 0.45);
+  background: rgba(245, 158, 11, 0.08);
+}
 .dev-row-check {
   display: flex;
   align-items: center;

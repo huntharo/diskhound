@@ -138,6 +138,45 @@ function pathKey(p: string): string {
   return p.replace(/[\\/]+$/, "").toLowerCase();
 }
 
+function uniqueDroppedPaths(paths: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const path of paths) {
+    const key = pathKey(path);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(path);
+  }
+  return out;
+}
+
+function summarizeArtifacts(artifacts: DevArtifact[]): Pick<
+  DevArtifactReport,
+  "totalBytes" | "totalFiles" | "projectCount" | "kindTotals"
+> {
+  const kindMap = new Map<DevArtifactKind, { size: number; count: number }>();
+  let totalBytes = 0;
+  let totalFiles = 0;
+  const projects = new Set<string>();
+  for (const artifact of artifacts) {
+    totalBytes += artifact.size;
+    totalFiles += artifact.fileCount;
+    if (artifact.projectPath) projects.add(artifact.projectPath);
+    const entry = kindMap.get(artifact.kind) ?? { size: 0, count: 0 };
+    entry.size += artifact.size;
+    entry.count += 1;
+    kindMap.set(artifact.kind, entry);
+  }
+  return {
+    totalBytes,
+    totalFiles,
+    projectCount: projects.size,
+    kindTotals: [...kindMap.entries()]
+      .map(([kind, stats]) => ({ kind, size: stats.size, count: stats.count }))
+      .sort((a, b) => b.size - a.size),
+  };
+}
+
 export function emptyDevReport(rootPath: string): DevArtifactReport {
   return {
     artifacts: [],
@@ -147,6 +186,29 @@ export function emptyDevReport(rootPath: string): DevArtifactReport {
     kindTotals: [],
     generatedAt: 0,
     rootPath,
+  };
+}
+
+/** Drop trashed trees from the in-memory report and record them so hotspots cannot restore them. */
+export function dropArtifactsFromReport(
+  report: DevArtifactReport,
+  paths: readonly string[],
+): DevArtifactReport {
+  if (paths.length === 0) return report;
+  const drop = new Set(paths.map(pathKey));
+  const artifacts = report.artifacts.filter((artifact) => !drop.has(pathKey(artifact.path)));
+  const droppedPaths = uniqueDroppedPaths([...(report.droppedPaths ?? []), ...paths]);
+  if (
+    artifacts.length === report.artifacts.length
+    && droppedPaths.length === (report.droppedPaths ?? []).length
+  ) {
+    return report;
+  }
+  return {
+    ...report,
+    artifacts,
+    droppedPaths,
+    ...summarizeArtifacts(artifacts),
   };
 }
 
@@ -160,7 +222,10 @@ export function mergeDiagLogHotspots(
   report: DevArtifactReport,
   dirs: ReadonlyArray<{ path: string; size: number; fileCount?: number; files?: number }>,
 ): DevArtifactReport {
-  const existing = new Set(report.artifacts.map((a) => pathKey(a.path)));
+  const existing = new Set([
+    ...report.artifacts.map((a) => pathKey(a.path)),
+    ...(report.droppedPaths ?? []).map(pathKey),
+  ]);
   const found = new Map<string, DevArtifact>();
 
   for (const dir of dirs) {
@@ -193,21 +258,9 @@ export function mergeDiagLogHotspots(
   if (found.size === 0) return report;
 
   const artifacts = [...report.artifacts, ...found.values()].sort((a, b) => b.size - a.size);
-  const kindMap = new Map<DevArtifactKind, { size: number; count: number }>();
-  for (const artifact of artifacts) {
-    const entry = kindMap.get(artifact.kind) ?? { size: 0, count: 0 };
-    entry.size += artifact.size;
-    entry.count += 1;
-    kindMap.set(artifact.kind, entry);
-  }
   return {
     ...report,
     artifacts,
-    totalBytes: artifacts.reduce((sum, a) => sum + a.size, 0),
-    totalFiles: artifacts.reduce((sum, a) => sum + a.fileCount, 0),
-    projectCount: new Set(artifacts.map((a) => a.projectPath).filter(Boolean)).size,
-    kindTotals: [...kindMap.entries()]
-      .map(([kind, stats]) => ({ kind, size: stats.size, count: stats.count }))
-      .sort((a, b) => b.size - a.size),
+    ...summarizeArtifacts(artifacts),
   };
 }

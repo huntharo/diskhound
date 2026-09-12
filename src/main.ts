@@ -108,7 +108,15 @@ import {
   runFolderTreeWorker,
 } from "./shared/folderTreeWorkerRuntime";
 import { parseFolderTreeSidecarLine } from "./shared/folderTreeSidecarParse";
-import { loadDevArtifactReport } from "./shared/devArtifactSidecar";
+import {
+  dropSidecarRoots,
+  loadDevArtifactReport,
+  readDevArtifactSidecar,
+  reportFromSidecar,
+  sidecarFromReport,
+  writeDevArtifactSidecar,
+} from "./shared/devArtifactSidecar";
+import { dropArtifactsFromReport } from "./shared/devArtifacts";
 import {
   resolveBundledDevArtifactsWorkerPath,
   runDevArtifactsClassifyWorker,
@@ -2081,12 +2089,37 @@ void (async () => {
       if (result) throw new Error(result);
     }),
   );
-  ipcMain.handle("diskhound:trash-path", (_event, targetPath: string) => {
+  ipcMain.handle("diskhound:trash-path", async (_event, targetPath: string) => {
     const blocked = protectedPathBlock(targetPath, "Trash");
-    if (blocked) return blocked;
-    return pathAction("Moved to trash.", async () => {
-      await shell.trashItem(targetPath);
-    });
+    if (blocked) {
+      writeCrashLog("trash", `blocked path=${targetPath} ${blocked.message}`);
+      return blocked;
+    }
+    const resolved = Path.resolve(targetPath);
+    try {
+      await FS.lstat(resolved);
+    } catch {
+      writeCrashLog("trash", `missing path=${resolved}`);
+      return { ok: false, message: "Nothing at this path to move to the Recycle Bin." };
+    }
+    try {
+      await shell.trashItem(resolved);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      writeCrashLog("trash", `failed path=${resolved} ${message}`);
+      return { ok: false, message };
+    }
+    try {
+      await FS.lstat(resolved);
+      writeCrashLog("trash", `noop path=${resolved} still on disk after Recycle Bin`);
+      return {
+        ok: false,
+        message: "The Recycle Bin did not take this folder — it is still on disk.",
+      };
+    } catch {
+      writeCrashLog("trash", `ok path=${resolved}`);
+      return { ok: true, message: "Moved to trash." };
+    }
   });
   ipcMain.handle("diskhound:permanent-delete-path", (_event, targetPath: string) => {
     const blocked = protectedPathBlock(targetPath, "Delete");
@@ -3180,6 +3213,44 @@ void (async () => {
     const key = scanKey(rootPath);
     const ac = devRescanAbort.get(key);
     if (ac) ac.abort();
+  });
+
+  ipcMain.handle("diskhound:forget-dev-artifact-paths", async (_event, rootPath: string, paths: unknown) => {
+    const list = Array.isArray(paths)
+      ? paths.filter((path): path is string => typeof path === "string" && path.trim().length > 0)
+      : [];
+    const history = getScanHistory(rootPath);
+    const current = history[0];
+    if (!current) return null;
+
+    const sidecarPath = devArtifactsSidecarPath(current.id);
+    const cached = devArtifactCache.get(current.id);
+    const sidecar = (await readDevArtifactSidecar(sidecarPath))
+      ?? (cached ? sidecarFromReport(cached) : null);
+    if (!sidecar) {
+      writeCrashLog("dev-artifacts", `forget: no sidecar scanId=${current.id} paths=${list.length}`);
+      if (!cached || list.length === 0) return cached ?? null;
+      const next = dropArtifactsFromReport(cached, list);
+      if (next.artifacts.length > 0) devArtifactCache.set(current.id, next);
+      else devArtifactCache.delete(current.id);
+      return next;
+    }
+
+    const nextSidecar = list.length > 0 ? dropSidecarRoots(sidecar, list) : sidecar;
+    try {
+      await writeDevArtifactSidecar(sidecarPath, nextSidecar);
+    } catch (err) {
+      writeCrashLog(
+        "dev-artifacts",
+        `forget write failed scanId=${current.id} ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    const previous = history[1] ? await readDevArtifactSidecar(devArtifactsSidecarPath(history[1].id)) : null;
+    const report = reportFromSidecar(nextSidecar, previous);
+    if (report.artifacts.length > 0) devArtifactCache.set(current.id, report);
+    else devArtifactCache.delete(current.id);
+    writeCrashLog("dev-artifacts", `forgot ${list.length} tree(s) scanId=${current.id}`);
+    return report;
   });
 
   ipcMain.handle("diskhound:rescan-dev-artifacts", async (_event, rootPath: string) => {

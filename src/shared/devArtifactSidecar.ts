@@ -29,6 +29,8 @@ export interface DevArtifactSidecar {
   generatedAt: number;
   roots: DevArtifactRootRec[];
   projects: string[];
+  /** Paths the user trashed. Kept so a tab switch or hotspot merge cannot resurrect them. */
+  droppedPaths?: string[];
 }
 
 const PROJECT_MARKERS = new Set([
@@ -282,6 +284,59 @@ export function compactDevArtifactSidecar(sidecar: DevArtifactSidecar): DevArtif
     generatedAt: sidecar.generatedAt,
     roots: kept,
     projects: keptProjects,
+    droppedPaths: sidecar.droppedPaths?.length ? sidecar.droppedPaths : undefined,
+  };
+}
+
+function uniqueDroppedPaths(paths: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const path of paths) {
+    if (typeof path !== "string") continue;
+    const key = normalizeDir(path).toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(path);
+  }
+  return out;
+}
+
+/** Remove trashed trees from the sidecar. Records them so merge/hotspots cannot put them back. */
+export function dropSidecarRoots(
+  sidecar: DevArtifactSidecar,
+  paths: readonly string[],
+): DevArtifactSidecar {
+  if (paths.length === 0) return sidecar;
+  const drop = new Set(paths.map((path) => normalizeDir(path).toLowerCase()));
+  return {
+    ...sidecar,
+    roots: sidecar.roots.filter((rec) => !drop.has(normalizeDir(rec.path).toLowerCase())),
+    droppedPaths: uniqueDroppedPaths([...(sidecar.droppedPaths ?? []), ...paths]),
+  };
+}
+
+export function sidecarFromReport(report: DevArtifactReport): DevArtifactSidecar {
+  const projects: string[] = [];
+  const seen = new Set<string>();
+  for (const artifact of report.artifacts) {
+    if (!artifact.projectPath) continue;
+    const key = normalizeDir(artifact.projectPath).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    projects.push(artifact.projectPath);
+  }
+  return {
+    version: 1,
+    rootPath: report.rootPath,
+    generatedAt: report.generatedAt || Date.now(),
+    roots: report.artifacts.map((artifact) => ({
+      path: artifact.path,
+      kind: artifact.kind,
+      size: artifact.size,
+      files: artifact.fileCount,
+    })),
+    projects,
+    droppedPaths: report.droppedPaths?.length ? report.droppedPaths : undefined,
   };
 }
 
@@ -327,6 +382,7 @@ export function reportFromSidecar(
       .sort((a, b) => b.size - a.size),
     generatedAt: current.generatedAt,
     rootPath: current.rootPath,
+    droppedPaths: current.droppedPaths,
   };
 }
 
@@ -607,5 +663,7 @@ export async function rescanDevArtifactSidecar(
   }
 
   emit(targets.length, targets[targets.length - 1] ?? sidecar.rootPath, true);
-  return sidecarFromAcc(acc, sidecar.rootPath);
+  const next = sidecarFromAcc(acc, sidecar.rootPath);
+  if (!sidecar.droppedPaths?.length) return next;
+  return { ...next, droppedPaths: sidecar.droppedPaths };
 }

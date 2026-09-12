@@ -105,6 +105,8 @@ const api: DiskhoundNativeApi = {
     ipcRenderer.invoke("diskhound:rescan-dev-artifacts", rootPath),
   cancelDevArtifactsRescan: (rootPath) =>
     ipcRenderer.invoke("diskhound:cancel-dev-artifacts-rescan", rootPath),
+  forgetDevArtifactPaths: (rootPath, paths) =>
+    ipcRenderer.invoke("diskhound:forget-dev-artifact-paths", rootPath, paths),
   onDevArtifactsProgress: (listener) => {
     const wrapped = (_event: Electron.IpcRendererEvent, progress: DevArtifactsRescanProgress) => {
       listener(progress);

@@ -473,6 +473,8 @@ export interface DevArtifactReport {
   kindTotals: Array<{ kind: DevArtifactKind; size: number; count: number }>;
   generatedAt: number;
   rootPath: string;
+  /** Trees removed this scan (trash). Stops scan hotspots from putting them back. */
+  droppedPaths?: string[];
 }
 
 /** Live progress for `rescanDevArtifacts`. Not a full drive scan. */
@@ -1141,6 +1143,8 @@ export interface DiskhoundNativeApi {
   rescanDevArtifacts: (rootPath: string) => Promise<DevArtifactReport | null>;
   /** Stop an in-flight Dev tree walk. Does not start or cancel a drive scan. */
   cancelDevArtifactsRescan: (rootPath: string) => Promise<void>;
+  /** Drop trashed trees from the Dev sidecar and in-memory cache. JSON only. */
+  forgetDevArtifactPaths: (rootPath: string, paths: string[]) => Promise<DevArtifactReport | null>;
   onDevArtifactsProgress: (listener: (progress: DevArtifactsRescanProgress) => void) => () => void;
 
   // Easy Move

@@ -314,6 +314,40 @@ describe("discoverDiagLogRoots", () => {
   });
 });
 
+describe("dropSidecarRoots", () => {
+  it("removes the tree and records it so a reread cannot restore it", async () => {
+    const { dropSidecarRoots, reportFromSidecar } = await import("../devArtifactSidecar");
+    const dropped = dropSidecarRoots({
+      version: 1,
+      rootPath: "C:\\",
+      generatedAt: 1,
+      roots: [
+        { path: "C:\\proj\\node_modules", kind: "node-modules", size: 80, files: 4 },
+        { path: "C:\\proj\\target", kind: "rust-target", size: 20, files: 2 },
+      ],
+      projects: ["C:\\proj"],
+    }, ["C:\\PROJ\\node_modules"]);
+    expect(dropped.roots.map((r) => r.path)).toEqual(["C:\\proj\\target"]);
+    expect(dropped.droppedPaths).toEqual(["C:\\PROJ\\node_modules"]);
+    const report = reportFromSidecar(dropped);
+    expect(report.totalBytes).toBe(20);
+    expect(report.droppedPaths).toEqual(["C:\\PROJ\\node_modules"]);
+  });
+
+  it("records a hotspot-only path that was never a sidecar root", async () => {
+    const { dropSidecarRoots } = await import("../devArtifactSidecar");
+    const dropped = dropSidecarRoots({
+      version: 1,
+      rootPath: "C:\\",
+      generatedAt: 1,
+      roots: [{ path: "C:\\proj\\node_modules", kind: "node-modules", size: 10, files: 1 }],
+      projects: ["C:\\proj"],
+    }, ["C:\\Users\\thoma\\AppData\\Local\\Temp\\DiagOutputDir"]);
+    expect(dropped.roots).toHaveLength(1);
+    expect(dropped.droppedPaths).toEqual(["C:\\Users\\thoma\\AppData\\Local\\Temp\\DiagOutputDir"]);
+  });
+});
+
 describe("rescanDevArtifactSidecar", () => {
   it("re-walks a known root and emits progress", async () => {
     const { writeDevArtifactSidecar, readDevArtifactSidecar, rescanDevArtifactSidecar } = await import("../devArtifactSidecar");
@@ -327,6 +361,7 @@ describe("rescanDevArtifactSidecar", () => {
       generatedAt: 1,
       roots: [{ path: Path.join(tempDir, "proj", "node_modules"), kind: "node-modules", size: 1, files: 1 }],
       projects: [Path.join(tempDir, "proj")],
+      droppedPaths: ["C:\\gone\\node_modules"],
     });
     const sidecar = await readDevArtifactSidecar(sidecarPath);
     const ticks: number[] = [];
@@ -336,6 +371,7 @@ describe("rescanDevArtifactSidecar", () => {
     });
     expect(next.roots[0]?.files).toBe(1);
     expect(next.roots[0]?.size).toBeGreaterThanOrEqual(100);
+    expect(next.droppedPaths).toEqual(["C:\\gone\\node_modules"]);
     expect(ticks.length).toBeGreaterThan(0);
     expect(ticks[0]).toBe(0);
   });

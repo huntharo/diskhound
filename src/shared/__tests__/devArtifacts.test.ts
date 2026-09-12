@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { classifyArtifactPath, mergeDiagLogHotspots } from "../devArtifacts";
+import { classifyArtifactPath, dropArtifactsFromReport, mergeDiagLogHotspots } from "../devArtifacts";
 
 describe("classifyArtifactPath", () => {
   it("detects node_modules at the package root", () => {
@@ -122,5 +122,73 @@ describe("mergeDiagLogHotspots", () => {
     }, [{ path, size: 80, fileCount: 4 }]);
     expect(report.artifacts).toHaveLength(1);
     expect(report.totalBytes).toBe(50);
+  });
+
+  it("does not restore a trashed DiagOutputDir from scan hotspots", () => {
+    const path = "C:\\Users\\thoma\\AppData\\Local\\Temp\\DiagOutputDir";
+    const report = mergeDiagLogHotspots({
+      artifacts: [{
+        path: "C:\\proj\\node_modules",
+        kind: "node-modules",
+        projectPath: "C:\\proj",
+        projectName: "proj",
+        size: 100,
+        fileCount: 2,
+        previousSize: null,
+        deltaBytes: null,
+      }],
+      totalBytes: 100,
+      totalFiles: 2,
+      projectCount: 1,
+      kindTotals: [{ kind: "node-modules", size: 100, count: 1 }],
+      generatedAt: 1,
+      rootPath: "C:\\",
+      droppedPaths: [path],
+    }, [{ path, size: 9_980_000_000, fileCount: 40 }]);
+    expect(report.artifacts.some((a) => a.kind === "diag-logs")).toBe(false);
+    expect(report.totalBytes).toBe(100);
+  });
+});
+
+describe("dropArtifactsFromReport", () => {
+  it("subtracts size from totals and kind chips immediately", () => {
+    const report = dropArtifactsFromReport({
+      artifacts: [
+        {
+          path: "C:\\proj\\node_modules",
+          kind: "node-modules",
+          projectPath: "C:\\proj",
+          projectName: "proj",
+          size: 80,
+          fileCount: 4,
+          previousSize: null,
+          deltaBytes: null,
+        },
+        {
+          path: "C:\\proj\\target",
+          kind: "rust-target",
+          projectPath: "C:\\proj",
+          projectName: "proj",
+          size: 20,
+          fileCount: 2,
+          previousSize: null,
+          deltaBytes: null,
+        },
+      ],
+      totalBytes: 100,
+      totalFiles: 6,
+      projectCount: 1,
+      kindTotals: [
+        { kind: "node-modules", size: 80, count: 1 },
+        { kind: "rust-target", size: 20, count: 1 },
+      ],
+      generatedAt: 1,
+      rootPath: "C:\\",
+    }, ["C:\\proj\\node_modules"]);
+    expect(report.totalBytes).toBe(20);
+    expect(report.totalFiles).toBe(2);
+    expect(report.artifacts).toHaveLength(1);
+    expect(report.kindTotals).toEqual([{ kind: "rust-target", size: 20, count: 1 }]);
+    expect(report.droppedPaths).toEqual(["C:\\proj\\node_modules"]);
   });
 });

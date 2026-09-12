@@ -22,6 +22,7 @@ import {
   type FileCategoryFilter,
 } from "../lib/fileQuickFilters";
 import { nativeApi } from "../nativeApi";
+import { DEV_ARTIFACTS_UPDATED_EVENT } from "../lib/uiEvents";
 import { FileIcon } from "./FileIcon";
 import { toast } from "./Toasts";
 import type { TreemapLayout } from "../lib/treemap";
@@ -848,14 +849,29 @@ function DevCleanupTile({ snapshot, onViewDev }: { snapshot: ScanSnapshot; onVie
       return;
     }
     let cancelled = false;
-    // Sidecar only — never stream the full index from Overview. Folders
-    // and first paint stay free; Dev Artifacts builds a sidecar on demand.
-    void nativeApi.getDevArtifacts(snapshot.rootPath, { sidecarOnly: true }).then((report) => {
-      if (!cancelled) setDev(report);
-    }).catch(() => {
-      if (!cancelled) setDev(null);
-    });
-    return () => { cancelled = true; };
+    const load = () => {
+      // Sidecar only — never stream the full index from Overview. Folders
+      // and first paint stay free; Dev Artifacts builds a sidecar on demand.
+      void nativeApi.getDevArtifacts(snapshot.rootPath!, { sidecarOnly: true }).then((report) => {
+        if (!cancelled) setDev(report);
+      }).catch(() => {
+        if (!cancelled) setDev(null);
+      });
+    };
+    load();
+    const onUpdated = (event: Event) => {
+      const updatedRoot = (event as CustomEvent<{ rootPath?: string }>).detail?.rootPath;
+      if (!updatedRoot || !snapshot.rootPath) return;
+      if (updatedRoot.replace(/[\\/]+$/, "").toLowerCase() !== snapshot.rootPath.replace(/[\\/]+$/, "").toLowerCase()) {
+        return;
+      }
+      load();
+    };
+    window.addEventListener(DEV_ARTIFACTS_UPDATED_EVENT, onUpdated);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(DEV_ARTIFACTS_UPDATED_EVENT, onUpdated);
+    };
   }, [snapshot.rootPath, snapshot.finishedAt, snapshot.status]);
 
   if (snapshot.status !== "done") return null;
