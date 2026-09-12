@@ -33,6 +33,11 @@ export function hasDevChangeData(rows: DevArtifact[]): boolean {
   return rows.some((artifact) => artifact.deltaBytes != null || artifact.previousSize != null);
 }
 
+/** Keep the user's increase preference; fall back to size when this filter has no deltas. */
+export function effectiveDevSort(sortBy: DevSortBy, filterHasIncrease: boolean): DevSortBy {
+  return sortBy === "increase" && filterHasIncrease ? "increase" : "size";
+}
+
 /** Flat All, or buckets by kind / project. Lists are size-first, or increase-first. */
 export function groupDevArtifacts(
   rows: DevArtifact[],

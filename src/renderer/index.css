@@ -1335,6 +1335,7 @@ button, input, select, textarea { font: inherit; }
 .view-pane {
   height: 100%;
   min-height: 0;
+  min-width: 0;
 }
 
 .view-pane[hidden] {
@@ -2574,6 +2575,14 @@ button, input, select, textarea { font: inherit; }
   border-color: var(--border-selected);
   background: var(--amber-glow);
   color: var(--amber);
+}
+.chip:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.chip:disabled:hover {
+  color: var(--text-tertiary);
+  background: transparent;
 }
 
 .bulk-bar {
@@ -8881,6 +8890,7 @@ body.system-widget-body #app {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
   --dev-k-worktree: #94a3b8;
   --dev-k-node-modules: #2dd4bf;
   --dev-k-package-cache: #14b8a6;
@@ -8945,11 +8955,14 @@ body.system-widget-body #app {
   color: var(--text-tertiary);
 }
 .dev-tape {
+  min-width: 0;
   padding: 10px 16px 8px;
   border-bottom: 1px solid var(--border);
 }
 .dev-spectrum {
   display: flex;
+  width: 100%;
+  min-width: 0;
   height: 10px;
   border-radius: 2px;
   overflow: hidden;
@@ -8972,12 +8985,17 @@ body.system-widget-body #app {
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 8px;
+  min-width: 0;
+  max-width: 100%;
 }
 .dev-kind-cell {
   display: flex;
+  flex: 0 0 auto;
   flex-direction: column;
   gap: 4px;
   min-width: 112px;
+  max-width: 100%;
+  box-sizing: border-box;
   padding: 6px 8px;
   border: 1px solid var(--border);
   border-radius: 6px;

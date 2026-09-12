@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { DevArtifact, DevArtifactReport } from "../../../shared/contracts";
 import {
+  effectiveDevSort,
   groupDevArtifacts,
   hasDevChangeData,
   isUsefulDevReport,
@@ -194,5 +195,29 @@ describe("groupDevArtifacts", () => {
     expect(hasDevChangeData([
       tree({ path: "C:\\y", size: 1, previousSize: 2 }),
     ])).toBe(true);
+  });
+
+  it("keeps increase preferred but paints size when the filter has no deltas", () => {
+    expect(effectiveDevSort("increase", true)).toBe("increase");
+    expect(effectiveDevSort("increase", false)).toBe("size");
+    expect(effectiveDevSort("size", false)).toBe("size");
+    expect(effectiveDevSort("size", true)).toBe("size");
+
+    const rustGrew = tree({
+      path: "C:\\a\\target",
+      kind: "rust-target",
+      size: 30,
+      deltaBytes: 4,
+      previousSize: 26,
+    });
+    const jsCold = tree({
+      path: "C:\\b\\.next",
+      kind: "js-build",
+      size: 20,
+    });
+    expect(hasDevChangeData([rustGrew, jsCold])).toBe(true);
+    expect(hasDevChangeData([jsCold])).toBe(false);
+    expect(groupDevArtifacts([jsCold], "all", effectiveDevSort("increase", false))[0]?.artifacts[0]?.path)
+      .toBe(jsCold.path);
   });
 });

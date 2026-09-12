@@ -11,6 +11,7 @@ import {
 import { formatScanRoot } from "../../shared/pathUtils";
 import { artifactHeadline, artifactTail } from "../lib/devArtifactDisplay";
 import {
+  effectiveDevSort,
   groupDevArtifacts,
   hasDevChangeData,
   isUsefulDevReport,
@@ -267,8 +268,9 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
       .sort((a, b) => b.size - a.size);
   }, [remaining]);
 
-  const showIncreaseSort = useMemo(() => hasDevChangeData(rows), [rows]);
-  const listSort: DevSortBy = showIncreaseSort ? sortBy : "size";
+  const reportHasChangeData = useMemo(() => hasDevChangeData(remaining), [remaining]);
+  const filterHasIncrease = useMemo(() => hasDevChangeData(rows), [rows]);
+  const listSort = effectiveDevSort(sortBy, filterHasIncrease);
   const groups = useMemo(() => groupDevArtifacts(rows, groupBy, listSort), [rows, groupBy, listSort]);
 
   const selectedVisible = useMemo(
@@ -614,12 +616,24 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
           <button className={`chip ${groupBy === "kind" ? "active" : ""}`} onClick={() => setGroupBy("kind")}>By kind</button>
           <button className={`chip ${groupBy === "project" ? "active" : ""}`} onClick={() => setGroupBy("project")}>By project</button>
         </div>
-        {showIncreaseSort && (
+        {reportHasChangeData && (
           <>
             <span className="dev-toolbar-label" id="dev-sort-by-label">Sort</span>
             <div className="chip-group" role="radiogroup" aria-labelledby="dev-sort-by-label">
-              <button className={`chip ${sortBy === "size" ? "active" : ""}`} onClick={() => setSortBy("size")}>Largest</button>
-              <button className={`chip ${sortBy === "increase" ? "active" : ""}`} onClick={() => setSortBy("increase")}>Largest increase</button>
+              <button
+                className={`chip ${listSort === "size" ? "active" : ""}`}
+                onClick={() => setSortBy("size")}
+              >
+                Largest
+              </button>
+              <button
+                className={`chip ${sortBy === "increase" && filterHasIncrease ? "active" : ""}`}
+                disabled={!filterHasIncrease}
+                title={filterHasIncrease ? undefined : "No since-last-scan change for this kind"}
+                onClick={() => setSortBy("increase")}
+              >
+                Largest increase
+              </button>
             </div>
           </>
         )}
