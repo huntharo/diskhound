@@ -590,6 +590,122 @@ export async function runElevatedEasyMove(
   }
 }
 
+// ── UAC-elevated permanent delete ──────────────────────────────────
+//
+// Recursive unlink / rmdir in an elevated PowerShell. Never Recycle Bin.
+// Junctions and other reparse points are removed as links — we do not
+// walk into pnpm-style store targets. One UAC prompt per invocation.
+
+const ELEVATED_DELETE_TIMEOUT_MS = 15 * 60 * 1000;
+
+export async function runElevatedPermanentDelete(
+  targetPath: string,
+): Promise<RunElevatedEasyMoveResult> {
+  if (process.platform !== "win32") {
+    return { ok: false, message: "Elevated delete is Windows-only." };
+  }
+
+  const os = await import("node:os");
+  const fs = await import("node:fs/promises");
+  const stamp = `${process.pid}-${Date.now()}`;
+  const scriptFile = Path.join(os.tmpdir(), `diskhound-rm-${stamp}.ps1`);
+  const stdoutFile = Path.join(os.tmpdir(), `diskhound-rm-out-${stamp}.txt`);
+  const stderrFile = Path.join(os.tmpdir(), `diskhound-rm-err-${stamp}.txt`);
+  const escaped = psEscapeSingleQuoted(targetPath);
+  const innerScript =
+    `$ErrorActionPreference = 'Stop'\n` +
+    `$p = '${escaped}'\n` +
+    `if (-not (Test-Path -LiteralPath $p)) { exit 0 }\n` +
+    `$item = Get-Item -LiteralPath $p -Force\n` +
+    `if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {\n` +
+    `  if ($item.PSIsContainer) { [IO.Directory]::Delete($p) } else { [IO.File]::Delete($p) }\n` +
+    `} elseif ($item.PSIsContainer) {\n` +
+    `  [IO.Directory]::Delete($p, $true)\n` +
+    `} else {\n` +
+    `  $item.IsReadOnly = $false\n` +
+    `  [IO.File]::Delete($p)\n` +
+    `}\n` +
+    `if (Test-Path -LiteralPath $p) { Write-Error 'still on disk after permanent delete'; exit 1 }\n`;
+
+  try {
+    await fs.writeFile(scriptFile, innerScript, "utf8");
+  } catch (err) {
+    return {
+      ok: false,
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  const wrapperScript =
+    `try { ` +
+      `$p = Start-Process powershell ` +
+        `-ArgumentList '-NoProfile','-NonInteractive','-File','${psEscapeSingleQuoted(scriptFile)}' ` +
+        `-Verb RunAs -PassThru -Wait ` +
+        `-RedirectStandardOutput '${psEscapeSingleQuoted(stdoutFile)}' ` +
+        `-RedirectStandardError  '${psEscapeSingleQuoted(stderrFile)}' ` +
+        `-ErrorAction Stop; ` +
+      `if ($p.ExitCode -eq 0) { exit 0 } else { exit $p.ExitCode } ` +
+    `} catch { ` +
+      `Write-Error $_.Exception.Message; ` +
+      `exit 1223 ` +
+    `}`;
+
+  try {
+    return await new Promise<RunElevatedEasyMoveResult>((resolve) => {
+      const child = spawn(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command", wrapperScript],
+        { stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
+      );
+      let wrapperStderr = "";
+      child.stderr?.on("data", (chunk) => { wrapperStderr += String(chunk); });
+      const timeout = setTimeout(() => {
+        try { child.kill(); } catch { /* noop */ }
+        resolve({ ok: false, message: "Elevated delete timed out after 15 minutes" });
+      }, ELEVATED_DELETE_TIMEOUT_MS);
+      child.on("error", (err) => {
+        clearTimeout(timeout);
+        resolve({ ok: false, message: err.message });
+      });
+      child.on("exit", async (code) => {
+        clearTimeout(timeout);
+        let innerStderr = "";
+        try {
+          innerStderr = await fs.readFile(stderrFile, "utf8").catch(() => "");
+        } catch {
+          /* noop */
+        }
+        void fs.unlink(stdoutFile).catch(() => {});
+        void fs.unlink(stderrFile).catch(() => {});
+        void fs.unlink(scriptFile).catch(() => {});
+
+        if (code === 0) {
+          resolve({ ok: true });
+          return;
+        }
+        if (code === 1223) {
+          resolve({ ok: false, cancelled: true, message: "UAC was cancelled." });
+          return;
+        }
+        const combined = [innerStderr, wrapperStderr]
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .join(" · ");
+        resolve({
+          ok: false,
+          message: combined || `Elevated delete failed (exit ${code})`,
+        });
+      });
+    });
+  } catch (err) {
+    void fs.unlink(scriptFile).catch(() => {});
+    return {
+      ok: false,
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 /**
  * Query the current user's SID via PowerShell's WindowsIdentity API.
  * Used when registering the scheduled task so the Principal is bound

@@ -29,7 +29,7 @@ export interface DevArtifactSidecar {
   generatedAt: number;
   roots: DevArtifactRootRec[];
   projects: string[];
-  /** Paths the user trashed. Kept so a tab switch or hotspot merge cannot resurrect them. */
+  /** Paths the user deleted. Kept so a tab switch or hotspot merge cannot resurrect them. */
   droppedPaths?: string[];
 }
 
@@ -301,7 +301,7 @@ function uniqueDroppedPaths(paths: readonly string[]): string[] {
   return out;
 }
 
-/** Remove trashed trees from the sidecar. Records them so merge/hotspots cannot put them back. */
+/** Remove deleted trees from the sidecar. Records them so merge/hotspots cannot put them back. */
 export function dropSidecarRoots(
   sidecar: DevArtifactSidecar,
   paths: readonly string[],

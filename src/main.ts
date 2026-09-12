@@ -64,6 +64,7 @@ import {
   setEasyMoveProgress,
   verifyEasyMoves,
 } from "./shared/easyMoveStore";
+import { tryPermanentDelete } from "./shared/permanentDelete";
 import {
   clearAllHistory,
   consumeLastPrunedIds,
@@ -2121,17 +2122,48 @@ void (async () => {
       return { ok: true, message: "Moved to trash." };
     }
   });
-  ipcMain.handle("diskhound:permanent-delete-path", (_event, targetPath: string) => {
+  ipcMain.handle("diskhound:permanent-delete-path", async (_event, targetPath: string) => {
     const blocked = protectedPathBlock(targetPath, "Delete");
-    if (blocked) return blocked;
-    return pathAction("Permanently deleted.", async () => {
-      const stat = await FS.lstat(targetPath);
-      await FS.rm(targetPath, {
-        recursive: stat.isDirectory(),
-        force: false,
-        maxRetries: 2,
-      });
-    });
+    if (blocked) {
+      writeCrashLog("delete", `blocked path=${targetPath} ${blocked.message}`);
+      return blocked;
+    }
+    const elevated = await elevationModule.isElevated();
+    const result = await tryPermanentDelete(targetPath, elevated);
+    writeCrashLog(
+      "delete",
+      `${result.ok ? "ok" : result.requiresElevation ? "needs-admin" : "fail"} path=${Path.resolve(targetPath)} ${result.message}`,
+    );
+    return result;
+  });
+  ipcMain.handle("diskhound:permanent-delete-path-elevated", async (_event, targetPath: string) => {
+    const blocked = protectedPathBlock(targetPath, "Delete");
+    if (blocked) {
+      writeCrashLog("delete", `blocked-elevated path=${targetPath} ${blocked.message}`);
+      return blocked;
+    }
+    const resolved = Path.resolve(targetPath);
+    const res = await elevationModule.runElevatedPermanentDelete(resolved);
+    if (!res.ok) {
+      writeCrashLog("delete", `elevated-fail path=${resolved} ${res.message ?? ""}`);
+      return {
+        ok: false,
+        message: res.cancelled
+          ? "Cancelled — nothing was deleted."
+          : `Elevated delete failed: ${res.message ?? "unknown error"}`,
+      };
+    }
+    try {
+      await FS.lstat(resolved);
+      writeCrashLog("delete", `elevated-noop path=${Path.resolve(targetPath)} still on disk`);
+      return {
+        ok: false,
+        message: "The folder is still on disk after the elevated delete.",
+      };
+    } catch {
+      writeCrashLog("delete", `elevated-ok path=${Path.resolve(targetPath)}`);
+      return { ok: true, message: "Permanently deleted." };
+    }
   });
 
   // ── IPC: Crash logs ───────────────────────────────────────

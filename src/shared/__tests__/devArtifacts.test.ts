@@ -124,7 +124,7 @@ describe("mergeDiagLogHotspots", () => {
     expect(report.totalBytes).toBe(50);
   });
 
-  it("does not restore a trashed DiagOutputDir from scan hotspots", () => {
+  it("does not restore a deleted DiagOutputDir from scan hotspots", () => {
     const path = "C:\\Users\\thoma\\AppData\\Local\\Temp\\DiagOutputDir";
     const report = mergeDiagLogHotspots({
       artifacts: [{

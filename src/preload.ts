@@ -63,6 +63,8 @@ const api: DiskhoundNativeApi = {
   trashPath: (targetPath) => ipcRenderer.invoke("diskhound:trash-path", targetPath),
   permanentlyDeletePath: (targetPath) =>
     ipcRenderer.invoke("diskhound:permanent-delete-path", targetPath),
+  permanentlyDeletePathElevated: (targetPath) =>
+    ipcRenderer.invoke("diskhound:permanent-delete-path-elevated", targetPath),
 
   // Settings
   getSettings: () => ipcRenderer.invoke("diskhound:get-settings"),

@@ -885,7 +885,7 @@ function DevCleanupTile({ snapshot, onViewDev }: { snapshot: ScanSnapshot; onVie
       type="button"
       className="metric metric-dev-tile"
       onClick={() => onViewDev?.()}
-      title="Open Dev Artifacts to trash worktrees, node_modules, build caches, and RDP traces"
+      title="Open Dev Artifacts to permanently delete worktrees, node_modules, build caches, and RDP traces"
     >
       <span className="metric-value accent">{formatBytes(display.totalBytes)}</span>
       <span className="metric-label">dev artifacts</span>

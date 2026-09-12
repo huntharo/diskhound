@@ -73,14 +73,22 @@ function overlayForgotten(report: DevArtifactReport, scanKey: string): DevArtifa
   return dropArtifactsFromReport(report, forgottenByScan.get(scanKey) ?? []);
 }
 
-type TrashProgress = {
+type DeleteProgress = {
   index: number;
   total: number;
   path: string;
   size: number;
-  movedBytes: number;
+  deletedBytes: number;
   totalBytes: number;
 };
+
+function permanentDeleteConfirm(label: string, trees: number, bytes: number): string {
+  return (
+    `${label}\n\n` +
+    `${formatCount(trees)} trees · ${formatBytes(bytes)}\n\n` +
+    `This permanently deletes the trees from disk. It cannot be undone and does not go to the Recycle Bin. Protected folders are skipped.`
+  );
+}
 
 function seedViewState(
   root: string | null,
@@ -114,7 +122,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
   const [busyPaths, setBusyPaths] = useState<Set<string>>(() => new Set());
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
-  const [trashProgress, setTrashProgress] = useState<TrashProgress | null>(null);
+  const [deleteProgress, setDeleteProgress] = useState<DeleteProgress | null>(null);
   const [rescanning, setRescanning] = useState(false);
   const [rescanProgress, setRescanProgress] = useState<DevArtifactsRescanProgress | null>(null);
   const [loadPath, setLoadPath] = useState<"sidecar" | "folder-tree">("sidecar");
@@ -346,42 +354,58 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     });
   };
 
-  const trashMany = async (paths: string[], label: string) => {
+  const deleteMany = async (paths: string[], label: string) => {
     if (paths.length === 0 || !root) return;
     const targets = remaining.filter((artifact) => paths.includes(artifact.path));
     if (targets.length === 0) return;
     const totalBytes = targets.reduce((sum, artifact) => sum + artifact.size, 0);
-    const ok = window.confirm(
-      `${label}\n\n${formatCount(targets.length)} trees · ${formatBytes(totalBytes)}\n\nMoved to the Recycle Bin. Empty the Recycle Bin to free disk space. Protected folders are skipped.`,
-    );
+    const ok = window.confirm(permanentDeleteConfirm(label, targets.length, totalBytes));
     if (!ok) return;
     setBulkBusy(true);
     let succeeded = 0;
     let failed = 0;
-    let movedBytes = 0;
+    let deletedBytes = 0;
+    let askedElevate = false;
+    let elevateRemaining = false;
     const scanKey = reportKey(root, snapshot.finishedAt);
     let live = report;
     try {
       for (let i = 0; i < targets.length; i++) {
         const artifact = targets[i]!;
-        setTrashProgress({
+        setDeleteProgress({
           index: i + 1,
           total: targets.length,
           path: artifact.path,
           size: artifact.size,
-          movedBytes,
+          deletedBytes,
           totalBytes,
         });
         setBusyPaths((prev) => new Set(prev).add(artifact.path));
         try {
-          const result = await nativeApi.trashPath(artifact.path);
+          let result = await nativeApi.permanentlyDeletePath(artifact.path);
+          if (result?.requiresElevation) {
+            if (!askedElevate) {
+              askedElevate = true;
+              elevateRemaining = window.confirm(
+                `${artifact.path}\n\n` +
+                `Admin rights needed to delete this tree. Windows will show a UAC prompt for this tree and any later trees that need admin.\n\n` +
+                `The files are permanently deleted — they do not go to the Recycle Bin.\n\nContinue?`,
+              );
+            }
+            if (!elevateRemaining) {
+              failed += 1;
+              toast("error", "Could not delete", "Needs admin — not deleted.");
+              continue;
+            }
+            result = await nativeApi.permanentlyDeletePathElevated(artifact.path);
+          }
           if (!result?.ok) {
             failed += 1;
-            toast("error", "Could not trash", result?.message ?? artifact.path);
+            toast("error", "Could not delete", result?.message ?? artifact.path);
             continue;
           }
           succeeded += 1;
-          movedBytes += artifact.size;
+          deletedBytes += artifact.size;
           noteForgotten(scanKey, [artifact.path]);
           live = overlayForgotten(dropArtifactsFromReport(live ?? emptyDevReport(root), [artifact.path]), scanKey);
           setReport(live);
@@ -398,12 +422,12 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
             rememberReport(root, scanKey, live, live.artifacts.length === 0);
           }
           dispatchDevArtifactsUpdated(root);
-          setTrashProgress({
+          setDeleteProgress({
             index: i + 1,
             total: targets.length,
             path: artifact.path,
             size: artifact.size,
-            movedBytes,
+            deletedBytes,
             totalBytes,
           });
         } finally {
@@ -417,21 +441,21 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
       if (succeeded > 0) {
         toast(
           "success",
-          `Moved ${formatCount(succeeded)} tree${succeeded === 1 ? "" : "s"} to the Recycle Bin`,
-          "Empty the Recycle Bin to free the disk space.",
+          `Permanently deleted ${formatCount(succeeded)} tree${succeeded === 1 ? "" : "s"}`,
+          "This cannot be undone.",
         );
       }
       if (failed > 0 && succeeded === 0) {
-        toast("error", "Nothing was trashed", `${failed} failed`);
+        toast("error", "Nothing was deleted", `${failed} failed`);
       }
     } finally {
       setBulkBusy(false);
-      setTrashProgress(null);
+      setDeleteProgress(null);
     }
   };
 
-  const trashOne = async (path: string) => {
-    await trashMany([path], "Move this tree to the trash?");
+  const deleteOne = async (path: string) => {
+    await deleteMany([path], "Delete this tree permanently?");
   };
 
   const rescan = async () => {
@@ -623,20 +647,22 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
           <button
             className="action-btn warn"
             disabled={selectedVisible.length === 0 || bulkBusy}
-            onClick={() => void trashMany(selectedVisible.map((a) => a.path), "Trash selected trees?")}
+            title="Permanently delete selected trees. Cannot be undone. Not Recycle Bin."
+            onClick={() => void deleteMany(selectedVisible.map((a) => a.path), "Delete selected trees permanently?")}
           >
-            {bulkBusy && trashProgress
-              ? `Trashing ${formatCount(trashProgress.index)} of ${formatCount(trashProgress.total)}`
+            {bulkBusy && deleteProgress
+              ? `Deleting ${formatCount(deleteProgress.index)} of ${formatCount(deleteProgress.total)}`
               : selectedVisible.length > 0
-              ? `Trash selected (${formatCount(selectedVisible.length)} · ${formatBytes(selectedBytes)})`
-              : "Trash selected"}
+              ? `Delete selected (${formatCount(selectedVisible.length)} · ${formatBytes(selectedBytes)})`
+              : "Delete selected"}
           </button>
           <button
             className="action-btn danger"
             disabled={remaining.length === 0 || bulkBusy}
-            onClick={() => void trashMany(remaining.map((a) => a.path), "Trash all listed developer trees?")}
+            title="Permanently delete every listed tree. Cannot be undone. Not Recycle Bin."
+            onClick={() => void deleteMany(remaining.map((a) => a.path), "Delete all listed developer trees permanently?")}
           >
-            {bulkBusy && trashProgress ? "Trashing…" : "Trash all"}
+            {bulkBusy && deleteProgress ? "Deleting…" : "Delete all"}
           </button>
           <button
             className="action-btn"
@@ -658,15 +684,15 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
         />
       )}
 
-      {trashProgress && (
+      {deleteProgress && (
         <div className="dev-rescan-banner" role="status" aria-live="polite">
           <div>
-            Trashing {formatCount(trashProgress.index)} of {formatCount(trashProgress.total)} trees
-            {` · ${formatBytes(trashProgress.movedBytes)} of ${formatBytes(trashProgress.totalBytes)}`}
+            Deleting {formatCount(deleteProgress.index)} of {formatCount(deleteProgress.total)} trees
+            {` · ${formatBytes(deleteProgress.deletedBytes)} of ${formatBytes(deleteProgress.totalBytes)}`}
           </div>
           <div className="dev-rescan-banner-detail">
-            {truncatePath(trashProgress.path)}
-            {` · ${formatBytes(trashProgress.size)}`}
+            {truncatePath(deleteProgress.path)}
+            {` · ${formatBytes(deleteProgress.size)}`}
           </div>
         </div>
       )}
@@ -815,9 +841,10 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                     <button
                       className="action-btn warn"
                       disabled={bulkBusy || busyPaths.has(artifact.path)}
-                      onClick={() => void trashOne(artifact.path)}
+                      title="Permanently delete this tree. Cannot be undone. Not Recycle Bin."
+                      onClick={() => void deleteOne(artifact.path)}
                     >
-                      {busyPaths.has(artifact.path) ? "Trashing…" : "Trash"}
+                      {busyPaths.has(artifact.path) ? "Deleting…" : "Delete"}
                     </button>
                   </div>
                 </div>

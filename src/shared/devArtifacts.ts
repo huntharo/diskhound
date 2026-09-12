@@ -189,7 +189,7 @@ export function emptyDevReport(rootPath: string): DevArtifactReport {
   };
 }
 
-/** Drop trashed trees from the in-memory report and record them so hotspots cannot restore them. */
+/** Drop deleted trees from the in-memory report and record them so hotspots cannot restore them. */
 export function dropArtifactsFromReport(
   report: DevArtifactReport,
   paths: readonly string[],
