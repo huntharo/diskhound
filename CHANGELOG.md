@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.6.0 — 2026-09-12
+
+Dev Artifacts after 0.5.45: DiagOutputDir rows, a kind tape, Group All,
+sort by largest increase, readable chips, and leaf-first headlines on
+home and Temp trees.
+
 ### Dev Artifacts: RDP traces and kind tape
 
 Windows `DiagOutputDir` / `RdClientAutoTrace` folders (the Disk Cleanup
@@ -11,11 +17,15 @@ and in the list. Cleanup analysis keeps them as their own suggestion
 instead of mixing them into generic logs. An older sidecar can still
 pick the folder up from scan directory hotspots, or from Rescan trees.
 
-The Dev list leads with project name and a relative tail. A stacked
+Named projects still lead with the project name and a relative tail
+(`zebra-crosslink` / `target\release`). Home, Temp, and similar
+uninformative parents invert: `.gradle`, `DiagOutputDir`, and
+`pkg\mod` are the headline, with the path on the line below. A stacked
 occupancy strip plus kind rail replaces the old kind chips. Not a
 treemap. Group by All is a flat size-sorted list; By kind and By
 project still bucket. The kind rail "All kinds" control filters
-types. It is not the All group mode. When a visible tree has a
+types. It is not the All group mode. Group, Sort, and kind filters
+read as selected, idle, or unavailable. When a visible tree has a
 since-last-scan delta, a Sort control offers Largest vs Largest
 increase. Missing deltas rank as 0. The control is hidden when this
 report has no change data. Increase sort applies to All and inside
