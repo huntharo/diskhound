@@ -125,6 +125,13 @@ export interface PathActionResult {
   requiresElevation?: boolean;
 }
 
+/** Live tick while a permanent delete walks a tree. Bytes stay on the report. */
+export interface PermanentDeleteProgress {
+  rootPath: string;
+  path: string;
+  filesWalked: number;
+}
+
 export interface ScanStartInput {
   rootPath: string;
   options: ScanOptions;
@@ -1106,6 +1113,7 @@ export interface DiskhoundNativeApi {
   permanentlyDeletePath: (targetPath: string) => Promise<PathActionResult>;
   /** Recursive unlink under a UAC-elevated helper. One prompt per call. */
   permanentlyDeletePathElevated: (targetPath: string) => Promise<PathActionResult>;
+  onPermanentDeleteProgress: (listener: (progress: PermanentDeleteProgress) => void) => () => void;
 
   // Settings
   getSettings: () => Promise<AppSettings>;

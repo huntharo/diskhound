@@ -9,6 +9,7 @@ import type {
   DuplicateAnalysis,
   DuplicateScanProgress,
   EasyMoveProgress,
+  PermanentDeleteProgress,
   NavigateViewPayload,
   ScanSnapshot,
   ToastMessage,
@@ -32,6 +33,7 @@ const NOTIFICATION_CHANNEL = "diskhound:notification";
 const DUPLICATE_PROGRESS_CHANNEL = "diskhound:duplicate-progress";
 const DUPLICATE_RESULT_CHANNEL = "diskhound:duplicate-result";
 const DEV_ARTIFACTS_PROGRESS_CHANNEL = "diskhound:dev-artifacts-progress";
+const PERMANENT_DELETE_PROGRESS_CHANNEL = "diskhound:permanent-delete-progress";
 const SETTINGS_UPDATED_CHANNEL = "diskhound:settings-updated";
 const NAVIGATE_VIEW_CHANNEL = "diskhound:navigate-view";
 
@@ -65,6 +67,13 @@ const api: DiskhoundNativeApi = {
     ipcRenderer.invoke("diskhound:permanent-delete-path", targetPath),
   permanentlyDeletePathElevated: (targetPath) =>
     ipcRenderer.invoke("diskhound:permanent-delete-path-elevated", targetPath),
+  onPermanentDeleteProgress: (listener) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, progress: PermanentDeleteProgress) => {
+      listener(progress);
+    };
+    ipcRenderer.on(PERMANENT_DELETE_PROGRESS_CHANNEL, wrapped);
+    return () => { ipcRenderer.removeListener(PERMANENT_DELETE_PROGRESS_CHANNEL, wrapped); };
+  },
 
   // Settings
   getSettings: () => ipcRenderer.invoke("diskhound:get-settings"),

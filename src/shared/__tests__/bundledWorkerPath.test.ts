@@ -21,6 +21,8 @@ describe("resolveBundledWorkerScript", () => {
     const base = Path.join(tempDir, "dist-electron");
     expect(resolveBundledWorkerScript(base, "devArtifactsWorker.cjs"))
       .toBe(Path.join(base, "scan", "devArtifactsWorker.cjs"));
+    expect(resolveBundledWorkerScript(base, "permanentDeleteWorker.cjs"))
+      .toBe(Path.join(base, "scan", "permanentDeleteWorker.cjs"));
   });
 
   it("rewrites app.asar to app.asar.unpacked when the file is there", async () => {

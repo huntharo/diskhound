@@ -5,6 +5,7 @@ import * as Path from "node:path";
 import { spawnSync } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { inFlightDeleteBytes } from "../deleteProgress";
 import {
   classifyPermanentDeleteError,
   isAccessDeniedFsError,
@@ -78,6 +79,25 @@ describe("permanentlyDeleteOnDisk", () => {
     expect(await FSP.readFile(Path.join(real, "pkg.json"), "utf8")).toBe("{\"ok\":true}");
   });
 
+  it("emits current path while walking a tree", async () => {
+    const tree = Path.join(tempDir, "node_modules");
+    const nested = Path.join(tree, "pkg", "dist");
+    await FSP.mkdir(nested, { recursive: true });
+    await FSP.writeFile(Path.join(nested, "index.js"), "module.exports = 1\n");
+
+    const seen: string[] = [];
+    let lastWalked = 0;
+    await permanentlyDeleteOnDisk(tree, (progress) => {
+      seen.push(progress.path);
+      lastWalked = progress.filesWalked;
+    });
+
+    expect(FS.existsSync(tree)).toBe(false);
+    expect(seen[0]).toBe(Path.resolve(tree));
+    expect(seen.length).toBeGreaterThanOrEqual(2);
+    expect(lastWalked).toBeGreaterThanOrEqual(2);
+  });
+
   it("removes a read-only file in a tree", async () => {
     const tree = Path.join(tempDir, "cache");
     const file = Path.join(tree, "lock");
@@ -88,6 +108,14 @@ describe("permanentlyDeleteOnDisk", () => {
     await permanentlyDeleteOnDisk(tree);
 
     expect(FS.existsSync(tree)).toBe(false);
+  });
+});
+
+describe("inFlightDeleteBytes", () => {
+  it("counts the current tree size so the banner is not 0 B", () => {
+    expect(inFlightDeleteBytes(0, 15_700_000_000)).toBe(15_700_000_000);
+    expect(inFlightDeleteBytes(1_000, 500)).toBe(1_500);
+    expect(inFlightDeleteBytes(0, 0)).toBe(0);
   });
 });
 

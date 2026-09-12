@@ -9,7 +9,8 @@ import {
   emptyDevReport,
   mergeDiagLogHotspots,
 } from "../../shared/devArtifacts";
-import { formatScanRoot } from "../../shared/pathUtils";
+import { inFlightDeleteBytes } from "../../shared/deleteProgress";
+import { formatScanRoot, normPath } from "../../shared/pathUtils";
 import { artifactHeadline, artifactTail } from "../lib/devArtifactDisplay";
 import {
   effectiveDevSort,
@@ -76,11 +77,20 @@ function overlayForgotten(report: DevArtifactReport, scanKey: string): DevArtifa
 type DeleteProgress = {
   index: number;
   total: number;
+  treePath: string;
   path: string;
   size: number;
   deletedBytes: number;
   totalBytes: number;
+  filesWalked: number;
+  startedAt: number;
 };
+
+function yieldToUi(): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, 0);
+  });
+}
 
 function permanentDeleteConfirm(label: string, trees: number, bytes: number): string {
   return (
@@ -123,6 +133,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
   const [deleteProgress, setDeleteProgress] = useState<DeleteProgress | null>(null);
+  const [deleteElapsedSec, setDeleteElapsedSec] = useState(0);
   const [rescanning, setRescanning] = useState(false);
   const [rescanProgress, setRescanProgress] = useState<DevArtifactsRescanProgress | null>(null);
   const [loadPath, setLoadPath] = useState<"sidecar" | "folder-tree">("sidecar");
@@ -265,6 +276,33 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     });
   }, [root]);
 
+  useEffect(() => {
+    return nativeApi.onPermanentDeleteProgress((progress) => {
+      setDeleteProgress((prev) => {
+        if (!prev) return prev;
+        if (normPath(progress.rootPath) !== normPath(prev.treePath)) return prev;
+        return {
+          ...prev,
+          path: progress.path,
+          filesWalked: progress.filesWalked,
+        };
+      });
+    });
+  }, []);
+
+  const deleteStartedAt = deleteProgress?.startedAt ?? null;
+  useEffect(() => {
+    if (deleteStartedAt == null) {
+      setDeleteElapsedSec(0);
+      return;
+    }
+    setDeleteElapsedSec(Math.floor((Date.now() - deleteStartedAt) / 1000));
+    const id = window.setInterval(() => {
+      setDeleteElapsedSec(Math.floor((Date.now() - deleteStartedAt) / 1000));
+    }, 250);
+    return () => window.clearInterval(id);
+  }, [deleteStartedAt]);
+
   const displayReport = useMemo(() => {
     if (report) return mergeDiagLogHotspots(report, snapshot.hottestDirectories ?? []);
     if (settled && root) {
@@ -369,18 +407,23 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     let elevateRemaining = false;
     const scanKey = reportKey(root, snapshot.finishedAt);
     let live = report;
+    const startedAt = Date.now();
     try {
       for (let i = 0; i < targets.length; i++) {
         const artifact = targets[i]!;
         setDeleteProgress({
           index: i + 1,
           total: targets.length,
+          treePath: artifact.path,
           path: artifact.path,
           size: artifact.size,
           deletedBytes,
           totalBytes,
+          filesWalked: 0,
+          startedAt,
         });
         setBusyPaths((prev) => new Set(prev).add(artifact.path));
+        await yieldToUi();
         try {
           let result = await nativeApi.permanentlyDeletePath(artifact.path);
           if (result?.requiresElevation) {
@@ -422,14 +465,6 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
             rememberReport(root, scanKey, live, live.artifacts.length === 0);
           }
           dispatchDevArtifactsUpdated(root);
-          setDeleteProgress({
-            index: i + 1,
-            total: targets.length,
-            path: artifact.path,
-            size: artifact.size,
-            deletedBytes,
-            totalBytes,
-          });
         } finally {
           setBusyPaths((prev) => {
             const next = new Set(prev);
@@ -651,7 +686,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
             onClick={() => void deleteMany(selectedVisible.map((a) => a.path), "Delete selected trees permanently?")}
           >
             {bulkBusy && deleteProgress
-              ? `Deleting ${formatCount(deleteProgress.index)} of ${formatCount(deleteProgress.total)}`
+              ? `Deleting ${formatBytes(inFlightDeleteBytes(deleteProgress.deletedBytes, deleteProgress.size))}…`
               : selectedVisible.length > 0
               ? `Delete selected (${formatCount(selectedVisible.length)} · ${formatBytes(selectedBytes)})`
               : "Delete selected"}
@@ -662,7 +697,9 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
             title="Permanently delete every listed tree. Cannot be undone. Not Recycle Bin."
             onClick={() => void deleteMany(remaining.map((a) => a.path), "Delete all listed developer trees permanently?")}
           >
-            {bulkBusy && deleteProgress ? "Deleting…" : "Delete all"}
+            {bulkBusy && deleteProgress
+              ? `Deleting ${formatBytes(inFlightDeleteBytes(deleteProgress.deletedBytes, deleteProgress.size))}…`
+              : "Delete all"}
           </button>
           <button
             className="action-btn"
@@ -687,12 +724,15 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
       {deleteProgress && (
         <div className="dev-rescan-banner" role="status" aria-live="polite">
           <div>
-            Deleting {formatCount(deleteProgress.index)} of {formatCount(deleteProgress.total)} trees
-            {` · ${formatBytes(deleteProgress.deletedBytes)} of ${formatBytes(deleteProgress.totalBytes)}`}
+            Deleting {formatBytes(inFlightDeleteBytes(deleteProgress.deletedBytes, deleteProgress.size))}…
+            {` · ${formatCount(deleteProgress.index)} of ${formatCount(deleteProgress.total)}`}
           </div>
           <div className="dev-rescan-banner-detail">
             {truncatePath(deleteProgress.path)}
-            {` · ${formatBytes(deleteProgress.size)}`}
+            {deleteProgress.filesWalked > 0
+              ? ` · ${formatCount(deleteProgress.filesWalked)} files`
+              : ` · ${formatBytes(deleteProgress.size)}`}
+            {` · ${deleteElapsedSec}s`}
           </div>
         </div>
       )}

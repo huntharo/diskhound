@@ -30,6 +30,7 @@ import {
   type FullDiffResult,
   type NavigateViewPayload,
   type PathActionResult,
+  type PermanentDeleteProgress,
   type ScanEngine,
   type ScanFileRecord,
   type ScanOptions,
@@ -64,7 +65,11 @@ import {
   setEasyMoveProgress,
   verifyEasyMoves,
 } from "./shared/easyMoveStore";
-import { tryPermanentDelete } from "./shared/permanentDelete";
+import { classifyPermanentDeleteError, isEnoentFsError, tryPermanentDelete } from "./shared/permanentDelete";
+import {
+  resolveBundledPermanentDeleteWorkerPath,
+  runPermanentDeleteWorker,
+} from "./shared/permanentDeleteWorkerRuntime";
 import {
   clearAllHistory,
   consumeLastPrunedIds,
@@ -152,6 +157,7 @@ const NOTIFICATION_CHANNEL = "diskhound:notification";
 const DUPLICATE_PROGRESS_CHANNEL = "diskhound:duplicate-progress";
 const DUPLICATE_RESULT_CHANNEL = "diskhound:duplicate-result";
 const DEV_ARTIFACTS_PROGRESS_CHANNEL = "diskhound:dev-artifacts-progress";
+const PERMANENT_DELETE_PROGRESS_CHANNEL = "diskhound:permanent-delete-progress";
 /** Broadcast from main to every renderer window after settings
  *  are persisted. Replaces the widget's prior 12 s poll — see the
  *  `settingsStore.subscribe` wiring in whenReady. */
@@ -170,6 +176,7 @@ const scanWorkerEntry = Path.join(__dirname, "scan", "scanWorker.cjs");
 const fullDiffWorkerEntry = resolveBundledFullDiffWorkerPath(__dirname);
 const folderTreeWorkerEntry = resolveBundledFolderTreeWorkerPath(__dirname);
 const devArtifactsWorkerEntry = resolveBundledDevArtifactsWorkerPath(__dirname);
+const permanentDeleteWorkerEntry = resolveBundledPermanentDeleteWorkerPath(__dirname);
 const RELEASES_URL = "https://github.com/tzarebczan/diskhound/releases";
 
 type WorkerScanSession = {
@@ -2129,10 +2136,32 @@ void (async () => {
       return blocked;
     }
     const elevated = await elevationModule.isElevated();
-    const result = await tryPermanentDelete(targetPath, elevated);
+    const resolved = Path.resolve(targetPath);
+    const onProgress = (progress: PermanentDeleteProgress) => {
+      mainWindow?.webContents.send(PERMANENT_DELETE_PROGRESS_CHANNEL, progress);
+    };
+    let result: PathActionResult;
+    try {
+      const stat = await FS.lstat(resolved);
+      if (stat.isDirectory() && !stat.isSymbolicLink()) {
+        await runPermanentDeleteWorker(resolved, {
+          workerPath: permanentDeleteWorkerEntry,
+          onProgress,
+        });
+        result = { ok: true, message: "Permanently deleted." };
+      } else {
+        result = await tryPermanentDelete(resolved, elevated, onProgress);
+      }
+    } catch (error) {
+      if (isEnoentFsError(error)) {
+        result = { ok: true, message: "Permanently deleted." };
+      } else {
+        result = classifyPermanentDeleteError(error, elevated, resolved);
+      }
+    }
     writeCrashLog(
       "delete",
-      `${result.ok ? "ok" : result.requiresElevation ? "needs-admin" : "fail"} path=${Path.resolve(targetPath)} ${result.message}`,
+      `${result.ok ? "ok" : result.requiresElevation ? "needs-admin" : "fail"} path=${resolved} ${result.message}`,
     );
     return result;
   });
