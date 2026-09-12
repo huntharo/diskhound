@@ -2,17 +2,32 @@
 
 ## Unreleased
 
-Packaged Dev Artifacts permanent delete no longer fails looking for
-`./chunk-*.cjs`. Scan workers are bundled without code splitting so the
-walk-then-unlink worker is one file next to the other unpacked workers.
-
 ## 0.6.0 — 2026-09-12
 
-Dev Artifacts after 0.5.45: DiagOutputDir rows, a kind tape, Group All,
-sort by largest increase, readable chips, and leaf-first headlines on
-home and Temp trees.
+Size on disk, quieter first-run defaults, and Dev Artifacts land on
+main. Occupied space, a kind tape (including DiagOutputDir `diag-logs`),
+Group All, sort by largest increase, permanent delete, and Ctrl+Q quit.
 
-### Dev Artifacts: RDP traces and kind tape
+### Size on disk
+
+Windows occupancy uses allocated size (see #2). Extra NTFS hardlinks
+stay visible as paths but no longer inflate totals, the treemap, or
+folder rollups. Overview totals are labeled "on disk". Sparse VHDX
+files no longer look like they fill the SSD.
+
+### First-run defaults
+
+- New installs no longer launch DiskHound at login.
+- Free-space polls default to 60 minutes; full rescans default to 6 hours.
+- New installs default "Minimize to tray" off. Relaunch focuses the
+  existing window, including from the tray (see #1).
+
+### Dev Artifacts
+
+New **Dev Artifacts** tab (Ctrl+4) groups worktrees, `node_modules`,
+Rust `target/`, package-manager caches, venvs, DiagOutputDir RDP traces,
+and other developer bloat. Full scans write a compact sidecar so the tab
+opens without re-streaming the drive index.
 
 Windows `DiagOutputDir` / `RdClientAutoTrace` folders (the Disk Cleanup
 "DiagOutputDir RDP trace logs" heap) classify as `diag-logs` in the
@@ -34,6 +49,14 @@ since-last-scan delta, a Sort control offers Largest vs Largest
 increase. Missing deltas rank as 0. The control is hidden when this
 report has no change data. Increase sort applies to All and inside
 By kind / By project groups.
+
+Select and Delete sit in a bar next to the list, not in the header
+chips. Delete permanently removes trees; it does not send them to the
+Recycle Bin. Progress shows the report occupancy while a walk-unlink
+worker ticks path, files, and elapsed. Packaged scan workers are one file
+each so permanent delete does not fail looking for `./chunk-*.cjs`.
+
+Ctrl/Cmd+Q quits DiskHound instead of hiding to the tray.
 
 ## 0.5.45 — 2026-09-11
 
