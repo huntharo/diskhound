@@ -2,6 +2,7 @@ import type { DevArtifact, DevArtifactKind, DevArtifactReport, ScanSnapshot } fr
 import { DEV_KIND_LABEL } from "../../shared/devArtifacts";
 
 export type DevGroupBy = "all" | "kind" | "project";
+export type DevSortBy = "size" | "increase";
 
 export type DevArtifactGroup = {
   key: string;
@@ -14,10 +15,33 @@ function bySize(a: DevArtifact, b: DevArtifact): number {
   return b.size - a.size || a.path.localeCompare(b.path);
 }
 
-/** Flat All, or buckets by kind / project. Each list is largest-first. */
-export function groupDevArtifacts(rows: DevArtifact[], groupBy: DevGroupBy): DevArtifactGroup[] {
+/** Null / missing deltas rank as 0 — with neutrals, after real increases. */
+function deltaOrZero(artifact: DevArtifact): number {
+  return artifact.deltaBytes ?? 0;
+}
+
+function byIncrease(a: DevArtifact, b: DevArtifact): number {
+  return deltaOrZero(b) - deltaOrZero(a) || bySize(a, b);
+}
+
+function compareArtifacts(sortBy: DevSortBy): (a: DevArtifact, b: DevArtifact) => number {
+  return sortBy === "increase" ? byIncrease : bySize;
+}
+
+/** Visible change data: a measured delta, or a previous size we can compare. */
+export function hasDevChangeData(rows: DevArtifact[]): boolean {
+  return rows.some((artifact) => artifact.deltaBytes != null || artifact.previousSize != null);
+}
+
+/** Flat All, or buckets by kind / project. Lists are size-first, or increase-first. */
+export function groupDevArtifacts(
+  rows: DevArtifact[],
+  groupBy: DevGroupBy,
+  sortBy: DevSortBy = "size",
+): DevArtifactGroup[] {
+  const compare = compareArtifacts(sortBy);
   if (groupBy === "all") {
-    const artifacts = [...rows].sort(bySize);
+    const artifacts = [...rows].sort(compare);
     if (artifacts.length === 0) return [];
     return [{
       key: "all",
@@ -40,7 +64,7 @@ export function groupDevArtifacts(rows: DevArtifact[], groupBy: DevGroupBy): Dev
       ? DEV_KIND_LABEL[key as DevArtifactKind]
       : (artifacts[0]?.projectName ?? "Unscoped"),
     size: artifacts.reduce((sum, a) => sum + a.size, 0),
-    artifacts: [...artifacts].sort(bySize),
+    artifacts: [...artifacts].sort(compare),
   })).sort((a, b) => b.size - a.size || a.label.localeCompare(b.label));
 }
 

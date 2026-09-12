@@ -15,7 +15,11 @@ The Dev list leads with project name and a relative tail. A stacked
 occupancy strip plus kind rail replaces the old kind chips. Not a
 treemap. Group by All is a flat size-sorted list; By kind and By
 project still bucket. The kind rail "All kinds" control filters
-types. It is not the All group mode.
+types. It is not the All group mode. When a visible tree has a
+since-last-scan delta, a Sort control offers Largest vs Largest
+increase. Missing deltas rank as 0. The control is hidden when this
+report has no change data. Increase sort applies to All and inside
+By kind / By project groups.
 
 ## 0.5.45 — 2026-09-11
 

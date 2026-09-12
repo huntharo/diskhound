@@ -12,11 +12,13 @@ import { formatScanRoot } from "../../shared/pathUtils";
 import { artifactHeadline, artifactTail } from "../lib/devArtifactDisplay";
 import {
   groupDevArtifacts,
+  hasDevChangeData,
   isUsefulDevReport,
   reportKey,
   resolveDevPaint,
   seedDevViewState,
   type DevGroupBy,
+  type DevSortBy,
 } from "../lib/devArtifactViewState";
 import { formatBytes, formatCount } from "../lib/format";
 import { nativeApi } from "../nativeApi";
@@ -76,6 +78,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     boot.startedAt ? Math.floor((Date.now() - boot.startedAt) / 1000) : 0
   ));
   const [groupBy, setGroupBy] = useState<DevGroupBy>("all");
+  const [sortBy, setSortBy] = useState<DevSortBy>("size");
   const [kindFilter, setKindFilter] = useState<DevArtifactKind | "all">("all");
   const [busyPaths, setBusyPaths] = useState<Set<string>>(() => new Set());
   const [trashed, setTrashed] = useState<Set<string>>(() => new Set());
@@ -264,7 +267,9 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
       .sort((a, b) => b.size - a.size);
   }, [remaining]);
 
-  const groups = useMemo(() => groupDevArtifacts(rows, groupBy), [rows, groupBy]);
+  const showIncreaseSort = useMemo(() => hasDevChangeData(rows), [rows]);
+  const listSort: DevSortBy = showIncreaseSort ? sortBy : "size";
+  const groups = useMemo(() => groupDevArtifacts(rows, groupBy, listSort), [rows, groupBy, listSort]);
 
   const selectedVisible = useMemo(
     () => rows.filter((a) => selected.has(a.path)),
@@ -609,6 +614,15 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
           <button className={`chip ${groupBy === "kind" ? "active" : ""}`} onClick={() => setGroupBy("kind")}>By kind</button>
           <button className={`chip ${groupBy === "project" ? "active" : ""}`} onClick={() => setGroupBy("project")}>By project</button>
         </div>
+        {showIncreaseSort && (
+          <>
+            <span className="dev-toolbar-label" id="dev-sort-by-label">Sort</span>
+            <div className="chip-group" role="radiogroup" aria-labelledby="dev-sort-by-label">
+              <button className={`chip ${sortBy === "size" ? "active" : ""}`} onClick={() => setSortBy("size")}>Largest</button>
+              <button className={`chip ${sortBy === "increase" ? "active" : ""}`} onClick={() => setSortBy("increase")}>Largest increase</button>
+            </div>
+          </>
+        )}
       </div>
 
       <div className="dev-list">

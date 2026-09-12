@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { DevArtifact, DevArtifactReport } from "../../../shared/contracts";
 import {
   groupDevArtifacts,
+  hasDevChangeData,
   isUsefulDevReport,
   resolveDevPaint,
   seedDevViewState,
@@ -144,5 +145,54 @@ describe("groupDevArtifacts", () => {
       "a",
       "b",
     ]);
+  });
+
+  it("Largest increase sorts visible deltas desc and treats missing as 0", () => {
+    const grew = tree({ path: "C:\\grew", size: 5, deltaBytes: 40, previousSize: 0 });
+    const grewLess = tree({ path: "C:\\grew-less", size: 80, deltaBytes: 10, previousSize: 70 });
+    const unchanged = tree({ path: "C:\\same", size: 50, deltaBytes: 0, previousSize: 50 });
+    const unknown = tree({ path: "C:\\unknown", size: 90, deltaBytes: null, previousSize: null });
+    const shrank = tree({ path: "C:\\shrank", size: 70, deltaBytes: -20, previousSize: 90 });
+
+    const all = groupDevArtifacts([unknown, shrank, grewLess, unchanged, grew], "all", "increase");
+    expect(all[0]?.artifacts.map((a) => a.path)).toEqual([
+      grew.path,
+      grewLess.path,
+      unknown.path,
+      unchanged.path,
+      shrank.path,
+    ]);
+
+    const byKind = groupDevArtifacts(
+      [
+        tree({ path: "C:\\nm-grew", kind: "node-modules", size: 4, deltaBytes: 3, previousSize: 1 }),
+        tree({ path: "C:\\nm-big", kind: "node-modules", size: 40, deltaBytes: 1, previousSize: 39 }),
+        tree({ path: "C:\\tgt", kind: "rust-target", size: 8, deltaBytes: 50, previousSize: 0 }),
+      ],
+      "kind",
+      "increase",
+    );
+    const nodeGroup = byKind.find((g) => g.key === "node-modules");
+    expect(nodeGroup?.artifacts.map((a) => a.path)).toEqual(["C:\\nm-grew", "C:\\nm-big"]);
+
+    const byProject = groupDevArtifacts(
+      [
+        tree({ path: "C:\\a\\small-grew", projectPath: "C:\\a", projectName: "a", size: 4, deltaBytes: 3, previousSize: 1 }),
+        tree({ path: "C:\\a\\big", projectPath: "C:\\a", projectName: "a", size: 40, deltaBytes: 1, previousSize: 39 }),
+      ],
+      "project",
+      "increase",
+    );
+    expect(byProject[0]?.artifacts.map((a) => a.path)).toEqual(["C:\\a\\small-grew", "C:\\a\\big"]);
+  });
+
+  it("hides change-sort when no visible row has a delta or previous size", () => {
+    expect(hasDevChangeData([node, rust, diag])).toBe(false);
+    expect(hasDevChangeData([
+      tree({ path: "C:\\x", size: 1, deltaBytes: 0, previousSize: 1 }),
+    ])).toBe(true);
+    expect(hasDevChangeData([
+      tree({ path: "C:\\y", size: 1, previousSize: 2 }),
+    ])).toBe(true);
   });
 });
