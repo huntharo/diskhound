@@ -193,6 +193,7 @@ const api: DiskhoundNativeApi = {
 
   // Tray
   minimizeToTray: () => ipcRenderer.send("diskhound:minimize-to-tray"),
+  quitApp: () => ipcRenderer.send("diskhound:quit-app"),
 
   // Events
   onScanSnapshot: (listener) => {

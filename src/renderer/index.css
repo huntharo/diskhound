@@ -8990,9 +8990,79 @@ body.system-widget-body #app {
   cursor: not-allowed;
 }
 .dev-toolbar .chip:focus-visible,
-.dev-kind-cell:focus-visible {
+.dev-kind-cell:focus-visible,
+.dev-select-bar-delete:focus-visible,
+.dev-select-bar-ghost:focus-visible,
+.dev-select-bar-quiet:focus-visible {
   outline: 2px solid var(--amber);
   outline-offset: 2px;
+}
+.dev-select-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+.dev-select-bar.is-active {
+  background: rgba(245, 158, 11, 0.1);
+  border-bottom-color: rgba(245, 158, 11, 0.28);
+}
+.dev-select-bar-tally {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--amber);
+}
+.dev-select-bar-delete {
+  height: 24px;
+  padding: 0 11px;
+  border: 1px solid var(--amber);
+  border-radius: 999px;
+  background: var(--amber);
+  color: var(--black);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.dev-select-bar-delete:hover:not(:disabled) {
+  background: #fbbf24;
+  border-color: #fbbf24;
+}
+.dev-select-bar-delete:disabled,
+.dev-select-bar-ghost:disabled,
+.dev-select-bar-quiet:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.dev-select-bar-ghost,
+.dev-select-bar-quiet {
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid color-mix(in srgb, var(--text-secondary) 42%, transparent);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.dev-select-bar-ghost:hover:not(:disabled),
+.dev-select-bar-quiet:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--bg-row-hover);
+  border-color: color-mix(in srgb, var(--text) 28%, transparent);
+}
+.dev-select-bar-quiet {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+.dev-select-bar-spacer {
+  flex: 1;
 }
 .dev-tape {
   min-width: 0;
@@ -9240,7 +9310,10 @@ body.system-widget-body #app {
   .dev-spectrum-seg,
   .dev-kind-cell-fill,
   .dev-toolbar .chip,
-  .dev-kind-cell {
+  .dev-kind-cell,
+  .dev-select-bar-delete,
+  .dev-select-bar-ghost,
+  .dev-select-bar-quiet {
     transition: none;
   }
 }
@@ -9292,5 +9365,6 @@ body.system-widget-body #app {
   .dev-row { grid-template-columns: auto auto 1fr; }
   .metric-dev-tile { margin-left: 0; }
   .dev-summary-actions { margin-left: 0; }
+  .dev-select-bar { padding-left: 12px; padding-right: 12px; }
 }
 

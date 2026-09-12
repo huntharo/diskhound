@@ -1273,6 +1273,8 @@ export interface DiskhoundNativeApi {
 
   // Tray
   minimizeToTray: () => void;
+  /** Quit the process. Does not hide to tray. Bound to Ctrl/Cmd+Q. */
+  quitApp: () => void;
 
   // Events
   onScanSnapshot: (listener: (snapshot: ScanSnapshot) => void) => () => void;

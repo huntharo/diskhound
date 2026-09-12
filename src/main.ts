@@ -17,6 +17,7 @@ import {
   powerMonitor,
   shell,
   Tray,
+  type MenuItemConstructorOptions,
 } from "electron";
 import {
   createIdleScanSnapshot,
@@ -227,6 +228,11 @@ let windowStateStore: WindowStateStore | null = null;
 let widgetWindowStateStore: WindowStateStore | null = null;
 // Track whether the user explicitly quit (vs. close-to-tray)
 let isQuitting = false;
+
+function quitDiskHound(): void {
+  isQuitting = true;
+  app.quit();
+}
 /** Second instance arrived before createWindow finished. */
 let pendingSecondInstanceFocus = false;
 /** Filled after createWindow is defined inside whenReady. */
@@ -3758,6 +3764,10 @@ void (async () => {
     mainWindow?.hide();
   });
 
+  ipcMain.on("diskhound:quit-app", () => {
+    quitDiskHound();
+  });
+
   // ── Login Item Settings ───────────────────────────────────
 
   function applyLoginItemSettings(enabled: boolean) {
@@ -4050,6 +4060,43 @@ void (async () => {
     return true;
   };
 
+  // ── Application menu ──────────────────────────────────────
+  // Hidden title bar on Windows/Linux hides File/Edit chrome, but the
+  // menu still owns accelerators. Ctrl/Cmd+Q must quit — not hide to
+  // tray via window close.
+
+  const installApplicationMenu = () => {
+    const quitItem: MenuItemConstructorOptions = {
+      label: "Quit DiskHound",
+      accelerator: "CommandOrControl+Q",
+      click: () => {
+        quitDiskHound();
+      },
+    };
+    const template: MenuItemConstructorOptions[] = process.platform === "darwin"
+      ? [
+          {
+            label: app.name,
+            submenu: [
+              { role: "about" },
+              { type: "separator" },
+              { role: "hide" },
+              { role: "hideOthers" },
+              { role: "unhide" },
+              { type: "separator" },
+              quitItem,
+            ],
+          },
+          { role: "fileMenu" },
+          { role: "editMenu" },
+        ]
+      : [
+          { label: "File", submenu: [quitItem] },
+          { role: "editMenu" },
+        ];
+    Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  };
+
   // ── System Tray ───────────────────────────────────────────
 
   const createTray = () => {
@@ -4084,9 +4131,9 @@ void (async () => {
       { type: "separator" },
       {
         label: "Quit",
+        accelerator: "CommandOrControl+Q",
         click: () => {
-          isQuitting = true;
-          app.quit();
+          quitDiskHound();
         },
       },
     ]);
@@ -4338,6 +4385,11 @@ void (async () => {
 
     await loadRenderer(mainWindow, "app");
 
+    if (process.platform !== "darwin") {
+      mainWindow.setMenuBarVisibility(false);
+      mainWindow.setAutoHideMenuBar(true);
+    }
+
     if (isDevelopment) {
       mainWindow.webContents.openDevTools({ mode: "detach" });
     }
@@ -4367,6 +4419,8 @@ void (async () => {
     await settingsStore.set(normalizedSettings);
     settings = normalizedSettings;
   }
+
+  installApplicationMenu();
 
   // Only create tray if minimizeToTray is explicitly enabled
   if (settings.general.minimizeToTray) {

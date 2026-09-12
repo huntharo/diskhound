@@ -31,6 +31,7 @@ const GROUPS: ShortcutGroup[] = [
     title: "Search & actions",
     items: [
       { keys: ["Ctrl", "F"], desc: "Search the scan index" },
+      { keys: ["Ctrl", "Q"], desc: "Quit DiskHound" },
       { keys: ["?"], desc: "Show this help" },
       { keys: ["Esc"], desc: "Close dialogs / clear search" },
     ],

@@ -670,6 +670,11 @@ export function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.metaKey) {
+        if (!e.shiftKey && !e.altKey && e.key.toLowerCase() === "q") {
+          e.preventDefault();
+          nativeApi.quitApp();
+          return;
+        }
         if (e.shiftKey && e.key.toLowerCase() === "w") {
           e.preventDefault();
           void nativeApi.openSystemWidget();

@@ -392,6 +392,10 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     });
   };
 
+  const clearSelection = () => {
+    setSelected(new Set());
+  };
+
   const deleteMany = async (paths: string[], label: string) => {
     if (paths.length === 0 || !root) return;
     const targets = remaining.filter((artifact) => paths.includes(artifact.path));
@@ -674,35 +678,6 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
         <div className="dev-summary-actions">
           <button
             className="action-btn"
-            disabled={rows.length === 0 || bulkBusy}
-            onClick={toggleVisible}
-          >
-            {allVisibleSelected ? "Clear selection" : "Select visible"}
-          </button>
-          <button
-            className="action-btn warn"
-            disabled={selectedVisible.length === 0 || bulkBusy}
-            title="Permanently delete selected trees. Cannot be undone. Not Recycle Bin."
-            onClick={() => void deleteMany(selectedVisible.map((a) => a.path), "Delete selected trees permanently?")}
-          >
-            {bulkBusy && deleteProgress
-              ? `Deleting ${formatBytes(inFlightDeleteBytes(deleteProgress.deletedBytes, deleteProgress.size))}…`
-              : selectedVisible.length > 0
-              ? `Delete selected (${formatCount(selectedVisible.length)} · ${formatBytes(selectedBytes)})`
-              : "Delete selected"}
-          </button>
-          <button
-            className="action-btn danger"
-            disabled={remaining.length === 0 || bulkBusy}
-            title="Permanently delete every listed tree. Cannot be undone. Not Recycle Bin."
-            onClick={() => void deleteMany(remaining.map((a) => a.path), "Delete all listed developer trees permanently?")}
-          >
-            {bulkBusy && deleteProgress
-              ? `Deleting ${formatBytes(inFlightDeleteBytes(deleteProgress.deletedBytes, deleteProgress.size))}…`
-              : "Delete all"}
-          </button>
-          <button
-            className="action-btn"
             disabled={bulkBusy || rescanning}
             onClick={() => void rescan()}
             title="Re-walk known artifact trees on disk. Does not scan the whole drive."
@@ -820,6 +795,67 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
               </button>
             </div>
           </div>
+        )}
+      </div>
+
+      <div
+        className={`dev-select-bar ${selectedVisible.length > 0 ? "is-active" : ""}`}
+        role="toolbar"
+        aria-label={selectedVisible.length > 0 ? "Selected trees" : "Tree selection"}
+      >
+        {selectedVisible.length > 0 ? (
+          <>
+            <span className="dev-select-bar-tally">
+              {formatCount(selectedVisible.length)} · {formatBytes(selectedBytes)}
+            </span>
+            <button
+              type="button"
+              className="dev-select-bar-delete"
+              disabled={bulkBusy}
+              title="Permanently delete selected trees. Cannot be undone. Not Recycle Bin."
+              onClick={() => void deleteMany(selectedVisible.map((a) => a.path), "Delete selected trees permanently?")}
+            >
+              Delete selected
+            </button>
+            <button
+              type="button"
+              className="dev-select-bar-ghost"
+              disabled={bulkBusy}
+              onClick={clearSelection}
+            >
+              Clear
+            </button>
+            <span className="dev-select-bar-spacer" />
+            <button
+              type="button"
+              className="dev-select-bar-ghost"
+              disabled={rows.length === 0 || bulkBusy}
+              onClick={toggleVisible}
+            >
+              {allVisibleSelected ? "Clear visible" : "Select visible"}
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              type="button"
+              className="dev-select-bar-ghost"
+              disabled={rows.length === 0 || bulkBusy}
+              onClick={toggleVisible}
+            >
+              Select visible
+            </button>
+            <span className="dev-select-bar-spacer" />
+            <button
+              type="button"
+              className="dev-select-bar-quiet"
+              disabled={remaining.length === 0 || bulkBusy}
+              title="Permanently delete every listed tree. Cannot be undone. Not Recycle Bin."
+              onClick={() => void deleteMany(remaining.map((a) => a.path), "Delete all listed developer trees permanently?")}
+            >
+              Delete all
+            </button>
+          </>
         )}
       </div>
 
