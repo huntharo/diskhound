@@ -40,6 +40,11 @@ asar: true
 # resolution logic.
 asarUnpack:
   - "node_modules/blake2/**/*"
+  # Worker threads cannot execute scripts inside app.asar. Unpack the
+  # scan workers so classify / rescan / folder-tree / full-diff / delete
+  # spawn. Workers are bundled with codeSplitting: false so they do not
+  # require sibling chunks that would stay inside the asar.
+  - "dist-electron/scan/**"
 compression: maximum
 
 publish:
@@ -57,9 +62,8 @@ win:
   artifactName: "${productName}-Setup.${ext}"
 
 nsis:
-  # Per-user install (no UAC needed). This matters for runAfterFinish:
-  # the finish-page launch only works reliably when the installer isn't
-  # elevated, because an elevated installer can't launch an unelevated child.
+  # Per-user, no UAC. Finish-page "Run" is implemented in build/installer.nsh
+  # because electron-builder's ExecShellAsUser no-ops from an unelevated installer.
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
@@ -69,6 +73,7 @@ nsis:
   createStartMenuShortcut: true
   shortcutName: DiskHound
   runAfterFinish: true
+  include: installer.nsh
 
 mac:
   # Single universal .dmg containing native code for both Apple

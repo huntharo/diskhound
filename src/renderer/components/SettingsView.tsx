@@ -92,7 +92,7 @@ export function SettingsView() {
         />
         <ToggleRow
           label="Minimize to tray"
-          desc="Keep DiskHound running in the system tray when closed"
+          desc="Keep DiskHound running in the tray when the window is closed. Launching DiskHound again brings the existing window forward. Quit from the tray menu to exit."
           value={settings.general.minimizeToTray}
           onChange={(v) => void save({
             ...settings,
@@ -105,7 +105,7 @@ export function SettingsView() {
         />
         <ToggleRow
           label="Launch on startup"
-          desc="Start DiskHound when you log in to your computer"
+          desc="Start DiskHound when you log in. Off by default so a fresh install doesn't surprise you."
           value={settings.general.launchOnStartup}
           onChange={(v) => void save({ ...settings, general: { ...settings.general, launchOnStartup: v } })}
         />
@@ -231,7 +231,7 @@ export function SettingsView() {
           value={settings.monitoring.fullScanIntervalMinutes}
           min={0}
           max={30 * 24 * 60}
-          desc="How often to rescan the default path. Set 0 to disable. Fresh scans populate the Changes tab."
+          desc="How often to rescan the default path. Set 0 to disable. Default is 6 hours — frequent enough for Changes without walking the drive all day."
           onChange={(v) => void save({ ...settings, monitoring: { ...settings.monitoring, fullScanIntervalMinutes: v } })}
         />
         <ToggleRow

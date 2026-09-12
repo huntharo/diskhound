@@ -17,6 +17,7 @@ import {
   powerMonitor,
   shell,
   Tray,
+  type MenuItemConstructorOptions,
 } from "electron";
 import {
   createIdleScanSnapshot,
@@ -24,16 +25,20 @@ import {
   normalizeAppSettings,
   type AffinityRule,
   type AppSettings,
-  type DirectoryHotspot,
+  type DevArtifactReport,
   type DiskIoSnapshot,
   type FullDiffStatus,
   type FullDiffResult,
   type NavigateViewPayload,
   type PathActionResult,
+  type PermanentDeleteProgress,
   type ScanEngine,
   type ScanFileRecord,
   type ScanOptions,
   type ScanSnapshot,
+  ALLOCATED_SIZE_SEMANTICS,
+  indexUsesAllocatedSize,
+  sizeSemanticsCompatible,
   type SystemMemorySnapshot,
   type ToastMessage,
   type UpdateChannel,
@@ -61,6 +66,11 @@ import {
   setEasyMoveProgress,
   verifyEasyMoves,
 } from "./shared/easyMoveStore";
+import { classifyPermanentDeleteError, isEnoentFsError, tryPermanentDelete } from "./shared/permanentDelete";
+import {
+  resolveBundledPermanentDeleteWorkerPath,
+  runPermanentDeleteWorker,
+} from "./shared/permanentDeleteWorkerRuntime";
 import {
   clearAllHistory,
   consumeLastPrunedIds,
@@ -75,9 +85,11 @@ import {
 import { computeDiff } from "./shared/scanDiff";
 import {
   deleteIndex,
+  devArtifactsSidecarPath,
   folderTreeSidecarPath,
   indexFilePath,
   initScanIndex,
+  listPendingDevArtifactSidecars,
 } from "./shared/scanIndex";
 import {
   runDuplicateScan,
@@ -90,9 +102,8 @@ import { normPath } from "./shared/pathUtils";
 import {
   findExcludedFolderActionBlocker,
   isHiddenExcludedPath,
-  isPathExcluded,
 } from "./shared/pathProtection";
-import { analyzeForCleanup } from "./shared/suggestions";
+
 import { killProcess as killProcessImpl, sampleSystemMemory } from "./shared/processMonitor";
 import {
   computeFullDiffFromIndexFiles,
@@ -103,6 +114,21 @@ import {
   resolveBundledFolderTreeWorkerPath,
   runFolderTreeWorker,
 } from "./shared/folderTreeWorkerRuntime";
+import { parseFolderTreeSidecarLine } from "./shared/folderTreeSidecarParse";
+import {
+  dropSidecarRoots,
+  loadDevArtifactReport,
+  readDevArtifactSidecar,
+  reportFromSidecar,
+  sidecarFromReport,
+  writeDevArtifactSidecar,
+} from "./shared/devArtifactSidecar";
+import { dropArtifactsFromReport } from "./shared/devArtifacts";
+import {
+  resolveBundledDevArtifactsWorkerPath,
+  runDevArtifactsClassifyWorker,
+  runDevArtifactsRescanWorker,
+} from "./shared/devArtifactsWorkerRuntime";
 import {
   deleteFullDiffCachesForScan,
   hasFullDiffCache,
@@ -120,6 +146,9 @@ import {
 } from "./usnMonitor";
 import { setCursor, volumeForPath } from "./shared/usnCursorStore";
 import { resolveNativeScannerBinary } from "./nativeScanner";
+import { initNativeProcessSample } from "./nativeProcessSample";
+import { searchIndexFile } from "./shared/scanIndex";
+import { analyzeCleanupFromIndex } from "./shared/suggestions";
 import { createNativeScannerSession, type NativeScannerSession } from "./nativeScanner";
 import * as elevationModule from "./elevation";
 
@@ -128,6 +157,8 @@ const DISK_DELTA_CHANNEL = "diskhound:disk-delta";
 const NOTIFICATION_CHANNEL = "diskhound:notification";
 const DUPLICATE_PROGRESS_CHANNEL = "diskhound:duplicate-progress";
 const DUPLICATE_RESULT_CHANNEL = "diskhound:duplicate-result";
+const DEV_ARTIFACTS_PROGRESS_CHANNEL = "diskhound:dev-artifacts-progress";
+const PERMANENT_DELETE_PROGRESS_CHANNEL = "diskhound:permanent-delete-progress";
 /** Broadcast from main to every renderer window after settings
  *  are persisted. Replaces the widget's prior 12 s poll — see the
  *  `settingsStore.subscribe` wiring in whenReady. */
@@ -145,6 +176,8 @@ const rendererEntryFile = Path.join(projectRoot, "dist-renderer", "index.html");
 const scanWorkerEntry = Path.join(__dirname, "scan", "scanWorker.cjs");
 const fullDiffWorkerEntry = resolveBundledFullDiffWorkerPath(__dirname);
 const folderTreeWorkerEntry = resolveBundledFolderTreeWorkerPath(__dirname);
+const devArtifactsWorkerEntry = resolveBundledDevArtifactsWorkerPath(__dirname);
+const permanentDeleteWorkerEntry = resolveBundledPermanentDeleteWorkerPath(__dirname);
 const RELEASES_URL = "https://github.com/tzarebczan/diskhound/releases";
 
 type WorkerScanSession = {
@@ -154,6 +187,7 @@ type WorkerScanSession = {
   stop: () => Promise<void>;
   tempIndexPath?: string;
   tempFolderTreePath?: string;
+  tempDevArtifactsPath?: string;
   rootPath: string;
 };
 
@@ -165,6 +199,7 @@ type ActiveScanSession = (WorkerScanSession | NativeScannerSession) & {
    *  run. Renamed to `folderTreeSidecarPath(historyId)` on success so
    *  the Folders-tab loader can skip the multi-minute NDJSON re-parse. */
   tempFolderTreePath?: string;
+  tempDevArtifactsPath?: string;
   /** The scan root this session is working on. Used as the activeScans
    *  Map key so concurrent scans on different drives stay isolated. */
   rootPath: string;
@@ -193,6 +228,34 @@ let windowStateStore: WindowStateStore | null = null;
 let widgetWindowStateStore: WindowStateStore | null = null;
 // Track whether the user explicitly quit (vs. close-to-tray)
 let isQuitting = false;
+
+function quitDiskHound(): void {
+  isQuitting = true;
+  app.quit();
+}
+/** Second instance arrived before createWindow finished. */
+let pendingSecondInstanceFocus = false;
+/** Filled after createWindow is defined inside whenReady. */
+let createMainWindowFn: (() => Promise<void>) | null = null;
+/** In-flight createWindow so second-instance / activate cannot spawn a duplicate. */
+let creatingWindow: Promise<void> | null = null;
+
+async function ensureMainWindow(): Promise<void> {
+  if (mainWindow && !mainWindow.isDestroyed()) return;
+  if (creatingWindow) {
+    await creatingWindow;
+    return;
+  }
+  const create = createMainWindowFn;
+  if (!create) return;
+  const pending = create();
+  creatingWindow = pending;
+  try {
+    await pending;
+  } finally {
+    if (creatingWindow === pending) creatingWindow = null;
+  }
+}
 
 app.commandLine.appendSwitch("enable-gpu-rasterization");
 app.commandLine.appendSwitch("enable-oop-rasterization");
@@ -416,6 +479,34 @@ function writeStartupLog(message: string): void {
   writeCrashLog("startup", message);
 }
 
+/** Native writes the Dev sidecar before Done. Rename pending → history
+ *  id before the UI can open Dev. Brief retry covers a flush race. */
+async function adoptTempDevSidecar(tempPath: string, destPath: string): Promise<void> {
+  const deadline = Date.now() + 4_000;
+  while (Date.now() < deadline) {
+    try {
+      await FS.access(tempPath);
+      await FS.rename(tempPath, destPath);
+      writeCrashLog(
+        "dev-artifacts-sidecar",
+        `renamed ${Path.basename(tempPath)} -> ${Path.basename(destPath)}`,
+      );
+      return;
+    } catch {
+      try {
+        await FS.access(destPath);
+        return;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+  }
+  writeCrashLog(
+    "dev-artifacts-sidecar",
+    `rename missed ${Path.basename(tempPath)}; Dev open will adopt a matching pending sidecar`,
+  );
+}
+
 // Errors codes that we treat as "routine, not user-actionable":
 // the file vanished, was locked, or we lacked permission to read it.
 // These happen all the time on a live filesystem (Brave deleting
@@ -520,13 +611,78 @@ const singleInstanceRelaunchedAsAdmin = process.argv.includes("--relaunched-as-a
 const WINDOWS_LOCK_RETRY_MS = 5_000; // 20 × 250 ms polls
 const NORMAL_LOCK_RETRY_MS = 1_500; //  6 × 250 ms polls — covers brief races without blocking duplicate-launch UX
 
+function bringWindowToFront(win: BrowserWindow): void {
+  if (win.isDestroyed()) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.moveTop();
+  win.focus();
+  if (process.platform === "win32") {
+    app.focus({ steal: true });
+    win.setAlwaysOnTop(true);
+    win.setAlwaysOnTop(false);
+  }
+}
+
+function focusOrShowMainWindow(): void {
+  pendingSecondInstanceFocus = true;
+  const win = mainWindow;
+  if (win && !win.isDestroyed()) {
+    bringWindowToFront(win);
+    return;
+  }
+  void ensureMainWindow()
+    .then(() => {
+      if (!pendingSecondInstanceFocus) return;
+      const created = mainWindow;
+      if (!created || created.isDestroyed()) return;
+      pendingSecondInstanceFocus = false;
+      bringWindowToFront(created);
+    })
+    .catch((err: unknown) => {
+      writeStartupLog(
+        `ensureMainWindow failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+}
+
+function hideMainWindow(): void {
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) return;
+  win.hide();
+}
+
+function showMainWindowIfPresent(): void {
+  const win = mainWindow;
+  if (!win || win.isDestroyed()) return;
+  bringWindowToFront(win);
+}
+
 function registerSecondInstanceHandler(): void {
   app.on(SECOND_INSTANCE_FOCUS_EVENT, () => {
-    if (!mainWindow) return;
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    if (!mainWindow.isVisible()) mainWindow.show();
-    mainWindow.focus();
+    writeStartupLog("second-instance: focusing existing window");
+    focusOrShowMainWindow();
   });
+}
+
+function showCloseToTrayHint(): void {
+  const settings = settingsStore?.get();
+  if (!settings || settings.general.hasShownCloseToTrayHint) return;
+
+  const title = "DiskHound is still running";
+  const body =
+    "The window was hidden to the tray. Launch DiskHound again or click the tray icon to bring it back. Choose Quit in the tray menu to exit.";
+
+  if (process.platform === "win32" && tray) {
+    tray.displayBalloon({ iconType: "info", title, content: body });
+  } else if (Notification.isSupported()) {
+    new Notification({ title, body }).show();
+  }
+
+  void settingsStore?.update((current) => ({
+    ...current,
+    general: { ...current.general, hasShownCloseToTrayHint: true },
+  }));
 }
 
 async function acquireSingleInstanceLockOrExit(): Promise<void> {
@@ -570,12 +726,16 @@ async function acquireSingleInstanceLockOrExit(): Promise<void> {
   process.exit(0);
 }
 
-void app.whenReady().then(async () => {
-  writeStartupLog("whenReady fired");
+if (process.platform === "win32") {
+  app.setAppUserModelId("com.diskhound.app");
+}
+
+void (async () => {
+  writeStartupLog("acquiring single-instance lock");
   await acquireSingleInstanceLockOrExit();
-  if (process.platform === "win32") {
-    app.setAppUserModelId("com.diskhound.app");
-  }
+  await app.whenReady();
+  writeStartupLog("whenReady fired");
+  initNativeProcessSample(projectRoot);
 
   if (process.platform === "linux") {
     // First-run (and every-run, idempotently) XDG desktop integration:
@@ -618,10 +778,15 @@ void app.whenReady().then(async () => {
     // know not to relaunch AGAIN).
     const launchedByTask = process.argv.includes("--launched-by-task");
     const relaunchedAsAdmin = process.argv.includes("--relaunched-as-admin");
+    const launchedFromInstaller = process.argv.includes("--launched-from-installer");
+    const launchedAfterUpdate = process.argv.includes("--updated");
     writeStartupLog(
-      `elevation-probe: argv flags launchedByTask=${launchedByTask} relaunchedAsAdmin=${relaunchedAsAdmin} pid=${process.pid}`,
+      `elevation-probe: argv flags launchedByTask=${launchedByTask} relaunchedAsAdmin=${relaunchedAsAdmin} launchedFromInstaller=${launchedFromInstaller} launchedAfterUpdate=${launchedAfterUpdate} pid=${process.pid}`,
     );
-    if (!launchedByTask) {
+    // Installer/update "run the app" must not hand off to the scheduled
+    // task: that quits this process and the elevated sibling often never
+    // surfaces (stale task path, window behind the installer, lock race).
+    if (!launchedByTask && !launchedFromInstaller && !launchedAfterUpdate) {
       try {
         const [elevated, taskRegistered] = await Promise.all([
           elevationModule.isElevated(),
@@ -873,6 +1038,11 @@ void app.whenReady().then(async () => {
     if (!session.active) return;
 
     if (message.type === "progress" || message.type === "done") {
+      const engine = message.snapshot.engine;
+      message.snapshot.sizeSemantics =
+        engine === "js-worker" && process.platform === "win32"
+          ? "logical"
+          : ALLOCATED_SIZE_SEMANTICS;
       if (message.type === "done") {
         // Persist history before notifying the renderer so immediate diff
         // lookups can see the just-finished scan.
@@ -893,6 +1063,12 @@ void app.whenReady().then(async () => {
             // etc.). The legacy streaming worker path will handle the
             // Folders tab — slower but correct.
           }
+        }
+        if (historyId && session.tempDevArtifactsPath) {
+          await adoptTempDevSidecar(
+            session.tempDevArtifactsPath,
+            devArtifactsSidecarPath(historyId),
+          );
         }
 
         // Rename the temp index file to match the history entry ID
@@ -1030,7 +1206,7 @@ void app.whenReady().then(async () => {
 
         if (session.trigger === "scheduled" && settings?.notifications.deltaAlerts && message.snapshot.rootPath) {
           const latestPair = getLatestPair(message.snapshot.rootPath);
-          if (latestPair) {
+          if (latestPair && sizeSemanticsCompatible(latestPair.baseline, latestPair.current)) {
             const [baseline, current] = await Promise.all([
               loadHistoricalSnapshot(latestPair.baseline.id),
               loadHistoricalSnapshot(latestPair.current.id),
@@ -1080,6 +1256,9 @@ void app.whenReady().then(async () => {
     if (session.tempFolderTreePath) {
       try { await FS.unlink(session.tempFolderTreePath); } catch { /* already gone */ }
     }
+    if (session.tempDevArtifactsPath) {
+      try { await FS.unlink(session.tempDevArtifactsPath); } catch { /* already gone */ }
+    }
 
     // If the native scanner failed to launch (ENOENT, EACCES), silently
     // fall back to the JS worker so the user still gets a scan.
@@ -1116,6 +1295,7 @@ void app.whenReady().then(async () => {
   const resolveBaselineIndexFor = (rootPath: string): string | undefined => {
     const history = getScanHistory(rootPath);
     for (const entry of history) {
+      if (!indexUsesAllocatedSize(entry)) continue;
       const candidate = indexFilePath(entry.id);
       try {
         if (FS_SYNC.existsSync(candidate)) return candidate;
@@ -1131,14 +1311,21 @@ void app.whenReady().then(async () => {
   ): { session: WorkerScanSession; startingSnapshot: ScanSnapshot } => {
     const worker = new Worker(scanWorkerEntry);
     const startingSnapshot = buildRunningSnapshot(rootPath, scanOptions, "js-worker");
-    const tempIndexPath = indexFilePath(`pending-${randomUUID()}`);
-    const baselineIndex = resolveBaselineIndexFor(rootPath);
+    const pendingId = `pending-${randomUUID()}`;
+    const tempIndexPath = indexFilePath(pendingId);
+    const tempDevArtifactsPath = devArtifactsSidecarPath(pendingId);
+    // Windows JS-worker occupancy is logical `stat.size`. An allocated MFT
+    // baseline would mix size semantics and drop `h:1` on inherit.
+    const baselineIndex = process.platform === "win32"
+      ? undefined
+      : resolveBaselineIndexFor(rootPath);
 
     const session: WorkerScanSession = {
       kind: "worker",
       active: true,
       trigger,
       tempIndexPath,
+      tempDevArtifactsPath,
       rootPath,
       stop: async () => {
         // Ask the worker to stop gracefully first
@@ -1170,6 +1357,7 @@ void app.whenReady().then(async () => {
         options: scanOptions,
         indexOutput: tempIndexPath,
         baselineIndex,
+        devArtifactsOutput: tempDevArtifactsPath,
       },
     });
 
@@ -1187,6 +1375,7 @@ void app.whenReady().then(async () => {
     // Sidecar's temp path shares the pending UUID so we can rename
     // both atomically on scan-complete to match the final history ID.
     const tempFolderTreePath = folderTreeSidecarPath(pendingScanId);
+    const tempDevArtifactsPath = devArtifactsSidecarPath(pendingScanId);
     const baselineIndex = resolveBaselineIndexFor(rootPath);
 
     // Buffer for messages that arrive before the session is fully wired
@@ -1202,6 +1391,7 @@ void app.whenReady().then(async () => {
         indexOutput: tempIndexPath,
         baselineIndex,
         folderTreeOutput: tempFolderTreePath,
+        devArtifactsOutput: tempDevArtifactsPath,
       },
       {
         onMessage: (message) => {
@@ -1250,6 +1440,7 @@ void app.whenReady().then(async () => {
         trigger,
         tempIndexPath,
         tempFolderTreePath,
+        tempDevArtifactsPath,
         rootPath,
       }) as ActiveScanSession;
 
@@ -1302,6 +1493,9 @@ void app.whenReady().then(async () => {
     }
     if (session.tempFolderTreePath) {
       try { await FS.unlink(session.tempFolderTreePath); } catch { /* already gone */ }
+    }
+    if (session.tempDevArtifactsPath) {
+      try { await FS.unlink(session.tempDevArtifactsPath); } catch { /* already gone */ }
     }
   };
 
@@ -1909,24 +2103,102 @@ void app.whenReady().then(async () => {
       if (result) throw new Error(result);
     }),
   );
-  ipcMain.handle("diskhound:trash-path", (_event, targetPath: string) => {
+  ipcMain.handle("diskhound:trash-path", async (_event, targetPath: string) => {
     const blocked = protectedPathBlock(targetPath, "Trash");
-    if (blocked) return blocked;
-    return pathAction("Moved to trash.", async () => {
-      await shell.trashItem(targetPath);
-    });
+    if (blocked) {
+      writeCrashLog("trash", `blocked path=${targetPath} ${blocked.message}`);
+      return blocked;
+    }
+    const resolved = Path.resolve(targetPath);
+    try {
+      await FS.lstat(resolved);
+    } catch {
+      writeCrashLog("trash", `missing path=${resolved}`);
+      return { ok: false, message: "Nothing at this path to move to the Recycle Bin." };
+    }
+    try {
+      await shell.trashItem(resolved);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      writeCrashLog("trash", `failed path=${resolved} ${message}`);
+      return { ok: false, message };
+    }
+    try {
+      await FS.lstat(resolved);
+      writeCrashLog("trash", `noop path=${resolved} still on disk after Recycle Bin`);
+      return {
+        ok: false,
+        message: "The Recycle Bin did not take this folder — it is still on disk.",
+      };
+    } catch {
+      writeCrashLog("trash", `ok path=${resolved}`);
+      return { ok: true, message: "Moved to trash." };
+    }
   });
-  ipcMain.handle("diskhound:permanent-delete-path", (_event, targetPath: string) => {
+  ipcMain.handle("diskhound:permanent-delete-path", async (_event, targetPath: string) => {
     const blocked = protectedPathBlock(targetPath, "Delete");
-    if (blocked) return blocked;
-    return pathAction("Permanently deleted.", async () => {
-      const stat = await FS.lstat(targetPath);
-      await FS.rm(targetPath, {
-        recursive: stat.isDirectory(),
-        force: false,
-        maxRetries: 2,
-      });
-    });
+    if (blocked) {
+      writeCrashLog("delete", `blocked path=${targetPath} ${blocked.message}`);
+      return blocked;
+    }
+    const elevated = await elevationModule.isElevated();
+    const resolved = Path.resolve(targetPath);
+    const onProgress = (progress: PermanentDeleteProgress) => {
+      mainWindow?.webContents.send(PERMANENT_DELETE_PROGRESS_CHANNEL, progress);
+    };
+    let result: PathActionResult;
+    try {
+      const stat = await FS.lstat(resolved);
+      if (stat.isDirectory() && !stat.isSymbolicLink()) {
+        await runPermanentDeleteWorker(resolved, {
+          workerPath: permanentDeleteWorkerEntry,
+          onProgress,
+        });
+        result = { ok: true, message: "Permanently deleted." };
+      } else {
+        result = await tryPermanentDelete(resolved, elevated, onProgress);
+      }
+    } catch (error) {
+      if (isEnoentFsError(error)) {
+        result = { ok: true, message: "Permanently deleted." };
+      } else {
+        result = classifyPermanentDeleteError(error, elevated, resolved);
+      }
+    }
+    writeCrashLog(
+      "delete",
+      `${result.ok ? "ok" : result.requiresElevation ? "needs-admin" : "fail"} path=${resolved} ${result.message}`,
+    );
+    return result;
+  });
+  ipcMain.handle("diskhound:permanent-delete-path-elevated", async (_event, targetPath: string) => {
+    const blocked = protectedPathBlock(targetPath, "Delete");
+    if (blocked) {
+      writeCrashLog("delete", `blocked-elevated path=${targetPath} ${blocked.message}`);
+      return blocked;
+    }
+    const resolved = Path.resolve(targetPath);
+    const res = await elevationModule.runElevatedPermanentDelete(resolved);
+    if (!res.ok) {
+      writeCrashLog("delete", `elevated-fail path=${resolved} ${res.message ?? ""}`);
+      return {
+        ok: false,
+        message: res.cancelled
+          ? "Cancelled — nothing was deleted."
+          : `Elevated delete failed: ${res.message ?? "unknown error"}`,
+      };
+    }
+    try {
+      await FS.lstat(resolved);
+      writeCrashLog("delete", `elevated-noop path=${Path.resolve(targetPath)} still on disk`);
+      return {
+        ok: false,
+        message: "The folder is still on disk after the elevated delete.",
+      };
+    } catch {
+      writeCrashLog("delete", `elevated-ok path=${Path.resolve(targetPath)}`);
+      return { ok: true, message: "Permanently deleted." };
+    }
   });
 
   // ── IPC: Crash logs ───────────────────────────────────────
@@ -2543,24 +2815,12 @@ void app.whenReady().then(async () => {
       for await (const line of rl) {
         if (!line) continue;
         linesRead++;
-        let rec: {
-          k?: string;
-          d?: [string, number, number][];
-          f?: [string, number, number][];
-        };
-        try { rec = JSON.parse(line); } catch { parseFailures++; continue; }
-        if (typeof rec.k !== "string") continue;
-        const dirs = Array.isArray(rec.d)
-          ? rec.d
-              .filter((row) => Array.isArray(row) && row.length >= 3)
-              .map(([path, size, fileCount]) => ({ path, size, fileCount }))
-          : [];
-        const files = Array.isArray(rec.f)
-          ? rec.f
-              .filter((row) => Array.isArray(row) && row.length >= 3)
-              .map(([name, size, modifiedAt]) => ({ name, size, modifiedAt }))
-          : [];
-        tree.set(rec.k, { dirs, files });
+        const parsed = parseFolderTreeSidecarLine(line);
+        if (!parsed) { parseFailures++; continue; }
+        tree.set(parsed.key, { dirs: parsed.dirs, files: parsed.files });
+        if (linesRead % 4_000 === 0) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
       }
       // Log success/failure ratio so we can tell if a sidecar was
       // present-but-corrupt (rare, but hard to diagnose without
@@ -2902,12 +3162,211 @@ void app.whenReady().then(async () => {
 
   // ── IPC: Cleanup Analysis ─────────────────────────────────
 
-  ipcMain.handle("diskhound:analyze-cleanup", (_event, rootPath: string, files: ScanFileRecord[], dirs: DirectoryHotspot[]) => {
+  ipcMain.handle("diskhound:analyze-cleanup", async (_event, rootPath: string) => {
+    const history = getScanHistory(rootPath);
+    const current = history[0];
     const settings = settingsStore!.get();
-    const excludedFolders = settings.scanning.excludedFolderPaths;
-    const safeFiles = files.filter((file) => !isPathExcluded(file.path, excludedFolders, process.platform));
-    const safeDirs = dirs.filter((dir) => !findExcludedFolderActionBlocker(dir.path, excludedFolders, process.platform));
-    return analyzeForCleanup(rootPath, safeFiles, safeDirs, settings.cleanup);
+    if (!current) {
+      return {
+        suggestions: [],
+        totalReclaimableBytes: 0,
+        analyzedAt: Date.now(),
+        scanRootPath: rootPath,
+      };
+    }
+    return analyzeCleanupFromIndex(
+      rootPath,
+      indexFilePath(current.id),
+      settings.cleanup,
+      settings.scanning.excludedFolderPaths,
+    );
+  });
+  ipcMain.handle("diskhound:search-index", async (_event, rootPath: string, query: { query: string; minSizeBytes?: number; extension?: string; limit?: number }) => {
+    const history = getScanHistory(rootPath);
+    const current = history[0];
+    if (!current) return { hits: [], truncated: false, filesScanned: 0 };
+    return searchIndexFile(indexFilePath(current.id), query);
+  });
+  const devArtifactCache = new Map<string, DevArtifactReport>();
+  const devArtifactInflight = new Map<string, Promise<DevArtifactReport | null>>();
+  const devRescanAbort = new Map<string, AbortController>();
+
+  const loadDevReport = (scanId: string, scanRoot: string, previousId?: string) =>
+    loadDevArtifactReport(
+      devArtifactsSidecarPath(scanId),
+      scanRoot,
+      listPendingDevArtifactSidecars(),
+      previousId ? devArtifactsSidecarPath(previousId) : null,
+    );
+
+  ipcMain.handle("diskhound:get-dev-artifacts", async (_event, rootPath: string, options?: { sidecarOnly?: boolean }) => {
+    const history = getScanHistory(rootPath);
+    const current = history[0];
+    if (!current) return null;
+    const cached = devArtifactCache.get(current.id);
+    if (cached) return cached;
+
+    const loadKey = `${current.id}:load`;
+    let loadPromise = devArtifactInflight.get(loadKey);
+    if (!loadPromise) {
+      loadPromise = loadDevReport(current.id, rootPath, history[1]?.id)
+        .then((report) => {
+          if (report && report.artifacts.length > 0) devArtifactCache.set(current.id, report);
+          return report;
+        })
+        .catch((err) => {
+          writeCrashLog(
+            "dev-artifacts",
+            err instanceof Error ? (err.stack ?? err.message) : String(err),
+          );
+          if (FS_SYNC.existsSync(devArtifactsSidecarPath(current.id))) throw err;
+          return null;
+        })
+        .finally(() => {
+          devArtifactInflight.delete(loadKey);
+        });
+      devArtifactInflight.set(loadKey, loadPromise);
+    }
+    if (options?.sidecarOnly) return loadPromise;
+
+    const inflight = devArtifactInflight.get(current.id);
+    if (inflight) return inflight;
+
+    const pending = (async () => {
+      const report = await loadPromise;
+      if (report) return report;
+
+      const sidecarPath = devArtifactsSidecarPath(current.id);
+      if (FS_SYNC.existsSync(sidecarPath)) {
+        writeCrashLog(
+          "dev-artifacts",
+          `scanId=${current.id} sidecar present but load returned empty; not classifying the folder tree`,
+        );
+        throw new Error(`Dev Artifacts sidecar exists but could not be read: ${Path.basename(sidecarPath)}`);
+      }
+
+      // Old scans have no Dev sidecar. Classify from the folder-tree
+      // sidecar in a worker — never stream the 7M-file index, and
+      // never walk 1M+ folder-tree entries on the main thread.
+      const treePath = folderTreeSidecarPath(current.id);
+      if (!FS_SYNC.existsSync(treePath)) return null;
+
+      writeCrashLog("dev-artifacts-classify", `scanId=${current.id} via folder-tree worker`);
+      const classified = await runDevArtifactsClassifyWorker(
+        {
+          rootPath,
+          folderTreePath: treePath,
+          destSidecarPath: devArtifactsSidecarPath(current.id),
+          previousSidecarPath: history[1] ? devArtifactsSidecarPath(history[1].id) : null,
+        },
+        { workerPath: devArtifactsWorkerEntry },
+      );
+      if (classified.artifacts.length > 0) devArtifactCache.set(current.id, classified);
+      return classified;
+    })().catch((err) => {
+      writeCrashLog(
+        "dev-artifacts",
+        err instanceof Error ? (err.stack ?? err.message) : String(err),
+      );
+      return null;
+    }).finally(() => {
+      devArtifactInflight.delete(current.id);
+    });
+    devArtifactInflight.set(current.id, pending);
+    return pending;
+  });
+
+  ipcMain.handle("diskhound:cancel-dev-artifacts-rescan", (_event, rootPath: string) => {
+    const key = scanKey(rootPath);
+    const ac = devRescanAbort.get(key);
+    if (ac) ac.abort();
+  });
+
+  ipcMain.handle("diskhound:forget-dev-artifact-paths", async (_event, rootPath: string, paths: unknown) => {
+    const list = Array.isArray(paths)
+      ? paths.filter((path): path is string => typeof path === "string" && path.trim().length > 0)
+      : [];
+    const history = getScanHistory(rootPath);
+    const current = history[0];
+    if (!current) return null;
+
+    const sidecarPath = devArtifactsSidecarPath(current.id);
+    const cached = devArtifactCache.get(current.id);
+    const sidecar = (await readDevArtifactSidecar(sidecarPath))
+      ?? (cached ? sidecarFromReport(cached) : null);
+    if (!sidecar) {
+      writeCrashLog("dev-artifacts", `forget: no sidecar scanId=${current.id} paths=${list.length}`);
+      if (!cached || list.length === 0) return cached ?? null;
+      const next = dropArtifactsFromReport(cached, list);
+      if (next.artifacts.length > 0) devArtifactCache.set(current.id, next);
+      else devArtifactCache.delete(current.id);
+      return next;
+    }
+
+    const nextSidecar = list.length > 0 ? dropSidecarRoots(sidecar, list) : sidecar;
+    try {
+      await writeDevArtifactSidecar(sidecarPath, nextSidecar);
+    } catch (err) {
+      writeCrashLog(
+        "dev-artifacts",
+        `forget write failed scanId=${current.id} ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    const previous = history[1] ? await readDevArtifactSidecar(devArtifactsSidecarPath(history[1].id)) : null;
+    const report = reportFromSidecar(nextSidecar, previous);
+    if (report.artifacts.length > 0) devArtifactCache.set(current.id, report);
+    else devArtifactCache.delete(current.id);
+    writeCrashLog("dev-artifacts", `forgot ${list.length} tree(s) scanId=${current.id}`);
+    return report;
+  });
+
+  ipcMain.handle("diskhound:rescan-dev-artifacts", async (_event, rootPath: string) => {
+    const history = getScanHistory(rootPath);
+    const current = history[0];
+    if (!current) return null;
+    const key = scanKey(rootPath);
+    devRescanAbort.get(key)?.abort();
+    const ac = new AbortController();
+    devRescanAbort.set(key, ac);
+    try {
+      const report = await runDevArtifactsRescanWorker(
+        {
+          rootPath,
+          sidecarPath: devArtifactsSidecarPath(current.id),
+          indexPath: indexFilePath(current.id),
+        },
+        {
+          workerPath: devArtifactsWorkerEntry,
+          signal: ac.signal,
+          onProgress: (progress) => {
+            mainWindow?.webContents.send(DEV_ARTIFACTS_PROGRESS_CHANNEL, {
+              ...progress,
+              rootPath,
+            });
+          },
+        },
+      );
+      const latest = getScanHistory(rootPath)[0];
+      if (latest && latest.id !== current.id) {
+        const adopted = await loadDevReport(latest.id, rootPath, getScanHistory(rootPath)[1]?.id);
+        if (adopted && adopted.artifacts.length > 0) {
+          devArtifactCache.set(latest.id, adopted);
+          return adopted;
+        }
+      }
+      if (report.artifacts.length > 0) devArtifactCache.set(current.id, report);
+      else devArtifactCache.delete(current.id);
+      return report;
+    } catch (err) {
+      if (ac.signal.aborted) return null;
+      writeCrashLog(
+        "dev-artifacts-rescan",
+        err instanceof Error ? (err.stack ?? err.message) : String(err),
+      );
+      return null;
+    } finally {
+      if (devRescanAbort.get(key) === ac) devRescanAbort.delete(key);
+    }
   });
 
   // ── IPC: Duplicate Detection ────────────────────────────
@@ -3305,6 +3764,10 @@ void app.whenReady().then(async () => {
     mainWindow?.hide();
   });
 
+  ipcMain.on("diskhound:quit-app", () => {
+    quitDiskHound();
+  });
+
   // ── Login Item Settings ───────────────────────────────────
 
   function applyLoginItemSettings(enabled: boolean) {
@@ -3447,6 +3910,10 @@ void app.whenReady().then(async () => {
       console.error(`[monitoring] delta skipped — no scan history for ${rootPath}`);
       return false;
     }
+    if (!indexUsesAllocatedSize(mostRecent)) {
+      console.error(`[monitoring] delta skipped — previous index still uses logical file size; running a full allocated-size scan for ${rootPath}`);
+      return false;
+    }
     const previousIndexPath = indexFilePath(mostRecent.id);
     if (!FS_SYNC.existsSync(previousIndexPath)) {
       console.error(`[monitoring] delta skipped — previous index missing at ${previousIndexPath}`);
@@ -3516,6 +3983,14 @@ void app.whenReady().then(async () => {
             `usn scan ${historyId} carried forward sidecar from ${mostRecent.id}`,
           );
         }
+        const prevDev = devArtifactsSidecarPath(mostRecent.id);
+        const nextDev = devArtifactsSidecarPath(historyId);
+        if (FS_SYNC.existsSync(prevDev) && !FS_SYNC.existsSync(nextDev)) {
+          await FS.copyFile(prevDev, nextDev);
+        }
+        // Do not JSON.parse the Dev sidecar here. That blocked the
+        // window on large C: sidecars. Dev open adopts a pending
+        // file in the worker.
       } catch (err) {
         writeCrashLog(
           "folder-tree-sidecar-carry-forward",
@@ -3585,6 +4060,43 @@ void app.whenReady().then(async () => {
     return true;
   };
 
+  // ── Application menu ──────────────────────────────────────
+  // Hidden title bar on Windows/Linux hides File/Edit chrome, but the
+  // menu still owns accelerators. Ctrl/Cmd+Q must quit — not hide to
+  // tray via window close.
+
+  const installApplicationMenu = () => {
+    const quitItem: MenuItemConstructorOptions = {
+      label: "Quit DiskHound",
+      accelerator: "CommandOrControl+Q",
+      click: () => {
+        quitDiskHound();
+      },
+    };
+    const template: MenuItemConstructorOptions[] = process.platform === "darwin"
+      ? [
+          {
+            label: app.name,
+            submenu: [
+              { role: "about" },
+              { type: "separator" },
+              { role: "hide" },
+              { role: "hideOthers" },
+              { role: "unhide" },
+              { type: "separator" },
+              quitItem,
+            ],
+          },
+          { role: "fileMenu" },
+          { role: "editMenu" },
+        ]
+      : [
+          { label: "File", submenu: [quitItem] },
+          { role: "editMenu" },
+        ];
+    Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  };
+
   // ── System Tray ───────────────────────────────────────────
 
   const createTray = () => {
@@ -3596,8 +4108,7 @@ void app.whenReady().then(async () => {
       {
         label: "Show DiskHound",
         click: () => {
-          mainWindow?.show();
-          mainWindow?.focus();
+          focusOrShowMainWindow();
         },
       },
       { type: "separator" },
@@ -3608,8 +4119,7 @@ void app.whenReady().then(async () => {
           if (settings?.scanning.defaultRootPath) {
             void startScan(settings.scanning.defaultRootPath, defaultScanOptions());
           }
-          mainWindow?.show();
-          mainWindow?.focus();
+          focusOrShowMainWindow();
         },
       },
       {
@@ -3621,17 +4131,16 @@ void app.whenReady().then(async () => {
       { type: "separator" },
       {
         label: "Quit",
+        accelerator: "CommandOrControl+Q",
         click: () => {
-          isQuitting = true;
-          app.quit();
+          quitDiskHound();
         },
       },
     ]);
 
     tray.setContextMenu(contextMenu);
     tray.on("double-click", () => {
-      mainWindow?.show();
-      mainWindow?.focus();
+      focusOrShowMainWindow();
     });
   };
 
@@ -3876,6 +4385,11 @@ void app.whenReady().then(async () => {
 
     await loadRenderer(mainWindow, "app");
 
+    if (process.platform !== "darwin") {
+      mainWindow.setMenuBarVisibility(false);
+      mainWindow.setAutoHideMenuBar(true);
+    }
+
     if (isDevelopment) {
       mainWindow.webContents.openDevTools({ mode: "detach" });
     }
@@ -3888,7 +4402,8 @@ void app.whenReady().then(async () => {
       const settings = settingsStore?.get();
       if (settings?.general.minimizeToTray && tray) {
         event.preventDefault();
-        mainWindow?.hide();
+        hideMainWindow();
+        showCloseToTrayHint();
       }
     });
 
@@ -3896,6 +4411,7 @@ void app.whenReady().then(async () => {
       mainWindow = null;
     });
   };
+  createMainWindowFn = createWindow;
 
   let settings = settingsStore.get();
   const normalizedSettings = normalizeAppSettings(settings);
@@ -3903,6 +4419,8 @@ void app.whenReady().then(async () => {
     await settingsStore.set(normalizedSettings);
     settings = normalizedSettings;
   }
+
+  installApplicationMenu();
 
   // Only create tray if minimizeToTray is explicitly enabled
   if (settings.general.minimizeToTray) {
@@ -3913,7 +4431,7 @@ void app.whenReady().then(async () => {
   applyLoginItemSettings(settings.general.launchOnStartup);
 
   restartMonitoring(settings);
-  await createWindow();
+  await ensureMainWindow();
   writeStartupLog("window created and loaded");
 
   // "Start minimized" is an AUTOSTART-ONLY preference — we want a
@@ -3931,8 +4449,11 @@ void app.whenReady().then(async () => {
   const canLaunchToTray = settings.general.minimizeToTray && Boolean(tray);
   const launchMinimized =
     canLaunchToTray && wasAutoStarted && settings.general.startMinimized;
-  if (launchMinimized) {
-    mainWindow?.hide();
+  if (pendingSecondInstanceFocus) {
+    pendingSecondInstanceFocus = false;
+    showMainWindowIfPresent();
+  } else if (launchMinimized) {
+    hideMainWindow();
   }
 
   // Auto-update (production only, gated on user setting)
@@ -4190,7 +4711,11 @@ void app.whenReady().then(async () => {
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      void createWindow();
+      void ensureMainWindow().catch((err: unknown) => {
+        writeStartupLog(
+          `ensureMainWindow failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
     }
   });
 
@@ -4229,10 +4754,11 @@ void app.whenReady().then(async () => {
     void windowStateStore?.flush();
     void widgetWindowStateStore?.flush();
   });
-}).catch((err) => {
-  writeStartupLog(`whenReady rejected: ${err?.stack ?? err?.message ?? String(err)}`);
+})().catch((err: unknown) => {
+  const error = err as { stack?: string; message?: string };
+  writeStartupLog(`whenReady rejected: ${error?.stack ?? error?.message ?? String(err)}`);
   try {
-    dialog.showErrorBox("DiskHound — Startup failed", String(err?.stack ?? err?.message ?? err));
+    dialog.showErrorBox("DiskHound — Startup failed", String(error?.stack ?? error?.message ?? err));
   } catch { /* noop */ }
 });
 

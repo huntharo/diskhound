@@ -3,6 +3,7 @@ use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -25,14 +26,19 @@ mod usn_journal;
 #[cfg(windows)]
 mod mft;
 
+mod sample;
+mod dev_artifacts;
+mod index_line;
+
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{GetLastError, ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE};
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
     FindClose, FindExInfoBasic, FindExSearchNameMatch, FindFirstFileExW,
-    FindNextFileW, FIND_FIRST_EX_LARGE_FETCH, FILE_ATTRIBUTE_DEVICE,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-    WIN32_FIND_DATAW,
+    FindNextFileW, GetCompressedFileSizeW, FIND_FIRST_EX_LARGE_FETCH,
+    FILE_ATTRIBUTE_COMPRESSED, FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_DIRECTORY,
+    FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SPARSE_FILE,
+    INVALID_FILE_SIZE, WIN32_FIND_DATAW,
 };
 
 // Generous internal caps — large enough that no user reasonably hits them,
@@ -67,6 +73,8 @@ struct ScanInput {
     /// worker thread (which was OOM-ing even at 8 GB heap on drives
     /// with 8M+ records).
     folder_tree_output: Option<PathBuf>,
+    /// Compact Dev Artifacts sidecar written from the index-writer thread.
+    dev_artifacts_output: Option<PathBuf>,
 }
 
 /// Empty options struct — kept for IPC contract stability with the JS side.
@@ -100,17 +108,29 @@ struct ScanOptions {}
 struct IndexWriter {
     tx: Option<crossbeam_channel::Sender<IndexWriteMsg>>,
     handle: Option<std::thread::JoinHandle<io::Result<()>>>,
+    dev_acc: Option<Arc<Mutex<dev_artifacts::DevArtifactAcc>>>,
+    dev_output: Option<PathBuf>,
+    scan_root: String,
 }
 
 enum IndexWriteMsg {
-    File { path: String, size: u64, mtime: u64 },
+    File {
+        path: String,
+        size: u64,
+        mtime: u64,
+        extra_hardlink: bool,
+    },
     Dir { path: String, mtime: u64 },
     Finish,
 }
 
 impl IndexWriter {
-    fn create(path: &Path) -> io::Result<Self> {
+    fn create(path: &Path, dev_output: Option<PathBuf>, scan_root: String) -> io::Result<Self> {
         let file = File::create(path)?;
+        let dev_acc = dev_output
+            .as_ref()
+            .map(|_| Arc::new(Mutex::new(dev_artifacts::DevArtifactAcc::new())));
+        let dev_acc_thread = dev_acc.clone();
         // Bounded so the emit thread back-pressures naturally when the
         // writer falls behind (very rare in practice — gzip at level 1
         // on JSON runs at ~200-500 MB/s, far above our record
@@ -134,7 +154,12 @@ impl IndexWriter {
                 let mut line = Vec::with_capacity(512);
                 while let Ok(msg) = rx.recv() {
                     match msg {
-                        IndexWriteMsg::File { path, size, mtime } => {
+                        IndexWriteMsg::File {
+                            path,
+                            size,
+                            mtime,
+                            extra_hardlink,
+                        } => {
                             line.clear();
                             // Hand-rolled `{"p":"<esc>","s":N,"m":M}\n`.
                             // serde_json::to_writer was doing 5-8 μs
@@ -151,8 +176,16 @@ impl IndexWriter {
                             append_u64_decimal(&mut line, size);
                             line.extend_from_slice(br#","m":"#);
                             append_u64_decimal(&mut line, mtime);
+                            if extra_hardlink {
+                                line.extend_from_slice(br#","h":1"#);
+                            }
                             line.extend_from_slice(b"}\n");
                             encoder.write_all(&line)?;
+                            if let Some(acc) = &dev_acc_thread {
+                                acc.lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .add(&path, size, extra_hardlink);
+                            }
                         }
                         IndexWriteMsg::Dir { path, mtime } => {
                             line.clear();
@@ -173,6 +206,9 @@ impl IndexWriter {
         Ok(IndexWriter {
             tx: Some(tx),
             handle: Some(handle),
+            dev_acc,
+            dev_output,
+            scan_root,
         })
     }
 
@@ -196,12 +232,13 @@ impl IndexWriter {
         Ok(())
     }
 
-    fn write_entry(&mut self, path: &str, size: u64, mtime: u64) -> io::Result<()> {
+    fn write_entry(&mut self, path: &str, size: u64, mtime: u64, extra_hardlink: bool) -> io::Result<()> {
         if let Some(tx) = self.tx.as_ref() {
             tx.send(IndexWriteMsg::File {
                 path: path.to_string(),
                 size,
                 mtime,
+                extra_hardlink,
             })
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "index writer thread exited"))?;
         }
@@ -216,17 +253,33 @@ impl IndexWriter {
             let _ = tx.send(IndexWriteMsg::Finish);
             drop(tx);
         }
-        if let Some(handle) = self.handle.take() {
+        let join_err = if let Some(handle) = self.handle.take() {
             match handle.join() {
-                Ok(result) => result?,
-                Err(_) => {
-                    return Err(io::Error::other(
-                        "index writer thread panicked",
-                    ))
-                }
+                Ok(result) => result.err(),
+                Err(_) => Some(io::Error::other("index writer thread panicked")),
+            }
+        } else {
+            None
+        };
+        // Write the Dev sidecar even if gzip finish failed — classify
+        // already ran on every file the writer accepted.
+        if let (Some(out), Some(acc)) = (self.dev_output.take(), self.dev_acc.take()) {
+            let guard = acc.lock().unwrap_or_else(|e| e.into_inner());
+            match dev_artifacts::write_sidecar(&out, &self.scan_root, &guard) {
+                Ok(()) => eprintln!(
+                    "[diskhound-native-scanner] dev-artifacts sidecar: wrote {} ({} roots)",
+                    out.display(),
+                    guard.root_count()
+                ),
+                Err(err) => eprintln!(
+                    "[diskhound-native-scanner] dev-artifacts sidecar: write failed ({err})"
+                ),
             }
         }
-        Ok(())
+        match join_err {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 }
 
@@ -412,6 +465,10 @@ struct Baseline {
     /// Set of all dir paths present in the baseline — used for re-emitting
     /// dir entries under inherited subtrees in the new index.
     dirs: HashSet<String>,
+    /// Extra NTFS names (`h:1`) from the previous index. The walker cannot
+    /// see link counts, so a re-walk of a touched directory keeps this flag
+    /// when the same path is still present.
+    extra_hardlink_paths: HashSet<String>,
 }
 
 impl Baseline {
@@ -434,6 +491,7 @@ impl Baseline {
         let mut dirs: HashSet<String> = HashSet::new();
         let mut dir_file_counts: HashMap<String, u64> = HashMap::new();
         let mut dir_total_sizes: HashMap<String, u64> = HashMap::new();
+        let mut extra_hardlink_paths: HashSet<String> = HashSet::new();
         let mut lines_read: u64 = 0;
         // Separately count files so we can detect truncated baselines
         // — one of 0.4.3's fixed bugs (strong_count=2 skipping the
@@ -444,32 +502,12 @@ impl Baseline {
         // file_records separately lets us reject these at load time.
         let mut file_records: u64 = 0;
 
-        // Typed-struct deserialization — measurably faster than the prior
-        // serde_json::Value approach because serde can stream the fields
-        // it cares about without building a dynamic tree per line.
-        //
-        // IMPORTANT: we MUST use owned `String` (not borrowed `&str`) for
-        // `p` and `t`. Windows paths in the NDJSON source contain escaped
-        // backslashes ("C:\\\\Users\\\\foo"), and serde_json cannot give
-        // back a borrowed slice when the unescaped result is shorter
-        // than the source buffer. Using `&'a str` here silently failed
-        // to deserialize EVERY record containing a backslash — which on
-        // Windows is literally every path — destroying Phase-1 mtime-skip
-        // inheritance across all v0.3.5-v0.3.10 builds (user-visible
-        // symptom: rescans took the same 20 minutes as first-time
-        // scans, and `phase: baseline load` logged `dirs=0` even when
-        // the baseline index contained 1.2M directory entries).
-        #[derive(serde::Deserialize)]
-        struct BaselineRec {
-            p: String,
-            #[serde(default)]
-            s: Option<u64>,
-            #[serde(default)]
-            t: Option<String>,
-            #[serde(default)]
-            m: Option<u64>,
-        }
-
+        // Hand-rolled field extraction — same keys the IndexWriter
+        // emits (`p`/`s`/`m`/`t`/`h`). Owned `String` for `p` after
+        // unescape: Windows paths contain `\\` in the NDJSON source,
+        // and a borrowed slice of the raw line is the wrong path
+        // (v0.3.5–v0.3.10 serde `&str` bug: every backslash record
+        // failed, Phase-1 inheritance saw `dirs=0`).
         for line in reader.lines() {
             let Ok(line) = line else { continue };
             if line.is_empty() {
@@ -480,34 +518,39 @@ impl Baseline {
                 on_heartbeat(lines_read);
             }
 
-            let Ok(rec) = serde_json::from_str::<BaselineRec>(&line) else {
+            let Some(rec) = index_line::parse_index_line(&line) else {
                 continue;
             };
-            let is_dir = rec.t.as_deref() == Some("d");
-            let normalized = normalize_path(Path::new(&rec.p));
+            let is_dir = rec.is_dir;
+            let normalized = normalize_path(Path::new(&rec.path));
 
             if is_dir {
-                let mtime = rec.m.unwrap_or(0);
+                let mtime = rec.mtime.unwrap_or(0);
                 dir_mtimes.insert(normalized.clone(), mtime);
                 dirs.insert(normalized);
                 continue;
             }
 
-            let Some(size) = rec.s else {
+            let Some(size) = rec.size else {
                 continue;
             };
             file_records += 1;
+            let extra_hardlink = rec.extra_hardlink;
+            if extra_hardlink {
+                extra_hardlink_paths.insert(normalized.clone());
+            }
+            let occupancy = if extra_hardlink { 0 } else { size };
 
             // Bubble the file's size/count up to every ancestor directory.
             // This gives us O(1) "how much is under dir D" lookups during
             // the walk without having to store individual file records.
-            let mut current = Path::new(&rec.p).parent().map(normalize_path);
+            let mut current = Path::new(&rec.path).parent().map(normalize_path);
             while let Some(dir) = current {
                 if dir.is_empty() {
                     break;
                 }
                 *dir_file_counts.entry(dir.clone()).or_insert(0) += 1;
-                *dir_total_sizes.entry(dir.clone()).or_insert(0) += size;
+                *dir_total_sizes.entry(dir.clone()).or_insert(0) += occupancy;
                 let parent = Path::new(&dir).parent().map(normalize_path);
                 if parent.as_deref().map(str::is_empty).unwrap_or(true)
                     || parent.as_deref() == Some(dir.as_str())
@@ -564,6 +607,7 @@ impl Baseline {
             dir_file_counts,
             dir_total_sizes,
             dirs,
+            extra_hardlink_paths,
         })
     }
 
@@ -635,18 +679,18 @@ fn stream_inherited_files_into(
         if line.is_empty() {
             continue;
         }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+        let Some(rec) = index_line::parse_index_line(&line) else {
             continue;
         };
-        let Some(path_str) = value.get("p").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let is_dir = value.get("t").and_then(|v| v.as_str()) == Some("d");
-        if is_dir {
+        if rec.is_dir {
             // Dir entries were already emitted during the walk's inherit
             // path, so we don't re-emit them here.
             continue;
         }
+        let Some(size) = rec.size else {
+            continue;
+        };
+        let path_str = rec.path.as_str();
 
         let normalized = normalize_path(Path::new(path_str));
         let under_inherit = normalized_prefixes
@@ -656,10 +700,8 @@ fn stream_inherited_files_into(
             continue;
         }
 
-        let Some(size) = value.get("s").and_then(|v| v.as_u64()) else {
-            continue;
-        };
-        let mtime = value.get("m").and_then(|v| v.as_u64()).unwrap_or(0);
+        let mtime = rec.mtime.unwrap_or(0);
+        let extra_hardlink = rec.extra_hardlink;
 
         let name = Path::new(path_str)
             .file_name()
@@ -671,7 +713,7 @@ fn stream_inherited_files_into(
         // Write to new index so the index remains a complete baseline for
         // the NEXT scan.
         if let Some(writer) = state.index_writer.as_mut() {
-            let _ = writer.write_entry(&normalized, size, mtime);
+            let _ = writer.write_entry(&normalized, size, mtime, extra_hardlink);
         }
 
         // Update top-N + extension aggregates. Note: directory_totals +
@@ -690,8 +732,10 @@ fn stream_inherited_files_into(
             size,
             modified_at: mtime,
         };
-        upsert_ranked_file(&mut state.largest_files, file_record, state.input.top_file_limit);
-        rollup_extension(&mut state.extension_totals, &extension, size);
+        if !extra_hardlink {
+            upsert_ranked_file(&mut state.largest_files, file_record, state.input.top_file_limit);
+            rollup_extension(&mut state.extension_totals, &extension, size);
+        }
 
         // Populate the folder-tree sidecar accumulator. Walker's
         // inheritance branch doesn't call `record_file` (which is where
@@ -743,6 +787,16 @@ fn main() {
         || matches_flag(&raw_args, "--mode", "journal");
     let is_cursor_query = raw_args.iter().any(|a| a == "--mode=query-cursor")
         || matches_flag(&raw_args, "--mode", "query-cursor");
+    let is_sample = raw_args.iter().any(|a| a == "--mode=sample")
+        || matches_flag(&raw_args, "--mode", "sample");
+
+    if is_sample {
+        if let Err(error) = sample::run_sample_once() {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     if is_journal_mode || is_cursor_query {
         #[cfg(windows)]
@@ -912,7 +966,11 @@ fn run() -> Result<(), String> {
     })?;
 
     let index_writer = match &input.index_output {
-        Some(path) => match IndexWriter::create(path) {
+        Some(path) => match IndexWriter::create(
+            path,
+            input.dev_artifacts_output.clone(),
+            input.root_path.to_string_lossy().into_owned(),
+        ) {
             Ok(writer) => Some(writer),
             Err(error) => {
                 return Err(format!(
@@ -978,6 +1036,7 @@ fn run() -> Result<(), String> {
             index_output: input.index_output.clone(),
             baseline_index: input.baseline_index.clone(),
             folder_tree_output: input.folder_tree_output.clone(),
+            dev_artifacts_output: input.dev_artifacts_output.clone(),
         },
         root_path_string: root_path_string.clone(),
         started_at_ms: scan_started_ms,
@@ -1042,23 +1101,24 @@ fn run() -> Result<(), String> {
         }
     }
 
+    // Finish the index writer (gzip flush + Dev sidecar) BEFORE Done.
+    // Node renames pending-* files as soon as it sees Done. Writing the
+    // Dev sidecar after Done raced: the rename missed, and Dev Artifacts
+    // fell through to a 1m+ folder-tree classify on a 7M-file C: scan.
+    if let Some(writer) = state.index_writer.take() {
+        if let Err(err) = writer.finish() {
+            eprintln!("[diskhound-native-scanner] index writer finish failed ({err})");
+        }
+    }
+
     if matches!(final_status, ScanStatus::Done) {
         state.scan_phase = ScanPhase::Complete;
     }
 
-    let emit_result = emit_message(&Message::Done {
+    emit_message(&Message::Done {
         snapshot: state.snapshot(final_status, None),
     })
-    .map_err(|error| error.to_string());
-
-    // Flush and close the index writer in both the success and cancelled
-    // paths. Best-effort: if finalizing the gzip stream fails, drop it
-    // silently rather than crashing the scan.
-    if let Some(writer) = state.index_writer.take() {
-        let _ = writer.finish();
-    }
-
-    emit_result
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(windows)]
@@ -1883,35 +1943,37 @@ fn emit_shard(
                 });
             }
         } else {
+            let occupancy = if rec.extra_hardlink { 0 } else { rec.size };
             local.files += 1;
-            local.bytes += rec.size;
+            local.bytes += occupancy;
             batch_files += 1;
-            batch_bytes += rec.size;
+            batch_bytes += occupancy;
 
             let path = rec.name;
             let (parent_path, file_name) = split_parent_and_name(&path);
             let extension = file_extension(&path);
 
-            upsert_ranked_file(
-                &mut local.largest_files,
-                ScanFileRecord {
-                    path: path.clone(),
-                    name: file_name.clone(),
-                    parent_path: parent_path.clone(),
-                    extension: extension.clone(),
-                    size: rec.size,
-                    modified_at: rec.mtime_ms,
-                },
-                top_file_limit,
-            );
-
-            rollup_directory_size_tallies_only(
-                root_path,
-                &parent_path,
-                rec.size,
-                &mut local.dir_totals,
-            );
-            rollup_extension(&mut local.ext_totals, &extension, rec.size);
+            if !rec.extra_hardlink {
+                upsert_ranked_file(
+                    &mut local.largest_files,
+                    ScanFileRecord {
+                        path: path.clone(),
+                        name: file_name.clone(),
+                        parent_path: parent_path.clone(),
+                        extension: extension.clone(),
+                        size: rec.size,
+                        modified_at: rec.mtime_ms,
+                    },
+                    top_file_limit,
+                );
+                rollup_directory_size_tallies_only(
+                    root_path,
+                    &parent_path,
+                    rec.size,
+                    &mut local.dir_totals,
+                );
+                rollup_extension(&mut local.ext_totals, &extension, rec.size);
+            }
 
             if want_folder_tree {
                 let list = local
@@ -1930,6 +1992,7 @@ fn emit_shard(
                     path,
                     size: rec.size,
                     mtime: rec.mtime_ms,
+                    extra_hardlink: rec.extra_hardlink,
                 });
             }
         }
@@ -3009,8 +3072,7 @@ fn enumerate_windows_directory_parallel(
                 );
                 children.push((directory_path.join(&file_name), Some(child_mtime)));
             } else {
-                let file_size =
-                    ((find_data.nFileSizeHigh as u64) << 32) | find_data.nFileSizeLow as u64;
+                let file_size = windows_find_data_occupancy(directory_path, &file_name, &find_data);
                 let file_record = ScanFileRecord {
                     path: normalize_path(&directory_path.join(&file_name)),
                     name: file_name.clone(),
@@ -3162,8 +3224,7 @@ fn enumerate_windows_directory(
               );
               stack.push((directory_path.join(&file_name), Some(child_mtime)));
           } else {
-              let file_size =
-                  ((find_data.nFileSizeHigh as u64) << 32) | find_data.nFileSizeLow as u64;
+              let file_size = windows_find_data_occupancy(directory_path, &file_name, &find_data);
               let file_record = ScanFileRecord {
                   path: normalize_path(&directory_path.join(&file_name)),
                   name: file_name.clone(),
@@ -3198,35 +3259,44 @@ fn enumerate_windows_directory(
 }
 
 fn record_file(state: &mut ScanState, file_record: ScanFileRecord) -> Result<(), String> {
+    let extra_hardlink = state
+        .baseline
+        .as_ref()
+        .is_some_and(|baseline| baseline.extra_hardlink_paths.contains(&file_record.path));
+    let occupancy = if extra_hardlink { 0 } else { file_record.size };
     state.files_visited += 1;
-    state.bytes_seen += file_record.size;
+    state.bytes_seen += occupancy;
     let file_limit = state.input.top_file_limit;
     let dir_limit = state.input.top_directory_limit;
-    upsert_ranked_file(&mut state.largest_files, file_record.clone(), file_limit);
+    if !extra_hardlink {
+        upsert_ranked_file(&mut state.largest_files, file_record.clone(), file_limit);
+    }
     if state.defer_hottest_dir_ranking {
         // Cheap path: just tally into the HashMap, skip the per-file
         // top-N sort. Finalized once at end of emit.
         rollup_directory_size_tallies_only(
             &state.root_path_string,
             &file_record.parent_path,
-            file_record.size,
+            occupancy,
             &mut state.directory_totals,
         );
     } else {
         rollup_directory_size(
             &state.root_path_string,
             &file_record.parent_path,
-            file_record.size,
+            occupancy,
             &mut state.directory_totals,
             &mut state.hottest_directories,
             dir_limit,
         );
     }
-    rollup_extension(
-        &mut state.extension_totals,
-        &file_record.extension,
-        file_record.size,
-    );
+    if !extra_hardlink {
+        rollup_extension(
+            &mut state.extension_totals,
+            &file_record.extension,
+            occupancy,
+        );
+    }
     // Folder-tree sidecar accumulator. Only populate when the caller
     // requested an output path — otherwise this is pure waste. Bucket
     // by parent_path so Node can render each folder's top files
@@ -3256,7 +3326,7 @@ fn record_file(state: &mut ScanState, file_record: ScanFileRecord) -> Result<(),
     // snapshot protocol keep working.
     if let Some(writer) = state.index_writer.as_mut() {
         if writer
-            .write_entry(&file_record.path, file_record.size, file_record.modified_at)
+            .write_entry(&file_record.path, file_record.size, file_record.modified_at, extra_hardlink)
             .is_err()
         {
             state.index_writer = None;
@@ -3412,6 +3482,7 @@ fn parse_args() -> Result<ScanInput, String> {
     let mut index_output: Option<PathBuf> = None;
     let mut baseline_index: Option<PathBuf> = None;
     let mut folder_tree_output: Option<PathBuf> = None;
+    let mut dev_artifacts_output: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
 
     while let Some(argument) = args.next() {
@@ -3456,6 +3527,12 @@ fn parse_args() -> Result<ScanInput, String> {
                     .ok_or_else(|| String::from("Expected a path after --folder-tree-output"))?;
                 folder_tree_output = Some(PathBuf::from(value));
             }
+            "--dev-artifacts-output" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| String::from("Expected a path after --dev-artifacts-output"))?;
+                dev_artifacts_output = Some(PathBuf::from(value));
+            }
             unknown => {
                 return Err(format!("Unknown argument: {unknown}"));
             }
@@ -3474,6 +3551,7 @@ fn parse_args() -> Result<ScanInput, String> {
         index_output,
         baseline_index,
         folder_tree_output,
+        dev_artifacts_output,
     })
 }
 
@@ -4179,6 +4257,47 @@ fn windows_search_pattern(directory_path: &Path) -> String {
     }
 }
 
+/// Cloud placeholders that look huge logically but occupy little locally.
+#[cfg(windows)]
+const FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+
+#[cfg(windows)]
+fn windows_find_data_occupancy(
+    directory_path: &Path,
+    file_name: &str,
+    find_data: &WIN32_FIND_DATAW,
+) -> u64 {
+    let logical = ((find_data.nFileSizeHigh as u64) << 32) | (find_data.nFileSizeLow as u64);
+    let attributes = find_data.dwFileAttributes;
+    const NEED_ALLOCATED: u32 = FILE_ATTRIBUTE_SPARSE_FILE
+        | FILE_ATTRIBUTE_COMPRESSED
+        | FILE_ATTRIBUTE_OFFLINE
+        | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
+    if attributes & NEED_ALLOCATED == 0 {
+        return logical;
+    }
+    windows_allocated_size(&directory_path.join(file_name)).unwrap_or(logical)
+}
+
+/// Explorer "Size on disk" via GetCompressedFileSizeW (cluster-rounded
+/// allocated bytes after sparse holes and compression). The walker only
+/// calls this for sparse/compressed/offline/cloud files; ordinary files
+/// stay at FindFirstFile logical size. Elevated MFT scans use $DATA
+/// allocated_size for every non-resident file.
+#[cfg(windows)]
+fn windows_allocated_size(path: &Path) -> Option<u64> {
+    let wide = windows_wide_string(&windows_extended_path(path));
+    let mut high: u32 = 0;
+    let low = unsafe { GetCompressedFileSizeW(wide.as_ptr(), &mut high) };
+    if low == INVALID_FILE_SIZE {
+        let err = unsafe { GetLastError() };
+        if err != 0 {
+            return None;
+        }
+    }
+    Some(((high as u64) << 32) | (low as u64))
+}
+
 #[cfg(windows)]
 fn windows_extended_path(path: &Path) -> String {
     let normalized = path.to_string_lossy().into_owned();
@@ -4191,4 +4310,91 @@ fn windows_extended_path(path: &Path) -> String {
     }
 
     format!(r"\\?\{}", normalized)
+}
+
+#[cfg(test)]
+mod index_line_parse_tests {
+    use super::index_line::parse_index_line;
+    use super::{append_json_escaped, append_u64_decimal};
+
+    fn writer_file_line(path: &str, size: u64, mtime: u64, extra_hardlink: bool) -> String {
+        let mut line = Vec::new();
+        line.extend_from_slice(br#"{"p":""#);
+        append_json_escaped(&mut line, path.as_bytes());
+        line.extend_from_slice(br#"","s":"#);
+        append_u64_decimal(&mut line, size);
+        line.extend_from_slice(br#","m":"#);
+        append_u64_decimal(&mut line, mtime);
+        if extra_hardlink {
+            line.extend_from_slice(br#","h":1"#);
+        }
+        line.push(b'}');
+        String::from_utf8(line).unwrap()
+    }
+
+    fn writer_dir_line(path: &str, mtime: u64) -> String {
+        let mut line = Vec::new();
+        line.extend_from_slice(br#"{"p":""#);
+        append_json_escaped(&mut line, path.as_bytes());
+        line.extend_from_slice(br#"","t":"d","m":"#);
+        append_u64_decimal(&mut line, mtime);
+        line.push(b'}');
+        String::from_utf8(line).unwrap()
+    }
+
+    #[test]
+    fn canonical_file_unescapes_windows_path() {
+        let line = writer_file_line(r"C:\Users\foo.txt", 123, 456, false);
+        let rec = parse_index_line(&line).unwrap();
+        assert_eq!(rec.path, r"C:\Users\foo.txt");
+        assert_eq!(rec.size, Some(123));
+        assert_eq!(rec.mtime, Some(456));
+        assert!(!rec.is_dir);
+        assert!(!rec.extra_hardlink);
+    }
+
+    #[test]
+    fn canonical_file_keeps_hardlink_flag() {
+        let line = writer_file_line(r"C:\cache\a", 10, 1, true);
+        let rec = parse_index_line(&line).unwrap();
+        assert!(rec.extra_hardlink);
+        assert_eq!(rec.size, Some(10));
+    }
+
+    #[test]
+    fn canonical_dir_line() {
+        let line = writer_dir_line(r"C:\Users", 99);
+        let rec = parse_index_line(&line).unwrap();
+        assert!(rec.is_dir);
+        assert_eq!(rec.path, r"C:\Users");
+        assert_eq!(rec.mtime, Some(99));
+        assert_eq!(rec.size, None);
+        assert!(!rec.extra_hardlink);
+    }
+
+    #[test]
+    fn odd_field_order_still_parses() {
+        let line = r#"{"m":9,"t":"d","p":"D:\\proj"}"#;
+        let rec = parse_index_line(line).unwrap();
+        assert!(rec.is_dir);
+        assert_eq!(rec.path, r"D:\proj");
+        assert_eq!(rec.mtime, Some(9));
+    }
+
+    #[test]
+    fn odd_file_order_keeps_occupancy_flag() {
+        let line = r#"{"h":1,"s":50,"p":"C:\\a.bin","m":3}"#;
+        let rec = parse_index_line(line).unwrap();
+        assert!(!rec.is_dir);
+        assert_eq!(rec.path, r"C:\a.bin");
+        assert_eq!(rec.size, Some(50));
+        assert!(rec.extra_hardlink);
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(parse_index_line("not json").is_none());
+        assert!(parse_index_line("").is_none());
+        assert!(parse_index_line(r#"{"s":1}"#).is_none());
+    }
 }

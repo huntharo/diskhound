@@ -1,11 +1,13 @@
 import * as FSP from "node:fs/promises";
 import * as FS from "node:fs";
+import * as OS from "node:os";
 import * as Path from "node:path";
 import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
 import { Worker } from "node:worker_threads";
 import { createGunzip } from "node:zlib";
 
+import { resolveBundledWorkerScript } from "./bundledWorkerPath";
 import type { FullDiffResult, FullFileChange } from "./contracts";
 import type {
   FullDiffWorkerInput,
@@ -41,8 +43,6 @@ interface FileIndexRecord {
  * Tuple chosen over an object because V8 optimises small in-bounds
  * arrays as packed elements — no per-property descriptors.
  */
-type CompactMapValue = readonly [origPath: string | null, size: number];
-
 const DEFAULT_LIMIT = 500;
 const WINDOWS_PLATFORM = "win32";
 
@@ -60,10 +60,11 @@ function isFileIndexRecord(value: unknown): value is FileIndexRecord {
     return false;
   }
 
-  const candidate = value as { p?: unknown; s?: unknown; t?: unknown };
+  const candidate = value as { p?: unknown; s?: unknown; t?: unknown; h?: unknown };
   return typeof candidate.p === "string"
     && typeof candidate.s === "number"
-    && candidate.t !== "d";
+    && candidate.t !== "d"
+    && candidate.h !== 1;
 }
 
 async function streamFileIndexRecords(
@@ -104,28 +105,86 @@ async function streamFileIndexRecords(
   }
 }
 
-async function loadFileIndexMap(
+const SORT_CHUNK = 120_000;
+
+interface SortedRec {
+  key: string;
+  p: string;
+  s: number;
+}
+
+async function writeSortedChunk(records: SortedRec[], dest: string): Promise<void> {
+  records.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  await FSP.mkdir(Path.dirname(dest), { recursive: true });
+  const lines = records.map((rec) => JSON.stringify(rec)).join("\n") + "\n";
+  await FSP.writeFile(dest, lines, "utf8");
+}
+
+async function* readSortedChunk(filePath: string): AsyncGenerator<SortedRec> {
+  if (!FS.existsSync(filePath)) return;
+  const source = createReadStream(filePath, { encoding: "utf8" });
+  source.on("error", () => { /* swallowed */ });
+  const rl = createInterface({ input: source, crlfDelay: Infinity });
+  for await (const line of rl) {
+    if (!line) continue;
+    try {
+      const rec = JSON.parse(line) as SortedRec;
+      if (rec && typeof rec.key === "string") yield rec;
+    } catch { /* skip */ }
+  }
+}
+
+async function* mergeSortedChunks(chunkPaths: string[]): AsyncGenerator<SortedRec> {
+  const iters = chunkPaths.map((p) => readSortedChunk(p));
+  const heads: Array<IteratorResult<SortedRec> | null> = await Promise.all(
+    iters.map((it) => it.next()),
+  );
+  while (true) {
+    let best = -1;
+    for (let i = 0; i < heads.length; i++) {
+      const head = heads[i];
+      if (!head || head.done) continue;
+      if (best < 0 || head.value.key < heads[best]!.value.key) best = i;
+    }
+    if (best < 0) break;
+    yield heads[best]!.value;
+    heads[best] = await iters[best]!.next();
+  }
+}
+
+async function* iterateSortedRecords(
   filePath: string,
   caseSensitive: boolean,
-): Promise<Map<string, CompactMapValue>> {
-  const entries = new Map<string, CompactMapValue>();
+  tmpDir: string,
+): AsyncGenerator<SortedRec> {
+  const chunks: string[] = [];
+  let buffer: SortedRec[] = [];
+  let chunkIndex = 0;
+
+  const flush = async () => {
+    if (buffer.length === 0) return;
+    const dest = Path.join(tmpDir, `chunk-${chunkIndex++}.jsonl`);
+    await writeSortedChunk(buffer, dest);
+    chunks.push(dest);
+    buffer = [];
+  };
 
   await streamFileIndexRecords(
     filePath,
-    (record, key) => {
-      // v0.5.39: when the normalised key matches the original path
-      // byte-for-byte (POSIX, or Windows paths that happened to be
-      // all-lowercase), we don't need to store the original path
-      // separately — null means "use the key". On a 7M-file POSIX
-      // scan this is every entry; saves ~1.4 GB of duplicate path
-      // strings.
-      const origPath = record.p === key ? null : record.p;
-      entries.set(key, [origPath, record.s]);
+    async (record, key) => {
+      buffer.push({ key, p: record.p, s: record.s });
+      if (buffer.length >= SORT_CHUNK) await flush();
     },
     caseSensitive,
   );
+  await flush();
 
-  return entries;
+  if (chunks.length === 0) return;
+  if (chunks.length === 1) {
+    yield* readSortedChunk(chunks[0]!);
+    return;
+  }
+  yield* mergeSortedChunks(chunks);
 }
 
 async function safeFileSize(filePath: string): Promise<number | null> {
@@ -280,114 +339,85 @@ export async function computeFullDiffFromIndexFiles(
   }
 
   const accumulator = createDiffAccumulator(input.baselineId, input.currentId, limit);
+  const tmpDir = Path.join(OS.tmpdir(), `diskhound-diff-${input.baselineId}-${input.currentId}-${process.pid}`);
+  await FSP.mkdir(tmpDir, { recursive: true });
 
-  const loadBaselineFirst = currentSize === null
-    || (baselineSize !== null && baselineSize <= currentSize);
+  try {
+    const baselineIter = iterateSortedRecords(input.baselinePath, caseSensitive, Path.join(tmpDir, "b"));
+    const currentIter = iterateSortedRecords(input.currentPath, caseSensitive, Path.join(tmpDir, "c"));
+    let baseline = await baselineIter.next();
+    let current = await currentIter.next();
 
-  if (loadBaselineFirst) {
-    const baselineByPath = await loadFileIndexMap(input.baselinePath, caseSensitive);
-
-    await streamFileIndexRecords(
-      input.currentPath,
-      (currentRecord, key) => {
-        const baselineEntry = baselineByPath.get(key);
-        if (!baselineEntry) {
-          accumulator.addChange({
-            path: currentRecord.p,
-            kind: "added",
-            size: currentRecord.s,
-            previousSize: 0,
-            deltaBytes: currentRecord.s,
-          });
-          return;
-        }
-
-        baselineByPath.delete(key);
-        const [, baselineSizeBytes] = baselineEntry;
-        if (currentRecord.s === baselineSizeBytes) {
-          return;
-        }
-
-        const deltaBytes = currentRecord.s - baselineSizeBytes;
+    while (!baseline.done || !current.done) {
+      if (baseline.done) {
+        const rec = current.value;
         accumulator.addChange({
-          path: currentRecord.p,
-          kind: deltaBytes > 0 ? "grew" : "shrank",
-          size: currentRecord.s,
-          previousSize: baselineSizeBytes,
-          deltaBytes,
+          path: rec.p,
+          kind: "added",
+          size: rec.s,
+          previousSize: 0,
+          deltaBytes: rec.s,
         });
-      },
-      caseSensitive,
-    );
-
-    // Whatever's left in the baseline map was never seen in current
-    // → removed. Use the stored original path when present (case-
-    // folded entries on Windows), else fall back to the map key which
-    // IS the original path (POSIX, or all-lowercase Windows paths).
-    for (const [key, [origPath, size]] of baselineByPath) {
-      accumulator.addChange({
-        path: origPath ?? key,
-        kind: "removed",
-        size: 0,
-        previousSize: size,
-        deltaBytes: -size,
-      });
-    }
-  } else {
-    const currentByPath = await loadFileIndexMap(input.currentPath, caseSensitive);
-
-    await streamFileIndexRecords(
-      input.baselinePath,
-      (baselineRecord, key) => {
-        const currentEntry = currentByPath.get(key);
-        if (!currentEntry) {
-          accumulator.addChange({
-            path: baselineRecord.p,
-            kind: "removed",
-            size: 0,
-            previousSize: baselineRecord.s,
-            deltaBytes: -baselineRecord.s,
-          });
-          return;
-        }
-
-        currentByPath.delete(key);
-        const [currentOrigPath, currentSizeBytes] = currentEntry;
-        if (currentSizeBytes === baselineRecord.s) {
-          return;
-        }
-
-        const deltaBytes = currentSizeBytes - baselineRecord.s;
+        current = await currentIter.next();
+        continue;
+      }
+      if (current.done) {
+        const rec = baseline.value;
         accumulator.addChange({
-          // Original-case path from the current scan (if differs from
-          // the normalised key) — same precedence the streaming-current
-          // branch above uses.
-          path: currentOrigPath ?? key,
-          kind: deltaBytes > 0 ? "grew" : "shrank",
-          size: currentSizeBytes,
-          previousSize: baselineRecord.s,
-          deltaBytes,
+          path: rec.p,
+          kind: "removed",
+          size: 0,
+          previousSize: rec.s,
+          deltaBytes: -rec.s,
         });
-      },
-      caseSensitive,
-    );
+        baseline = await baselineIter.next();
+        continue;
+      }
 
-    for (const [key, [origPath, size]] of currentByPath) {
-      accumulator.addChange({
-        path: origPath ?? key,
-        kind: "added",
-        size,
-        previousSize: 0,
-        deltaBytes: size,
-      });
+      const left = baseline.value;
+      const right = current.value;
+      if (left.key < right.key) {
+        accumulator.addChange({
+          path: left.p,
+          kind: "removed",
+          size: 0,
+          previousSize: left.s,
+          deltaBytes: -left.s,
+        });
+        baseline = await baselineIter.next();
+      } else if (left.key > right.key) {
+        accumulator.addChange({
+          path: right.p,
+          kind: "added",
+          size: right.s,
+          previousSize: 0,
+          deltaBytes: right.s,
+        });
+        current = await currentIter.next();
+      } else {
+        if (left.s !== right.s) {
+          const deltaBytes = right.s - left.s;
+          accumulator.addChange({
+            path: right.p,
+            kind: deltaBytes > 0 ? "grew" : "shrank",
+            size: right.s,
+            previousSize: left.s,
+            deltaBytes,
+          });
+        }
+        baseline = await baselineIter.next();
+        current = await currentIter.next();
+      }
     }
+  } finally {
+    await FSP.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
   }
 
   return accumulator.finalize();
 }
 
 export function resolveBundledFullDiffWorkerPath(baseDir: string): string {
-  return Path.join(baseDir, "scan", "fullDiffWorker.cjs");
+  return resolveBundledWorkerScript(baseDir, "fullDiffWorker.cjs");
 }
 
 export interface RunFullDiffWorkerOptions {
@@ -413,7 +443,9 @@ export async function runFullDiffWorker(
   // which is a much bigger architectural change (tracked separately).
   const worker = new Worker(options.workerPath, {
     resourceLimits: {
-      maxOldGenerationSizeMb: 12288,
+      // Streaming merge keeps one sort-chunk (~120k records) in memory,
+      // not a 7M-entry Map. 2 GB is a safety ceiling, not a working set.
+      maxOldGenerationSizeMb: 2048,
       maxYoungGenerationSizeMb: 256,
     },
   });
@@ -469,7 +501,7 @@ export async function runFullDiffWorker(
         // the crash log line reads as a diagnosis rather than a
         // generic "exited with code 1."
         const detail = code === 1
-          ? `Full diff worker out of memory (exit code 1). The inputs may exceed the worker's 12 GB heap — this drive is at the edge of what the in-memory diff can handle. The fast top-N summary still works.`
+          ? `Full diff worker out of memory (exit code 1). The streaming merge still needs headroom for sort chunks — the fast top-N summary still works.`
           : `Full diff worker exited with code ${code}`;
         settle(() => reject(new Error(detail)));
       }

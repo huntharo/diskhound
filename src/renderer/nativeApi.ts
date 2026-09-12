@@ -22,7 +22,7 @@ export const nativeApi: DiskhoundNativeApi = new Proxy(
           return (_listener: unknown) => () => {};
         }
         // Sync fire-and-forget methods
-        if (prop === "minimizeToTray") {
+        if (prop === "minimizeToTray" || prop === "quitApp") {
           return () => {};
         }
         // Async methods: resolve with safe defaults

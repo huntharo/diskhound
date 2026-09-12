@@ -3,14 +3,18 @@ import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 import type { ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
 import { protectedFolderDisplayName } from "../../shared/pathProtection";
 import type { ExcludedFolderActionBlocker } from "../../shared/pathProtection";
+import { formatScanRoot } from "../../shared/pathUtils";
 import { formatBytes, formatCount } from "../lib/format";
 import { useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
 import { FileIcon } from "./FileIcon";
+import { FOLDER_LOADING_STAGES, IndexLoadingPanel } from "./IndexLoadingPanel";
 import { PathContextMenu } from "./PathContextMenu";
 
 interface Props {
   snapshot: ScanSnapshot;
+  onStartScan?: () => void;
+  otherScannedRoots?: string[];
 }
 
 /**
@@ -85,7 +89,7 @@ function buildBreadcrumbs(currentPath: string, rootPath: string): { label: strin
 
 // ── Component ───────────────────────────────────────────────
 
-export function FolderList({ snapshot }: Props) {
+export function FolderList({ snapshot, onStartScan, otherScannedRoots = [] }: Props) {
   const rootPath = snapshot.rootPath ?? "";
   const [currentPath, setCurrentPath] = useState(rootPath);
   const [children, setChildren] = useState<FolderChild[]>([]);
@@ -97,6 +101,8 @@ export function FolderList({ snapshot }: Props) {
     hiddenExcludedBytes: 0,
   });
   const [loading, setLoading] = useState(false);
+  const [loadingStartedAt, setLoadingStartedAt] = useState<number | null>(null);
+  const [loadingElapsedSec, setLoadingElapsedSec] = useState(0);
   const [showOtherFiles, setShowOtherFiles] = useState(false);
   const [contextMenu, setContextMenu] = useState<{
     x: number;
@@ -173,6 +179,8 @@ export function FolderList({ snapshot }: Props) {
     setLooseFiles([]);
     setFolderMeta({ totalSize: 0, totalItemCount: 0, hiddenExcludedCount: 0, hiddenExcludedBytes: 0 });
     setLoading(true);
+    setLoadingStartedAt(Date.now());
+    setLoadingElapsedSec(0);
     void nativeApi.getFolderChildren(rootPath, currentPath).then((res) => {
       if (cancelled) return;
       setChildren(res?.dirs ?? []);
@@ -184,15 +192,25 @@ export function FolderList({ snapshot }: Props) {
         hiddenExcludedBytes: res?.hiddenExcludedBytes ?? 0,
       });
       setLoading(false);
+      setLoadingStartedAt(null);
     }).catch(() => {
       if (cancelled) return;
       setChildren([]);
       setLooseFiles([]);
       setFolderMeta({ totalSize: 0, totalItemCount: 0, hiddenExcludedCount: 0, hiddenExcludedBytes: 0 });
       setLoading(false);
+      setLoadingStartedAt(null);
     });
     return () => { cancelled = true; };
   }, [rootPath, currentPath]);
+
+  useEffect(() => {
+    if (!loadingStartedAt) return;
+    const id = window.setInterval(() => {
+      setLoadingElapsedSec(Math.floor((Date.now() - loadingStartedAt) / 1000));
+    }, 500);
+    return () => window.clearInterval(id);
+  }, [loadingStartedAt]);
 
   // Child sizes are authoritative — no more inferring-with-0B or reading
   // from the snapshot's bounded top-N. Total of this folder = sum of
@@ -240,7 +258,31 @@ export function FolderList({ snapshot }: Props) {
   if (!rootPath) {
     return (
       <div className="folder-explorer">
-        <div className="empty-view"><span>Run a scan to explore folders</span></div>
+        <div className="empty-view">
+          <span>Run a scan to explore folders</span>
+          <span className="empty-view-sub">Pick a drive on Overview. This tab follows that scan.</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (snapshot.status === "idle") {
+    const rootLabel = formatScanRoot(rootPath);
+    const otherNote = otherScannedRoots.length > 0
+      ? "A finished scan is on another drive. Switch with the header drive pills."
+      : "This tab only binds the selected drive.";
+    return (
+      <div className="folder-explorer">
+        <div className="empty-view">
+          <span className="scan-root-chip">{rootLabel}</span>
+          <span>Folders needs a full scan of {rootLabel} — not the whole PC.</span>
+          <span className="empty-view-sub">{otherNote}</span>
+          {onStartScan && (
+            <button className="action-btn primary" onClick={onStartScan}>
+              Scan {rootLabel}
+            </button>
+          )}
+        </div>
       </div>
     );
   }
@@ -248,7 +290,11 @@ export function FolderList({ snapshot }: Props) {
   if (snapshot.status === "running") {
     return (
       <div className="folder-explorer">
-        <div className="empty-view"><span>Scan in progress — folders available once it completes</span></div>
+        <div className="empty-view">
+          <span className="scan-root-chip">{formatScanRoot(rootPath)}</span>
+          <span>Scanning this drive…</span>
+          <span className="empty-view-sub">Folders for this drive will be ready when the scan finishes.</span>
+        </div>
       </div>
     );
   }
@@ -318,9 +364,13 @@ export function FolderList({ snapshot }: Props) {
       {/* ── Directory list ── */}
       <div className="folder-list-scroll">
         {loading ? (
-          <div className="empty-view" style={{ paddingTop: 48 }}>
-            <span>Loading folder contents…</span>
-          </div>
+          <IndexLoadingPanel
+            compact
+            eyebrow={formatScanRoot(rootPath)}
+            title="Loading folders on this scan"
+            stages={FOLDER_LOADING_STAGES}
+            elapsedSec={loadingElapsedSec}
+          />
         ) : children.length === 0 && looseFiles.length === 0 && folderMeta.hiddenExcludedCount === 0 ? (
           <div className="empty-view" style={{ paddingTop: 48 }}>
             <span>This folder appears empty in the scan index</span>

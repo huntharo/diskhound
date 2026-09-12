@@ -13,29 +13,22 @@ import {
 import { formatBytes, formatCount, humanAge, relativePath } from "../lib/format";
 import { useConfirmPermanentDelete, useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
+import {
+  FILTER_EXTS,
+  QUICK_FILTERS,
+  RECENT_WINDOWS,
+  type QuickFilter,
+  type RecentWindow,
+} from "../lib/fileQuickFilters";
 import { FileIcon } from "./FileIcon";
 import { PathContextMenu } from "./PathContextMenu";
 import { toast } from "./Toasts";
 
-export type QuickFilter = "all" | "recent" | "video" | "archives" | "installers" | "images" | "audio" | "documents";
+export type { QuickFilter, RecentWindow };
+export { RECENT_WINDOWS };
+
 type SortField = "size" | "name" | "ext" | "age";
 type SortDir = "asc" | "desc";
-
-/**
- * "Recently large" windows. The user's question is "what recently
- * gobbled up disk space?" — so we filter to files modified in the
- * last N days and sort by size descending. No fancy score function
- * (size×recency, decay weights) because users can already read the
- * (size, age) columns; a score collapses two intuitive numbers into
- * one opaque one. The pills let users widen the lens if 30 days
- * is too narrow.
- */
-export type RecentWindow = "7d" | "30d" | "90d";
-export const RECENT_WINDOWS: { id: RecentWindow; label: string; ms: number }[] = [
-  { id: "7d",  label: "7 days",  ms: 7 * 24 * 60 * 60 * 1000 },
-  { id: "30d", label: "30 days", ms: 30 * 24 * 60 * 60 * 1000 },
-  { id: "90d", label: "90 days", ms: 90 * 24 * 60 * 60 * 1000 },
-];
 
 /**
  * Page size for the Largest Files list. Rendering ~50K rows of
@@ -52,26 +45,6 @@ export const RECENT_WINDOWS: { id: RecentWindow; label: string; ms: number }[] =
  * of the list after narrowing the view.
  */
 const PAGE_SIZE = 1000;
-
-const QUICK_FILTERS: { id: QuickFilter; label: string; title?: string }[] = [
-  { id: "all", label: "All" },
-  { id: "recent", label: "Recently large", title: "Files modified in the last N days, sorted by size — the things that recently took up the most space" },
-  { id: "video", label: "Video" },
-  { id: "archives", label: "Archives" },
-  { id: "installers", label: "Installers" },
-  { id: "images", label: "Images" },
-  { id: "audio", label: "Audio" },
-  { id: "documents", label: "Docs" },
-];
-
-const FILTER_EXTS: Record<Exclude<QuickFilter, "all" | "recent">, Set<string>> = {
-  video: new Set([".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm", ".wmv"]),
-  archives: new Set([".7z", ".bz2", ".gz", ".iso", ".rar", ".tar", ".xz", ".zip"]),
-  installers: new Set([".appx", ".dmg", ".exe", ".iso", ".msi", ".msix", ".pkg"]),
-  images: new Set([".gif", ".heic", ".jpeg", ".jpg", ".png", ".psd", ".raw", ".svg", ".webp"]),
-  audio: new Set([".aac", ".flac", ".m4a", ".mp3", ".wav", ".wma"]),
-  documents: new Set([".csv", ".doc", ".docx", ".pdf", ".ppt", ".pptx", ".txt", ".xls", ".xlsx"]),
-};
 
 interface Props {
   snapshot: ScanSnapshot;
@@ -479,7 +452,7 @@ export function FileList({ snapshot, initialFilter }: Props) {
       {/* ── Column headers ── */}
       <div className="file-col-header">
         <div className="file-check" />
-        <SortableHeader field="size" label="Size" current={sortField} dir={sortDir} onToggle={toggleSort} align="right" />
+        <SortableHeader field="size" label="Size" title="Size on disk (sparse and compressed files use allocated space)" current={sortField} dir={sortDir} onToggle={toggleSort} align="right" />
         <div className="file-row-icon-hdr" />
         <SortableHeader field="name" label="Name" current={sortField} dir={sortDir} onToggle={toggleSort} />
         <SortableHeader field="ext" label="Type" current={sortField} dir={sortDir} onToggle={toggleSort} align="center" />
@@ -563,9 +536,10 @@ export function FileList({ snapshot, initialFilter }: Props) {
   );
 }
 
-function SortableHeader({ field, label, current, dir, onToggle, align }: {
+function SortableHeader({ field, label, title, current, dir, onToggle, align }: {
   field: SortField;
   label: string;
+  title?: string;
   current: SortField;
   dir: SortDir;
   onToggle: (field: SortField) => void;
@@ -575,6 +549,7 @@ function SortableHeader({ field, label, current, dir, onToggle, align }: {
   return (
     <button
       className={`file-col-btn ${isActive ? "active" : ""}`}
+      title={title}
       style={align ? { textAlign: align, justifyContent: align === "right" ? "flex-end" : align === "center" ? "center" : "flex-start" } : undefined}
       onClick={() => onToggle(field)}
     >

@@ -53,6 +53,7 @@ describe("scanHistory", () => {
     expect(history).toHaveLength(1);
     expect(history[0].rootPath).toBe("C:\\test");
     expect(history[0].bytesSeen).toBe(5000);
+    expect(history[0].sizeSemantics).toBe("allocated");
   });
 
   it("returns history entries sorted newest-first", async () => {

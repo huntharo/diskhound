@@ -5,9 +5,11 @@ import type {
   DiskDelta,
   DiskhoundNativeApi,
   DiskhoundPlatform,
+  DevArtifactsRescanProgress,
   DuplicateAnalysis,
   DuplicateScanProgress,
   EasyMoveProgress,
+  PermanentDeleteProgress,
   NavigateViewPayload,
   ScanSnapshot,
   ToastMessage,
@@ -30,6 +32,8 @@ const EASY_MOVE_PROGRESS_CHANNEL = "diskhound:easy-move-progress";
 const NOTIFICATION_CHANNEL = "diskhound:notification";
 const DUPLICATE_PROGRESS_CHANNEL = "diskhound:duplicate-progress";
 const DUPLICATE_RESULT_CHANNEL = "diskhound:duplicate-result";
+const DEV_ARTIFACTS_PROGRESS_CHANNEL = "diskhound:dev-artifacts-progress";
+const PERMANENT_DELETE_PROGRESS_CHANNEL = "diskhound:permanent-delete-progress";
 const SETTINGS_UPDATED_CHANNEL = "diskhound:settings-updated";
 const NAVIGATE_VIEW_CHANNEL = "diskhound:navigate-view";
 
@@ -61,6 +65,15 @@ const api: DiskhoundNativeApi = {
   trashPath: (targetPath) => ipcRenderer.invoke("diskhound:trash-path", targetPath),
   permanentlyDeletePath: (targetPath) =>
     ipcRenderer.invoke("diskhound:permanent-delete-path", targetPath),
+  permanentlyDeletePathElevated: (targetPath) =>
+    ipcRenderer.invoke("diskhound:permanent-delete-path-elevated", targetPath),
+  onPermanentDeleteProgress: (listener) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, progress: PermanentDeleteProgress) => {
+      listener(progress);
+    };
+    ipcRenderer.on(PERMANENT_DELETE_PROGRESS_CHANNEL, wrapped);
+    return () => { ipcRenderer.removeListener(PERMANENT_DELETE_PROGRESS_CHANNEL, wrapped); };
+  },
 
   // Settings
   getSettings: () => ipcRenderer.invoke("diskhound:get-settings"),
@@ -93,8 +106,25 @@ const api: DiskhoundNativeApi = {
   getExecutableIcon: (path, size) => ipcRenderer.invoke("diskhound:get-executable-icon", path, size),
 
   // Cleanup analysis
-  analyzeCleanup: (rootPath, files, dirs) =>
-    ipcRenderer.invoke("diskhound:analyze-cleanup", rootPath, files, dirs),
+  analyzeCleanup: (rootPath) =>
+    ipcRenderer.invoke("diskhound:analyze-cleanup", rootPath),
+  searchIndex: (rootPath, query) =>
+    ipcRenderer.invoke("diskhound:search-index", rootPath, query),
+  getDevArtifacts: (rootPath, options) =>
+    ipcRenderer.invoke("diskhound:get-dev-artifacts", rootPath, options),
+  rescanDevArtifacts: (rootPath) =>
+    ipcRenderer.invoke("diskhound:rescan-dev-artifacts", rootPath),
+  cancelDevArtifactsRescan: (rootPath) =>
+    ipcRenderer.invoke("diskhound:cancel-dev-artifacts-rescan", rootPath),
+  forgetDevArtifactPaths: (rootPath, paths) =>
+    ipcRenderer.invoke("diskhound:forget-dev-artifact-paths", rootPath, paths),
+  onDevArtifactsProgress: (listener) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, progress: DevArtifactsRescanProgress) => {
+      listener(progress);
+    };
+    ipcRenderer.on(DEV_ARTIFACTS_PROGRESS_CHANNEL, wrapped);
+    return () => { ipcRenderer.removeListener(DEV_ARTIFACTS_PROGRESS_CHANNEL, wrapped); };
+  },
 
   // Duplicate Detection
   startDuplicateScan: (rootPath, options) => ipcRenderer.invoke("diskhound:start-duplicate-scan", rootPath, options),
@@ -163,6 +193,7 @@ const api: DiskhoundNativeApi = {
 
   // Tray
   minimizeToTray: () => ipcRenderer.send("diskhound:minimize-to-tray"),
+  quitApp: () => ipcRenderer.send("diskhound:quit-app"),
 
   // Events
   onScanSnapshot: (listener) => {

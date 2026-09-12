@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseMacDfOutput } from "../diskMonitor";
+import { parseMacDfOutput, parseWindowsCimLogicalDisks } from "../diskMonitor";
 
 describe("parseMacDfOutput", () => {
   it("keeps the startup disk and mounted user volumes", () => {
@@ -36,5 +36,42 @@ describe("parseMacDfOutput", () => {
     ].join("\n");
 
     expect(parseMacDfOutput(stdout)).toEqual([]);
+  });
+});
+
+describe("parseWindowsCimLogicalDisks", () => {
+  it("parses a CIM JSON array of fixed disks", () => {
+    const stdout = JSON.stringify([
+      { DeviceID: "C:", FreeSpace: 100, Size: 400 },
+      { DeviceID: "D:", FreeSpace: 50, Size: 200 },
+    ]);
+    const drives = parseWindowsCimLogicalDisks(stdout, 9);
+    expect(drives).toEqual([
+      {
+        drive: "C:",
+        totalBytes: 400,
+        freeBytes: 100,
+        usedBytes: 300,
+        usedPercent: 75,
+        timestamp: 9,
+      },
+      {
+        drive: "D:",
+        totalBytes: 200,
+        freeBytes: 50,
+        usedBytes: 150,
+        usedPercent: 75,
+        timestamp: 9,
+      },
+    ]);
+  });
+
+  it("accepts a single object when PowerShell has one disk", () => {
+    const drives = parseWindowsCimLogicalDisks(
+      JSON.stringify({ DeviceID: "C:", FreeSpace: 1, Size: 4 }),
+      1,
+    );
+    expect(drives).toHaveLength(1);
+    expect(drives[0]?.drive).toBe("C:");
   });
 });

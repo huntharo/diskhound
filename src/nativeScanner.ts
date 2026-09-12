@@ -96,6 +96,9 @@ export function createNativeScannerSession(
   if (input.folderTreeOutput) {
     args.push("--folder-tree-output", input.folderTreeOutput);
   }
+  if (input.devArtifactsOutput) {
+    args.push("--dev-artifacts-output", input.devArtifactsOutput);
+  }
 
   let child: ChildProcessByStdio<null, Readable, Readable>;
   try {

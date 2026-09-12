@@ -15,6 +15,7 @@ import type {
   ScanSnapshot,
 } from "./contracts";
 import { createIdleScanSnapshot } from "./contracts";
+import { parseIndexLine } from "./indexLineParse";
 import { normPath } from "./pathUtils";
 import { attachPipeErrorHandlers } from "./streamSafety";
 
@@ -27,6 +28,7 @@ const INDEX_SUFFIX = ".ndjson.gz";
 /// canonical schema. Shared here so any code that needs to clean up
 /// an index (and its sidecar) has the suffix in one place.
 const FOLDER_TREE_SIDECAR_SUFFIX = ".folder-tree.ndjson.gz";
+const DEV_ARTIFACTS_SIDECAR_SUFFIX = ".dev-artifacts.json";
 
 let indexDir = "";
 
@@ -45,6 +47,22 @@ export function folderTreeSidecarPath(id: string): string {
   return Path.join(indexDir, `${id}${FOLDER_TREE_SIDECAR_SUFFIX}`);
 }
 
+export function devArtifactsSidecarPath(id: string): string {
+  return Path.join(indexDir, `${id}${DEV_ARTIFACTS_SIDECAR_SUFFIX}`);
+}
+
+/** Leftover native writes that landed after Done, before the history rename. */
+export function listPendingDevArtifactSidecars(): string[] {
+  if (!indexDir) return [];
+  try {
+    return FS.readdirSync(indexDir)
+      .filter((name) => name.startsWith("pending-") && name.endsWith(DEV_ARTIFACTS_SIDECAR_SUFFIX))
+      .map((name) => Path.join(indexDir, name));
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Short NDJSON record: `{"p":"<path>","s":<size>,"m":<mtime>}` for files.
  * Directory entries have no `s` field: `{"p":"<dir-path>","t":"d","m":<mtime>}`.
@@ -57,6 +75,8 @@ export interface IndexRecord {
   m: number;
   /** Optional type: "d" for directories, absent/"f" for files. */
   t?: "d" | "f";
+  /** 1 when this path is an extra NTFS hardlink — occupancy already counted. */
+  h?: number;
 }
 
 /** Directory-mtime record in the same NDJSON stream (no size). */
@@ -315,6 +335,7 @@ export async function loadLargestFiles(
       if (!rec || typeof rec.s !== "number" || rec.s < minBytes) continue;
       // Skip directory entries — they carry mtime only, no size.
       if (rec.t === "d") continue;
+      if (rec.h === 1) continue;
 
       if (top.length < limit) {
         top.push(rec);
@@ -394,6 +415,7 @@ export async function loadDirectChildrenFromIndex(
       // roll up dirs from their file descendants anyway.
       if (rec.t === "d") continue;
       if (typeof rec.s !== "number") continue;
+      const occupancy = rec.h === 1 ? 0 : rec.s;
 
       const filePathNorm = normPath(rec.p);
       if (!filePathNorm.startsWith(prefix)) continue;
@@ -419,10 +441,10 @@ export async function loadDirectChildrenFromIndex(
         const childPath = parentNorm + Path.sep + childName;
         const existing = childDirTotals.get(childPath);
         if (existing) {
-          existing.size += rec.s;
+          existing.size += occupancy;
           existing.fileCount += 1;
         } else {
-          childDirTotals.set(childPath, { size: rec.s, fileCount: 1 });
+          childDirTotals.set(childPath, { size: occupancy, fileCount: 1 });
         }
       }
     }
@@ -453,6 +475,9 @@ export async function deleteIndex(id: string): Promise<void> {
   try {
     await FSP.unlink(folderTreeSidecarPath(id));
   } catch { /* sidecar optional / already gone */ }
+  try {
+    await FSP.unlink(devArtifactsSidecarPath(id));
+  } catch { /* optional */ }
 }
 
 // ── Snapshot reconstruction from index ─────────────────────────────────────
@@ -535,24 +560,29 @@ export async function buildSnapshotFromIndex(
   try {
   for await (const line of rl) {
     if (!line) continue;
-    let rec: { p?: string; s?: number; m?: number; t?: string };
-    try { rec = JSON.parse(line); } catch { continue; }
-    if (!rec || typeof rec.p !== "string") continue;
+    const rec = parseIndexLine(line);
+    if (!rec) continue;
 
     if (rec.t === "d") {
       directorySet.add(normPath(rec.p));
       continue;
     }
 
-    if (typeof rec.s !== "number" || typeof rec.m !== "number") continue;
-
     // Skip files outside the scan root (defensive — index should be root-
     // scoped already, but the incremental path may leave cruft).
+    // Match the given root as well as Path.resolve: on POSIX, resolve("C:\\foo")
+    // prefixes cwd and would otherwise drop every Windows index line.
     const fileNorm = normPath(rec.p);
-    if (!fileNorm.startsWith(normPath(rootNorm))) continue;
+    if (
+      !fileNorm.startsWith(normPath(rootNorm)) &&
+      !fileNorm.startsWith(normPath(rootPath))
+    ) {
+      continue;
+    }
 
+    const occupancy = rec.h === 1 ? 0 : rec.s;
     filesVisited += 1;
-    bytesSeen += rec.s;
+    bytesSeen += occupancy;
 
     // Per-ancestor rollup: walk from parent dir up to root, adding this
     // file's bytes/count to each. Every unique ancestor also lands in
@@ -564,7 +594,7 @@ export async function buildSnapshotFromIndex(
       const key = normPath(parentPath);
       directorySet.add(key);
       const entry = directoryTotals.get(key) ?? { size: 0, count: 0 };
-      entry.size += rec.s;
+      entry.size += occupancy;
       entry.count += 1;
       directoryTotals.set(key, entry);
       if (parentPath === rootNorm || key === normPath(rootNorm)) break;
@@ -577,11 +607,15 @@ export async function buildSnapshotFromIndex(
     const dotIdx = name.lastIndexOf(".");
     const extension = dotIdx > 0 ? name.slice(dotIdx).toLowerCase() : "(no ext)";
     const extEntry = extensionTotals.get(extension) ?? { size: 0, count: 0 };
-    extEntry.size += rec.s;
+    extEntry.size += occupancy;
     extEntry.count += 1;
     extensionTotals.set(extension, extEntry);
 
     // Top-N largest files with a bounded heap-like list.
+    // Extra hardlinks keep their display size but must not occupy a top-N slot.
+    if (rec.h === 1) {
+      continue;
+    }
     if (largestFiles.length < TOP_FILE_LIMIT) {
       largestFiles.push({
         path: rec.p,
@@ -665,4 +699,101 @@ export async function buildSnapshotFromIndex(
     errorMessage: params.errorMessage ?? null,
     lastUpdatedAt: Date.now(),
   };
+}
+
+export interface IndexSearchQuery {
+  query: string;
+  minSizeBytes?: number;
+  extension?: string;
+  limit?: number;
+}
+
+export interface IndexSearchHit {
+  path: string;
+  name: string;
+  parentPath: string;
+  extension: string;
+  size: number;
+  modifiedAt: number;
+}
+
+export interface IndexSearchResult {
+  hits: IndexSearchHit[];
+  truncated: boolean;
+  filesScanned: number;
+}
+
+/**
+ * Stream a gzipped NDJSON index and return the largest files whose path
+ * or extension matches `query`. Occupancy-only: extra hardlinks (`h:1`)
+ * are skipped so search results match the treemap totals.
+ */
+export async function searchIndexFile(
+  filePath: string,
+  query: IndexSearchQuery,
+): Promise<IndexSearchResult> {
+  const needle = query.query.trim().toLowerCase();
+  const minSize = query.minSizeBytes ?? 0;
+  const extFilter = query.extension?.trim().toLowerCase() ?? "";
+  const limit = Math.min(2_000, Math.max(1, query.limit ?? 400));
+  const hits: IndexSearchHit[] = [];
+  let filesScanned = 0;
+  let smallest = 0;
+
+  if (!needle || !FS.existsSync(filePath)) {
+    return { hits, truncated: false, filesScanned };
+  }
+
+  const PathMod = await import("node:path");
+  const gunzip = createGunzip();
+  const source = createReadStream(filePath);
+  attachPipeErrorHandlers([source, gunzip]);
+  source.pipe(gunzip);
+  const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
+
+  try {
+    for await (const line of rl) {
+      if (!line) continue;
+      let rec: IndexRecord;
+      try { rec = JSON.parse(line) as IndexRecord; } catch { continue; }
+      if (!rec || rec.t === "d" || rec.h === 1 || typeof rec.p !== "string" || typeof rec.s !== "number") {
+        continue;
+      }
+      filesScanned += 1;
+      if (rec.s < minSize) continue;
+      const name = PathMod.basename(rec.p);
+      const dotIdx = name.lastIndexOf(".");
+      const extension = dotIdx > 0 ? name.slice(dotIdx).toLowerCase() : "(no ext)";
+      if (extFilter && extension !== extFilter) continue;
+      const haystack = rec.p.toLowerCase();
+      if (!haystack.includes(needle) && !extension.includes(needle)) continue;
+
+      const hit: IndexSearchHit = {
+        path: rec.p,
+        name,
+        parentPath: PathMod.dirname(rec.p),
+        extension,
+        size: rec.s,
+        modifiedAt: typeof rec.m === "number" ? rec.m : 0,
+      };
+      if (hits.length < limit) {
+        hits.push(hit);
+        if (hits.length === limit) {
+          hits.sort((a, b) => a.size - b.size);
+          smallest = hits[0]!.size;
+        }
+      } else if (hit.size > smallest) {
+        hits[0] = hit;
+        hits.sort((a, b) => a.size - b.size);
+        smallest = hits[0]!.size;
+      }
+    }
+  } catch { /* partial */ }
+  finally {
+    try { gunzip.destroy(); } catch { /* ok */ }
+    try { source.destroy(); } catch { /* ok */ }
+  }
+
+  hits.sort((a, b) => b.size - a.size);
+  return { hits, truncated: filesScanned > 0 && hits.length >= limit, filesScanned };
 }

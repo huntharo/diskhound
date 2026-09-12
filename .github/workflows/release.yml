@@ -22,7 +22,9 @@ jobs:
         # cross-builds the x86_64 Rust target locally, which Apple's
         # toolchain handles with no extra setup.
         include:
-          - os: windows-latest
+          # windows-latest is VS 18 (2026). blake2's node-gyp 11 does not
+          # recognize that version and `bun install` fails the whole job.
+          - os: windows-2022
             rust-target: x86_64-pc-windows-msvc
             electron-builder-args: --win --x64
           - os: ubuntu-latest

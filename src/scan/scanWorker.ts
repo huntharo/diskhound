@@ -14,6 +14,13 @@ import {
   type ScanFileRecord,
   type ScanSnapshot,
 } from "../shared/contracts";
+import { occupancyBytes } from "../shared/allocatedSize";
+import {
+  createDevAcc,
+  noteDevFile,
+  sidecarFromAcc,
+  writeDevArtifactSidecar,
+} from "../shared/devArtifactSidecar";
 
 /**
  * Parsed baseline state used by the Phase-1 smart-rescan optimization. For
@@ -22,9 +29,13 @@ import {
  * baseline's, we inherit all those file records without re-walking the
  * subtree.
  */
+interface BaselineFileRecord extends ScanFileRecord {
+  extraHardlink?: boolean;
+}
+
 interface Baseline {
   dirMtimes: Map<string, number>;
-  filesByParent: Map<string, ScanFileRecord[]>;
+  filesByParent: Map<string, BaselineFileRecord[]>;
   /** Set of all directory paths known in the baseline (for subtree inheritance). */
   dirs: Set<string>;
 }
@@ -38,8 +49,6 @@ const TOP_EXTENSION_LIMIT = 12;
 const STAT_BATCH_SIZE = 32;
 const SNAPSHOT_INTERVAL_MS = 200;
 // Scan everything — no exclusion lists. A disk analyzer must be comprehensive.
-
-const POSIX_BLOCK_BYTES = 512;
 
 // Guard: this module may get loaded outside a worker context
 // (e.g. shared-chunk resolution during bundling). Only wire up
@@ -101,10 +110,14 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
       indexGzip = null;
     }
   }
-  const writeIndexEntry = (path: string, size: number, mtime: number) => {
+  const devAcc = createDevAcc();
+  const writeIndexEntry = (path: string, size: number, mtime: number, extraHardlink = false) => {
+    noteDevFile(devAcc, path, size, extraHardlink);
     if (!indexGzip) return;
     try {
-      indexGzip.write(JSON.stringify({ p: path, s: size, m: mtime }) + "\n");
+      indexGzip.write(JSON.stringify(
+        extraHardlink ? { p: path, s: size, m: mtime, h: 1 } : { p: path, s: size, m: mtime },
+      ) + "\n");
     } catch {
       indexGzip = null;
     }
@@ -118,11 +131,19 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
     }
   };
   const finalizeIndex = async () => {
-    if (!indexGzip) return;
-    await new Promise<void>((resolve) => {
-      indexGzip!.end(() => resolve());
-    });
-    indexGzip = null;
+    if (indexGzip) {
+      await new Promise<void>((resolve) => {
+        indexGzip!.end(() => resolve());
+      });
+      indexGzip = null;
+    }
+    if (input.devArtifactsOutput) {
+      try {
+        await writeDevArtifactSidecar(input.devArtifactsOutput, sidecarFromAcc(devAcc, rootPath));
+      } catch {
+        /* best-effort */
+      }
+    }
   };
 
   // Load baseline (Phase 1 smart-rescan). On any parse failure we silently
@@ -210,11 +231,14 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
         const inherited = inheritSubtree(directoryPath, baseline);
         for (const fileRecord of inherited) {
           filesVisited += 1;
-          bytesSeen += fileRecord.size;
-          upsertRankedFile(largestFiles, fileRecord, TOP_FILE_LIMIT);
-          rollupDirectorySize(rootPath, fileRecord.parentPath, fileRecord.size, directoryTotals, hottestDirectories, TOP_DIRECTORY_LIMIT);
-          rollupExtension(extensionTotals, fileRecord.extension, fileRecord.size);
-          writeIndexEntry(fileRecord.path, fileRecord.size, fileRecord.modifiedAt);
+          const occupancy = fileRecord.extraHardlink ? 0 : fileRecord.size;
+          bytesSeen += occupancy;
+          if (!fileRecord.extraHardlink) {
+            upsertRankedFile(largestFiles, fileRecord, TOP_FILE_LIMIT);
+            rollupDirectorySize(rootPath, fileRecord.parentPath, occupancy, directoryTotals, hottestDirectories, TOP_DIRECTORY_LIMIT);
+            rollupExtension(extensionTotals, fileRecord.extension, occupancy);
+          }
+          writeIndexEntry(fileRecord.path, fileRecord.size, fileRecord.modifiedAt, fileRecord.extraHardlink);
         }
         // Also re-emit the directory entries under the subtree so the new
         // index remains self-contained for the next scan's baseline.
@@ -288,7 +312,7 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
             name: entry.name,
             parentPath: directoryPath,
             extension: getExtension(entry.name),
-            size: allocatedSize(stat),
+            size: occupancyBytes(stat),
             modifiedAt: stat.mtimeMs,
           } satisfies ScanFileRecord;
         }),
@@ -333,14 +357,6 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
     lastEmitAt = now;
     emitSnapshot("running");
   }
-}
-
-function allocatedSize(stat: Stats): number {
-  const maybeBlocks = (stat as Stats & { blocks?: number }).blocks;
-  if (process.platform !== "win32" && typeof maybeBlocks === "number" && Number.isFinite(maybeBlocks)) {
-    return Math.max(0, maybeBlocks * POSIX_BLOCK_BYTES);
-  }
-  return stat.size;
 }
 
 function getExtension(fileName: string): string {
@@ -475,7 +491,7 @@ async function loadBaseline(filePath: string): Promise<Baseline> {
   const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
   for await (const line of rl) {
     if (!line) continue;
-    let rec: { p?: string; s?: number; m?: number; t?: string };
+    let rec: { p?: string; s?: number; m?: number; t?: string; h?: number };
     try {
       rec = JSON.parse(line);
     } catch { continue; }
@@ -494,13 +510,14 @@ async function loadBaseline(filePath: string): Promise<Baseline> {
 
     const name = Path.basename(rec.p);
     const parentPath = Path.resolve(Path.dirname(rec.p));
-    const fileRecord: ScanFileRecord = {
+    const fileRecord: BaselineFileRecord = {
       path: normalized,
       name,
       parentPath,
       extension: getExtension(name),
       size: rec.s,
       modifiedAt: rec.m,
+      extraHardlink: rec.h === 1,
     };
 
     let list = filesByParent.get(parentPath);
@@ -518,9 +535,9 @@ async function loadBaseline(filePath: string): Promise<Baseline> {
  * Return all file records under the given directory (direct + descendants)
  * from the baseline. Used when we skip walking an unchanged subtree.
  */
-function inheritSubtree(dirPath: string, baseline: Baseline): ScanFileRecord[] {
+function inheritSubtree(dirPath: string, baseline: Baseline): BaselineFileRecord[] {
   const norm = Path.resolve(dirPath);
-  const out: ScanFileRecord[] = [];
+  const out: BaselineFileRecord[] = [];
   const prefix = norm.endsWith(Path.sep) ? norm : norm + Path.sep;
 
   // Direct children first (hot path — avoid iterating the full map when

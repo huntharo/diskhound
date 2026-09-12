@@ -37,9 +37,10 @@ export async function sampleSystemMemory(): Promise<SystemMemorySnapshot> {
   let processes: ProcessInfo[] = [];
   let errorMessage: string | undefined;
   try {
-    processes = process.platform === "win32"
-      ? await sampleProcessesWindows()
-      : await sampleProcessesUnix();
+    processes = (await sampleProcessesNative())
+      ?? (process.platform === "win32"
+        ? await sampleProcessesWindows()
+        : await sampleProcessesUnix());
   } catch (error) {
     errorMessage = error instanceof Error ? error.message : String(error);
   }
@@ -55,7 +56,8 @@ export async function sampleSystemMemory(): Promise<SystemMemorySnapshot> {
   //                        workloads). For power users who want absolute
   //                        single-core load instead of relative share.
   const nowMs = Date.now();
-  if (lastCpuSample && processes.length > 0) {
+  const needsCpuDelta = processes.some((p) => p.cpuPercent == null && typeof p.cpuTimeMs === "number");
+  if (lastCpuSample && processes.length > 0 && needsCpuDelta) {
     const wallDeltaMs = Math.max(1, nowMs - lastCpuSample.sampledAt);
     const cores = Math.max(1, cpuCount);
     for (const p of processes) {
@@ -116,6 +118,28 @@ export async function killProcess(pid: number, signal: KillSignal): Promise<void
 }
 
 // ── Platform implementations ──────────────────────────────
+
+async function sampleProcessesNative(): Promise<ProcessInfo[] | null> {
+  try {
+    const { getNativeSample } = await import("../nativeProcessSample");
+    const sample = await getNativeSample();
+    if (!sample || sample.processes.length === 0) return null;
+    const processes: ProcessInfo[] = sample.processes.map((row) => enrichProcessInfo({
+      pid: row.pid,
+      name: row.name,
+      memoryBytes: row.memoryBytes,
+      cpuPercent: Number.isFinite(row.cpuPercent) ? Math.min(100, Math.max(0, row.cpuPercent)) : null,
+      cpuPercentPerCore: Number.isFinite(row.cpuPercentPerCore) ? Math.max(0, row.cpuPercentPerCore) : null,
+      userOwned: !isKnownSystemProcess(row.name),
+      exePath: row.exePath,
+      commandLine: row.commandLine,
+      parentPid: row.parentPid,
+    }));
+    return attachParentNames(processes);
+  } catch {
+    return null;
+  }
+}
 
 async function sampleProcessesWindows(): Promise<ProcessInfo[]> {
   // PowerShell Get-Process is our primary path — typically 1-2s and

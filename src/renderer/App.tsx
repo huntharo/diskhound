@@ -10,9 +10,11 @@ import {
   type DuplicateScanProgress,
   type GeneralSettings,
   type ScanOptions,
+  type ScanFileRecord,
   type ScanSnapshot,
   type UpdateStatus,
 } from "../shared/contracts";
+import { formatScanRoot } from "../shared/pathUtils";
 import { formatBytes } from "./lib/format";
 import { clearDeletedPaths } from "./lib/deletedPaths";
 import { useLiveDiskSpace } from "./lib/hooks";
@@ -23,6 +25,7 @@ import { nativeApi } from "./nativeApi";
 
 import { ChangesView } from "./components/ChangesView";
 import { DiskPicker } from "./components/DiskPicker";
+import { DevView } from "./components/DevView";
 import { DuplicatesView } from "./components/DuplicatesView";
 import { DiskIoView } from "./components/DiskIoView";
 import { MemoryView } from "./components/MemoryView";
@@ -40,15 +43,19 @@ const TABS: { id: AppView; label: string; key: string }[] = [
   { id: "overview", label: "Overview", key: "1" },
   { id: "files", label: "Largest Files", key: "2" },
   { id: "folders", label: "Folders", key: "3" },
-  { id: "duplicates", label: "Duplicates", key: "4" },
-  { id: "changes", label: "Changes", key: "5" },
-  { id: "easyMove", label: "Easy Move", key: "6" },
-  { id: "memory", label: "Processes", key: "7" },
-  { id: "diskIo", label: "Disk I/O", key: "8" },
-  { id: "settings", label: "Settings", key: "9" },
+  { id: "dev", label: "Dev Artifacts", key: "4" },
+  { id: "duplicates", label: "Duplicates", key: "5" },
+  { id: "changes", label: "Changes", key: "6" },
+  { id: "easyMove", label: "Easy Move", key: "7" },
+  { id: "memory", label: "Processes", key: "8" },
+  { id: "diskIo", label: "Disk I/O", key: "9" },
+  { id: "settings", label: "Settings", key: "0" },
 ];
 
 const SEARCHABLE_VIEWS: readonly AppView[] = ["files"];
+const SCAN_SCOPED_VIEWS: readonly AppView[] = [
+  "overview", "files", "folders", "dev", "duplicates", "changes",
+];
 
 function isEditableElement(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -146,12 +153,26 @@ export function App() {
     return currentRoot ? { ...idle, rootPath: currentRoot } : idle;
   }, [snapshotsByRoot, currentRoot]);
 
+  const otherScannedRoots = useMemo(() => {
+    const current = rootKey(currentRoot);
+    const roots: string[] = [];
+    for (const [key, snap] of snapshotsByRoot) {
+      if (key === current) continue;
+      if (snap.status === "done" && snap.rootPath) roots.push(snap.rootPath);
+    }
+    return roots;
+  }, [snapshotsByRoot, currentRoot]);
+
   // Setter used by the rest of the app — mirrors the old "rootPath" getter.
   const rootPath = currentRoot;
   const setRootPath = (path: string) => setCurrentRoot(path);
 
   const [scanOptions, setScanOptions] = useState<ScanOptions>(defaultScanOptions());
   const [view, setView] = useState<AppView>("overview");
+  const [devTabMounted, setDevTabMounted] = useState(false);
+  useEffect(() => {
+    if (view === "dev") setDevTabMounted(true);
+  }, [view]);
   const { drives, refresh: refreshDiskSpace } = useLiveDiskSpace();
   const [filterExt, setFilterExt] = useState<string | undefined>();
   // null = still loading the initial snapshot; prevents a flash of the picker
@@ -159,6 +180,7 @@ export function App() {
   const [showPicker, setShowPicker] = useState<boolean | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
+  const [indexSearchHits, setIndexSearchHits] = useState<ScanFileRecord[] | null>(null);
   const [hasPendingDiff, setHasPendingDiff] = useState(false);
   const [activeTheme, setActiveTheme] = useState<"dark" | "light">("dark");
   const [themePreference, setThemePreference] = useState<GeneralSettings["theme"]>("dark");
@@ -648,6 +670,11 @@ export function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.metaKey) {
+        if (!e.shiftKey && !e.altKey && e.key.toLowerCase() === "q") {
+          e.preventDefault();
+          nativeApi.quitApp();
+          return;
+        }
         if (e.shiftKey && e.key.toLowerCase() === "w") {
           e.preventDefault();
           void nativeApi.openSystemWidget();
@@ -844,6 +871,31 @@ export function App() {
       ),
     };
   }, [snapshot, searchQuery]);
+
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (q.length < 2 || !snapshot.rootPath) {
+      setIndexSearchHits(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void nativeApi.searchIndex(snapshot.rootPath!, { query: q, limit: 400 }).then((result) => {
+        if (cancelled || !result) return;
+        // Missing/empty index: fall back to the in-memory top-N filter.
+        setIndexSearchHits(result.filesScanned === 0 ? null : result.hits);
+      });
+    }, 220);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [searchQuery, snapshot.rootPath, snapshot.finishedAt]);
+
+  const indexSearchSnapshot = useMemo(() => {
+    if (!searchQuery.trim() || !indexSearchHits) return searchFilteredSnapshot;
+    return { ...snapshot, largestFiles: indexSearchHits };
+  }, [searchQuery, indexSearchHits, searchFilteredSnapshot, snapshot]);
 
   const statusLabel = useMemo(() => {
     switch (snapshot.status) {
@@ -1129,7 +1181,7 @@ export function App() {
                 setSearchOpen(!searchOpen);
                 if (searchOpen) setSearchQuery("");
               }}
-              title="Search largest files (Ctrl+F)"
+              title="Search the scan index (Ctrl+F)"
             >
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
                 <circle cx="6" cy="6" r="4" />
@@ -1171,12 +1223,12 @@ export function App() {
               className="search-bar-input"
               value={searchQuery}
               onInput={(e) => setSearchQuery((e.target as HTMLInputElement).value)}
-              placeholder="Filter largest files by name, path, or extension..."
+              placeholder="Search the whole scan by path or extension..."
               autoFocus
             />
             {searchQuery && (
               <span className="search-bar-count">
-              {searchFilteredSnapshot.largestFiles.length} match{searchFilteredSnapshot.largestFiles.length !== 1 ? "es" : ""}
+              {indexSearchSnapshot.largestFiles.length} match{indexSearchSnapshot.largestFiles.length !== 1 ? "es" : ""}
             </span>
           )}
             <button
@@ -1214,6 +1266,14 @@ export function App() {
             </button>
           ))}
           <div className="tab-spacer" />
+          {SCAN_SCOPED_VIEWS.includes(view) && snapshot.rootPath && (
+            <span
+              className="tab-root"
+              title={`${snapshot.rootPath} — switch drives with the pills in the header`}
+            >
+              {formatScanRoot(snapshot.rootPath)}
+            </span>
+          )}
           <div className="tab-status">
             <span className={`status-dot ${snapshot.status}`} />
             <span>{statusLabel}</span>
@@ -1239,9 +1299,35 @@ export function App() {
             />
           ) : (
             <>
-              {view === "overview" && <ErrorBoundary name="Overview"><Overview snapshot={snapshot} onFilterExtension={onFilterExtension} onViewChanges={() => setView("changes")} scanPercent={currentScanPercent} /></ErrorBoundary>}
-              {view === "files" && <ErrorBoundary name="File List"><FileList snapshot={searchFilteredSnapshot} initialFilter={filterExt} /></ErrorBoundary>}
-              {view === "folders" && <ErrorBoundary name="Folders"><FolderList snapshot={snapshot} /></ErrorBoundary>}
+              {view === "overview" && <ErrorBoundary name="Overview"><Overview snapshot={snapshot} onFilterExtension={onFilterExtension} onViewChanges={() => setView("changes")} onViewDev={() => setView("dev")} scanPercent={currentScanPercent} /></ErrorBoundary>}
+              {view === "files" && <ErrorBoundary name="File List"><FileList snapshot={indexSearchSnapshot} initialFilter={filterExt} /></ErrorBoundary>}
+              {view === "folders" && (
+                <ErrorBoundary name="Folders">
+                  <FolderList
+                    snapshot={snapshot}
+                    onStartScan={() => {
+                      if (snapshot.rootPath) void doScan(snapshot.rootPath);
+                    }}
+                    otherScannedRoots={otherScannedRoots}
+                  />
+                </ErrorBoundary>
+              )}
+              {(view === "dev" || devTabMounted) && (
+                <div
+                  className="view-pane"
+                  hidden={view !== "dev"}
+                >
+                  <ErrorBoundary name="Dev Artifacts">
+                    <DevView
+                      snapshot={snapshot}
+                      onStartScan={() => {
+                        if (snapshot.rootPath) void doScan(snapshot.rootPath);
+                      }}
+                      otherScannedRoots={otherScannedRoots}
+                    />
+                  </ErrorBoundary>
+                </div>
+              )}
               {view === "duplicates" && (
                 <ErrorBoundary name="Duplicates">
                   <DuplicatesView

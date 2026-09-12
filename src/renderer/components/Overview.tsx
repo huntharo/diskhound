@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 
-import type { ExtensionBucket, ScanDiffResult, ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
+import type { DevArtifactReport, ExtensionBucket, ScanDiffResult, ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
+import { mergeDiagLogHotspots } from "../../shared/devArtifacts";
 import {
   deletedPathLabel,
   deletedPathTitle,
@@ -14,7 +15,14 @@ import {
   colorForExtension,
   type TreemapFeaturedItem,
 } from "../lib/treemap";
+import {
+  FILE_CATEGORY_CHIPS,
+  FILTER_EXTS,
+  fileMatchesCategory,
+  type FileCategoryFilter,
+} from "../lib/fileQuickFilters";
 import { nativeApi } from "../nativeApi";
+import { DEV_ARTIFACTS_UPDATED_EVENT } from "../lib/uiEvents";
 import { FileIcon } from "./FileIcon";
 import { toast } from "./Toasts";
 import type { TreemapLayout } from "../lib/treemap";
@@ -30,6 +38,7 @@ interface Props {
    *  card's "View details" affordance so users can drill into the
    *  full diff without hunting for the sidebar tab. */
   onViewChanges?: () => void;
+  onViewDev?: () => void;
   /**
    * Scan progress percent (0–99) when a scan is live and we have
    * enough drive metadata to compute a ratio. null otherwise — the
@@ -98,7 +107,7 @@ function getInitialShowFolders(): boolean {
 // canvas render performance.
 const DENSE_TREEMAP_LIMIT = 5_000;
 
-export function Overview({ snapshot, onFilterExtension, onViewChanges, scanPercent }: Props) {
+export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev, scanPercent }: Props) {
   const { bytesSeen, filesVisited, directoriesVisited, skippedEntries } = snapshot;
   // Live-ticking elapsed: during a running scan the snapshot only updates
   // ~5x/second via progress messages, so the "elapsed" metric would
@@ -134,6 +143,7 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, scanPerce
   // user's preference survives reopens.
   const [recentOn, setRecentOn] = useState<boolean>(getInitialRecentOn);
   const [recentWindow, setRecentWindow] = useState<OverviewRecentWindow>(getInitialRecentWindow);
+  const [typeFilter, setTypeFilter] = useState<FileCategoryFilter>("all");
   const [dominantExpanded, setDominantExpanded] = useState(false);
   const [denseFiles, setDenseFiles] = useState<ScanFileRecord[] | null>(null);
   const [latestDiff, setLatestDiff] = useState<ScanDiffResult | null>(null);
@@ -213,12 +223,24 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, scanPerce
   // rects. Cutoff is computed once per render so we don't drift mid-
   // session as Date.now() advances.
   const sourceFiles = useMemo(() => {
-    if (!recentOn) return sourceFilesRaw;
-    const ms = OVERVIEW_RECENT_WINDOWS.find((w) => w.id === recentWindow)?.ms
-      ?? OVERVIEW_RECENT_WINDOWS[1].ms;
-    const cutoff = Date.now() - ms;
-    return sourceFilesRaw.filter((f) => f.modifiedAt >= cutoff);
-  }, [sourceFilesRaw, recentOn, recentWindow]);
+    let files = sourceFilesRaw;
+    if (recentOn) {
+      const ms = OVERVIEW_RECENT_WINDOWS.find((w) => w.id === recentWindow)?.ms
+        ?? OVERVIEW_RECENT_WINDOWS[1].ms;
+      const cutoff = Date.now() - ms;
+      files = files.filter((f) => f.modifiedAt >= cutoff);
+    }
+    if (typeFilter !== "all") {
+      files = files.filter((f) => fileMatchesCategory(f, typeFilter));
+    }
+    return files;
+  }, [sourceFilesRaw, recentOn, recentWindow, typeFilter]);
+
+  const visibleExtensions = useMemo(() => {
+    if (typeFilter === "all") return snapshot.topExtensions;
+    const allowed = FILTER_EXTS[typeFilter];
+    return snapshot.topExtensions.filter((bucket) => allowed.has(bucket.extension.toLowerCase()));
+  }, [snapshot.topExtensions, typeFilter]);
 
   const treemapComposition = useMemo(
     () => buildTreemapComposition(sourceFiles),
@@ -274,7 +296,12 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, scanPerce
     <div className="overview">
       <MonitoringNudge />
       <div className="metrics-strip">
-        <Metric value={formatBytes(bytesSeen)} label="scanned" accent />
+        <Metric
+          value={formatBytes(bytesSeen)}
+          label="on disk"
+          accent
+          title="Size on disk after sparse holes and filesystem compression"
+        />
         <Metric value={formatCount(filesVisited)} label="files" />
         <Metric value={formatCount(directoriesVisited)} label="dirs" />
         <Metric value={formatCount(skippedEntries)} label="skipped" />
@@ -291,6 +318,7 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, scanPerce
             </div>
           </div>
         )}
+        <DevCleanupTile snapshot={snapshot} onViewDev={onViewDev} />
       </div>
 
       {latestDiff && <LatestScanSummary diff={latestDiff} onViewDetails={onViewChanges} />}
@@ -406,6 +434,20 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, scanPerce
                   </div>
                 )}
               </div>
+            </div>
+            <div className="overview-filter-chips chip-group" role="radiogroup" aria-label="Filter overview by type">
+              {FILE_CATEGORY_CHIPS.map((chip) => (
+                <button
+                  key={chip.id}
+                  type="button"
+                  className={`chip ${typeFilter === chip.id ? "active" : ""}`}
+                  aria-pressed={typeFilter === chip.id}
+                  title={chip.id === "all" ? "Show every file type" : `Show only ${chip.label.toLowerCase()}`}
+                  onClick={() => setTypeFilter(chip.id)}
+                >
+                  {chip.label}
+                </button>
+              ))}
             </div>
 
             {condensedMode && (
@@ -588,6 +630,16 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, scanPerce
                     );
                   })()}
                 </div>
+              ) : typeFilter !== "all" && treemapFiles.length === 0 && snapshot.status === "done" ? (
+                <div className="treemap-empty">
+                  <div className="treemap-empty-icon">&#x25A6;</div>
+                  <div style={{ fontSize: 13, color: "var(--text)" }}>
+                    No {FILE_CATEGORY_CHIPS.find((chip) => chip.id === typeFilter)?.label.toLowerCase() ?? "files"} in this overview
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                    Clear the type filter or pick All to see the full map.
+                  </div>
+                </div>
               ) : snapshot.status === "idle" && snapshot.rootPath && treemapFiles.length === 0 ? (
                 // Valid root selected but never scanned — offer a clear CTA.
                 <div className="treemap-empty">
@@ -642,12 +694,12 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, scanPerce
                 </button>
               </div>
               <div className="ext-sidebar-list">
-                {snapshot.topExtensions.length === 0 ? (
+                {visibleExtensions.length === 0 ? (
                   <div className="empty-view" style={{ height: "100%" }}>
-                    <span>No data yet</span>
+                    <span>{snapshot.topExtensions.length === 0 ? "No data yet" : "No extensions in this filter"}</span>
                   </div>
                 ) : (
-                  snapshot.topExtensions.map((b) => (
+                  visibleExtensions.map((b) => (
                     <ExtRow
                       key={b.extension}
                       bucket={b}
@@ -720,9 +772,9 @@ function FeaturedFileCard({ item, rank, isBusy, protectedBy, deletedRecord, onRe
   );
 }
 
-function Metric({ value, label, accent }: { value: string; label: string; accent?: boolean }) {
+function Metric({ value, label, accent, title }: { value: string; label: string; accent?: boolean; title?: string }) {
   return (
-    <div className="metric">
+    <div className="metric" title={title}>
       <span className={`metric-value ${accent ? "accent" : ""}`}>{value}</span>
       <span className="metric-label">{label}</span>
     </div>
@@ -732,7 +784,9 @@ function Metric({ value, label, accent }: { value: string; label: string; accent
 function LatestScanSummary({ diff, onViewDetails }: { diff: ScanDiffResult; onViewDetails?: () => void }) {
   const grew = diff.totalBytesDelta > 0;
   const bytesLabel = formatBytes(Math.abs(diff.totalBytesDelta));
-  const title = diff.totalBytesDelta === 0
+  const title = diff.sizeSemanticsChanged
+    ? "Size accounting changed to size on disk — run one more scan before comparing"
+    : diff.totalBytesDelta === 0
     ? "No size change since the previous scan"
     : grew
       ? `${bytesLabel} added since the previous scan`
@@ -747,7 +801,7 @@ function LatestScanSummary({ diff, onViewDetails }: { diff: ScanDiffResult; onVi
     .slice(0, 2);
 
   return (
-    <div className={`scan-summary-card ${grew ? "grew" : diff.totalBytesDelta < 0 ? "freed" : "flat"}`}>
+    <div className={`scan-summary-card ${diff.sizeSemanticsChanged ? "flat" : grew ? "grew" : diff.totalBytesDelta < 0 ? "freed" : "flat"}`}>
       <div className="scan-summary-main">
         <div className="scan-summary-kicker">Latest scan summary</div>
         <div className="scan-summary-title">{title}</div>
@@ -786,12 +840,63 @@ function LatestScanSummary({ diff, onViewDetails }: { diff: ScanDiffResult; onVi
   );
 }
 
-/**
- * Dismissible banner that nudges the user to turn on background monitoring.
- * Shows only when monitoring is currently off AND the user hasn't dismissed
- * it previously (persisted via localStorage). Clicking "Enable" flips the
- * setting on and dismisses the banner; clicking the × just dismisses.
- */
+function DevCleanupTile({ snapshot, onViewDev }: { snapshot: ScanSnapshot; onViewDev?: () => void }) {
+  const [dev, setDev] = useState<DevArtifactReport | null>(null);
+
+  useEffect(() => {
+    if (!snapshot.rootPath || snapshot.status !== "done") {
+      setDev(null);
+      return;
+    }
+    let cancelled = false;
+    const load = () => {
+      // Sidecar only — never stream the full index from Overview. Folders
+      // and first paint stay free; Dev Artifacts builds a sidecar on demand.
+      void nativeApi.getDevArtifacts(snapshot.rootPath!, { sidecarOnly: true }).then((report) => {
+        if (!cancelled) setDev(report);
+      }).catch(() => {
+        if (!cancelled) setDev(null);
+      });
+    };
+    load();
+    const onUpdated = (event: Event) => {
+      const updatedRoot = (event as CustomEvent<{ rootPath?: string }>).detail?.rootPath;
+      if (!updatedRoot || !snapshot.rootPath) return;
+      if (updatedRoot.replace(/[\\/]+$/, "").toLowerCase() !== snapshot.rootPath.replace(/[\\/]+$/, "").toLowerCase()) {
+        return;
+      }
+      load();
+    };
+    window.addEventListener(DEV_ARTIFACTS_UPDATED_EVENT, onUpdated);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(DEV_ARTIFACTS_UPDATED_EVENT, onUpdated);
+    };
+  }, [snapshot.rootPath, snapshot.finishedAt, snapshot.status]);
+
+  if (snapshot.status !== "done") return null;
+  const display = dev
+    ? mergeDiagLogHotspots(dev, snapshot.hottestDirectories ?? [])
+    : null;
+  if (!display || display.totalBytes <= 0) return null;
+  const topKind = display.kindTotals[0]?.kind;
+  return (
+    <button
+      type="button"
+      className="metric metric-dev-tile"
+      onClick={() => onViewDev?.()}
+      title="Open Dev Artifacts to permanently delete worktrees, node_modules, build caches, and RDP traces"
+    >
+      <span className="metric-value accent">{formatBytes(display.totalBytes)}</span>
+      <span className="metric-label">dev artifacts</span>
+      <span className="metric-dev-meta">
+        {formatCount(display.projectCount)} proj
+        {topKind ? ` · ${formatCount(display.kindTotals[0]!.count)} trees` : ""}
+      </span>
+    </button>
+  );
+}
+
 function MonitoringNudge() {
   const [monitoringEnabled, setMonitoringEnabled] = useState<boolean | null>(null);
   const [dismissed, setDismissed] = useState<boolean>(() => {

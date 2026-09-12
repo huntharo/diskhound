@@ -232,4 +232,38 @@ describe("computeDiff", () => {
 
     expect(diff.fileDeltas).toHaveLength(0);
   });
+
+  it("flags logical vs allocated size accounting as incomparable", () => {
+    const baseline = makeSnapshot({ bytesSeen: 512 * 1024 * 1024 * 1024, sizeSemantics: "logical" });
+    const current = makeSnapshot({ bytesSeen: 8 * 1024 * 1024 * 1024, sizeSemantics: "allocated" });
+    const diff = computeDiff(baseline, current, "b", "c");
+
+    expect(diff.sizeSemanticsChanged).toBe(true);
+    expect(diff.totalBytesDelta).toBe(current.bytesSeen - baseline.bytesSeen);
+  });
+
+  it("treats two allocated snapshots as comparable", () => {
+    const baseline = makeSnapshot({ bytesSeen: 100, sizeSemantics: "allocated" });
+    const current = makeSnapshot({ bytesSeen: 120, sizeSemantics: "allocated" });
+    const diff = computeDiff(baseline, current, "b", "c");
+
+    expect(diff.sizeSemanticsChanged).toBe(false);
+    expect(diff.totalBytesDelta).toBe(20);
+  });
+
+  it("does not flag untagged vs allocated on unix", () => {
+    if (process.platform === "win32") return;
+    const baseline = makeSnapshot({ bytesSeen: 100 });
+    delete baseline.sizeSemantics;
+    const current = makeSnapshot({ bytesSeen: 120, sizeSemantics: "allocated" });
+    expect(computeDiff(baseline, current, "b", "c").sizeSemanticsChanged).toBe(false);
+  });
+
+  it("flags untagged vs allocated on Windows", () => {
+    if (process.platform !== "win32") return;
+    const baseline = makeSnapshot({ bytesSeen: 100 });
+    delete baseline.sizeSemantics;
+    const current = makeSnapshot({ bytesSeen: 50, sizeSemantics: "allocated" });
+    expect(computeDiff(baseline, current, "b", "c").sizeSemanticsChanged).toBe(true);
+  });
 });

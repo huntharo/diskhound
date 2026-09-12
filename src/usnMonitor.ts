@@ -6,6 +6,7 @@ import { createInterface } from "node:readline";
 import { createGunzip, createGzip } from "node:zlib";
 
 import type { ScanSnapshot } from "./shared/contracts";
+import { occupancyBytes } from "./shared/allocatedSize";
 import { buildSnapshotFromIndex, indexFilePath } from "./shared/scanIndex";
 import {
   getCursor,
@@ -43,6 +44,13 @@ interface JournalRecord {
   usn: number;
   reasonMask: number;
   timestamp: number;
+  /** Allocated size on disk when the native journal reader could open the file. */
+  size?: number;
+  /** File last-write time in unix ms, when resolved from the handle. */
+  mtime?: number;
+  isDirectory?: boolean;
+  /** FILE_STANDARD_INFO.NumberOfLinks when the handle could be queried. */
+  linkCount?: number;
 }
 
 interface JournalCursorEnd {
@@ -167,14 +175,34 @@ export async function runIncrementalScan(params: {
   for (const [path, rec] of byPath) {
     if (rec.op === "delete") {
       deletes.add(path);
-    } else {
+    } else if (!rec.isDirectory) {
       createOrModify.add(path);
     }
   }
 
-  // Stat each create/modify target to get its current size + mtime. In
-  // parallel — up to 32 concurrent stats — to stay well under fd limits.
-  const freshEntries = await statInBatches(Array.from(createOrModify), 32);
+  // Prefer allocated size from the journal reader (open-by-id handle).
+  // Stat anything the native side couldn't size — Node's Windows stat
+  // is logical-only, so this is a last resort.
+  const freshEntries = new Map<string, { size: number; mtime: number; extraHardlink?: boolean }>();
+  const needStat: string[] = [];
+  for (const path of createOrModify) {
+    const rec = byPath.get(path);
+    if (rec && typeof rec.size === "number" && Number.isFinite(rec.size)) {
+      freshEntries.set(path, {
+        size: Math.max(0, rec.size),
+        mtime: typeof rec.mtime === "number" && rec.mtime > 0 ? rec.mtime : rec.timestamp,
+        extraHardlink: typeof rec.linkCount === "number" && rec.linkCount > 1,
+      });
+    } else {
+      needStat.push(path);
+    }
+  }
+  if (needStat.length > 0) {
+    const statted = await statInBatches(needStat, 32);
+    for (const [path, entry] of statted) {
+      freshEntries.set(path, entry);
+    }
+  }
 
   // Stream the previous index → new index, applying the deltas.
   const additions = await applyDeltasToIndex(
@@ -406,7 +434,7 @@ async function statInBatches(
         try {
           const st = await FSP.stat(p);
           if (st.isFile()) {
-            result.set(normPath(p), { size: st.size, mtime: st.mtimeMs });
+            result.set(normPath(p), { size: occupancyBytes(st), mtime: st.mtimeMs });
           }
         } catch {
           // File vanished between journal and stat, or no permission. The
@@ -427,7 +455,7 @@ async function applyDeltasToIndex(
   newPath: string,
   deltas: {
     deletes: Set<string>;
-    updates: Map<string, { size: number; mtime: number }>;
+    updates: Map<string, { size: number; mtime: number; extraHardlink?: boolean }>;
   },
 ): Promise<{ additions: number; modifications: number; deletions: number }> {
   // Work with a copy of `updates` so we can remove entries as we see them —
@@ -438,7 +466,8 @@ async function applyDeltasToIndex(
 
   await FSP.mkdir(Path.dirname(newPath), { recursive: true });
 
-  const gzOut = createGzip({ level: 6 });
+  // Match the native IndexWriter: Compression::fast() is level 1.
+  const gzOut = createGzip({ level: 1 });
   const writeStream = createWriteStream(newPath);
   // Attach error listeners BEFORE pipe() — pipe() doesn't propagate
   // errors, so an EPERM/ENOSPC on writeStream or a gzip error becomes
@@ -460,7 +489,7 @@ async function applyDeltasToIndex(
   const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
   for await (const line of rl) {
     if (!line) continue;
-    let rec: { p?: string; s?: number; m?: number; t?: string };
+    let rec: { p?: string; s?: number; m?: number; t?: string; h?: number };
     try { rec = JSON.parse(line); } catch { continue; }
     if (!rec || typeof rec.p !== "string") continue;
 
@@ -481,20 +510,20 @@ async function applyDeltasToIndex(
 
     const update = pendingAdds.get(norm);
     if (update) {
-      writeLine({ p: rec.p, s: update.size, m: update.mtime });
+      writeLine({ p: rec.p, s: update.size, m: update.mtime, ...(rec.h === 1 ? { h: 1 } : {}) });
       pendingAdds.delete(norm);
       modifications += 1;
       continue;
     }
 
-    // Unchanged: pass through
-    writeLine({ p: rec.p, s: rec.s ?? 0, m: rec.m ?? 0 });
+    // Unchanged: pass through, including extra-hardlink occupancy flag.
+    writeLine({ p: rec.p, s: rec.s ?? 0, m: rec.m ?? 0, ...(rec.h === 1 ? { h: 1 } : {}) });
   }
 
   // Anything still in pendingAdds is a new file not previously in the index.
   let additions = 0;
   for (const [path, fresh] of pendingAdds) {
-    writeLine({ p: path, s: fresh.size, m: fresh.mtime });
+    writeLine({ p: path, s: fresh.size, m: fresh.mtime, ...(fresh.extraHardlink ? { h: 1 } : {}) });
     additions += 1;
   }
 

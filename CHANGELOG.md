@@ -1,5 +1,184 @@
 # Changelog
 
+## Unreleased
+
+## 0.6.0 — 2026-09-12
+
+Size on disk, quieter first-run defaults, and Dev Artifacts land on
+main. Occupied space, a kind tape (including DiagOutputDir `diag-logs`),
+Group All, sort by largest increase, permanent delete, and Ctrl+Q quit.
+
+### Size on disk
+
+Windows occupancy uses allocated size (see #2). Extra NTFS hardlinks
+stay visible as paths but no longer inflate totals, the treemap, or
+folder rollups. Overview totals are labeled "on disk". Sparse VHDX
+files no longer look like they fill the SSD.
+
+### First-run defaults
+
+- New installs no longer launch DiskHound at login.
+- Free-space polls default to 60 minutes; full rescans default to 6 hours.
+- New installs default "Minimize to tray" off. Relaunch focuses the
+  existing window, including from the tray (see #1).
+
+### Dev Artifacts
+
+New **Dev Artifacts** tab (Ctrl+4) groups worktrees, `node_modules`,
+Rust `target/`, package-manager caches, venvs, DiagOutputDir RDP traces,
+and other developer bloat. Full scans write a compact sidecar so the tab
+opens without re-streaming the drive index.
+
+Windows `DiagOutputDir` / `RdClientAutoTrace` folders (the Disk Cleanup
+"DiagOutputDir RDP trace logs" heap) classify as `diag-logs` in the
+native sidecar and JS path walker. Dev shows them on the type tape
+and in the list. Cleanup analysis keeps them as their own suggestion
+instead of mixing them into generic logs. An older sidecar can still
+pick the folder up from scan directory hotspots, or from Rescan trees.
+
+Named projects still lead with the project name and a relative tail
+(`zebra-crosslink` / `target\release`). Home, Temp, and similar
+uninformative parents invert: `.gradle`, `DiagOutputDir`, and
+`pkg\mod` are the headline, with the path on the line below. A stacked
+occupancy strip plus kind rail replaces the old kind chips. Not a
+treemap. Group by All is a flat size-sorted list; By kind and By
+project still bucket. The kind rail "All kinds" control filters
+types. It is not the All group mode. Group, Sort, and kind filters
+read as selected, idle, or unavailable. When a visible tree has a
+since-last-scan delta, a Sort control offers Largest vs Largest
+increase. Missing deltas rank as 0. The control is hidden when this
+report has no change data. Increase sort applies to All and inside
+By kind / By project groups.
+
+Select and Delete sit in a bar next to the list, not in the header
+chips. Delete permanently removes trees; it does not send them to the
+Recycle Bin. Progress shows the report occupancy while a walk-unlink
+worker ticks path, files, and elapsed. Packaged scan workers are one file
+each so permanent delete does not fail looking for `./chunk-*.cjs`.
+
+Ctrl/Cmd+Q quits DiskHound instead of hiding to the tray.
+
+## 0.5.45 — 2026-09-11
+
+Size on disk, a Dev Artifacts tab, quieter first-run defaults, and a
+sidecar-backed open that no longer flashes the empty Retry state while
+the in-process load is still running. Cut from the
+`feat/disk-quality-and-dev-artifacts` branch as a prerelease until that
+work lands on main.
+
+### Dev Artifacts first open
+
+Opening Dev no longer paints “No Dev Artifacts sidecar…” / Scan C: /
+Retry for a frame before the sidecar arrives. First paint shows the
+loading panel, or the last report for this root+scan, and Retry stays
+on that panel until the read finishes.
+
+### First-run defaults
+
+- New installs no longer launch DiskHound at login.
+- Free-space polls default to 60 minutes; full rescans default to 6 hours.
+
+### Windows drive space without `wmic`
+
+Fixed-disk free space uses CIM (`Win32_LogicalDisk`) instead of the
+removed `wmic.exe` tool.
+
+### Size on disk and hardlinks
+
+Windows occupancy uses allocated size (see #2). Extra NTFS hardlinks stay
+visible as paths but no longer inflate totals, the treemap, or folder
+rollups. The `h` flag survives mtime-skip inheritance and USN rewrites.
+Unelevated FindFirstFile walks still cannot see link counts, but a re-walk
+keeps `h` from the previous index for the same path. New USN hardlink
+creates (`NumberOfLinks > 1`) are stored as extra names. USN records omit
+size when handle metadata is unavailable so Node can stat instead of
+storing a 0-byte file. Windows JS-worker fallbacks do not inherit an
+allocated MFT baseline.
+
+### Index search and cleanup
+
+Ctrl+F searches the full scan index, not only the top-N largest files.
+Cleanup suggestions stream that same index (temps, caches, old installers,
+large media). Cache matching uses unambiguous trees (`node_modules`,
+`target`, `obj`, …) and does not treat `dist`/`build`/`out`/`bin` as
+reclaimable. Ctrl+F falls back to the live top-N list when the index is
+not on disk yet.
+
+### Dev artifacts
+
+New **Dev Artifacts** tab (Ctrl+4) groups worktrees, `node_modules`, Rust
+`target/`, package-manager caches, venvs, and other developer bloat by
+kind or project, with growth since the previous scan. Overview shows a
+compact tile on the summary row when a sidecar is already on disk.
+
+### Faster live sampling
+
+Process and Disk I/O samples come from the native scanner (`sysinfo`)
+instead of PowerShell on every tick. GPU still uses performance counters.
+
+### Streaming full-file diff
+
+Full diffs merge sorted index chunks on disk instead of loading a 12 GB
+in-memory map.
+
+### Dev cleanup
+
+Full scans write a compact Dev Artifacts sidecar while indexing, so the
+tab opens instantly and does not re-scan when you leave and come back.
+The sidecar keeps the largest 2,500 trees and only the projects that
+own them. A 17 MB C: sidecar (≈29k trees + every project marker)
+crashed the load worker (exit 1); Dev then classified the 1.1M-line
+folder tree for ~55s and said “reading the folder tree.” That fallback
+is for old scans with no sidecar file. A sidecar on disk is loaded as
+JSON in the main process — never reclassified from the folder tree,
+and never sent through a worker thread. The packaged load worker
+exited 1 inside `app.asar` (logged as OOM); Retry then treated a
+valid C: sidecar as missing. Fat sidecars already on disk are slimmed
+on first successful open. Scan workers unpack next to the asar so
+classify / rescan / folder-tree can still spawn.
+**Rescan trees** walks those artifact folders on disk without a full
+drive scan. Overview's tile reads the sidecar only. Dev Artifacts and
+Folders can start the same full scan Overview uses when the selected
+drive has no usable scan (`Scan C:`). History is per drive in
+`%APPDATA%/DiskHound`; a reinstall does not wipe it, and this tab
+only binds the selected drive.
+
+You can select trees, trash selected, or trash all. Folders and Dev
+Artifacts show a staged spinner the first time a large tree is opened.
+
+### Packaged app starts
+
+The Windows installer no longer crashes on launch with
+`require_main.__toESM is not a function`. The main process is a single
+CJS file instead of circular code-split chunks. Checking "Run DiskHound"
+on the finish page actually starts the app (the default NSIS helper is a
+no-op from a per-user installer, and the admin scheduled-task handoff
+no longer quits that first launch).
+
+### Relaunch focuses the existing window (#1)
+
+Closing DiskHound with "Minimize to tray" left the app running invisibly.
+Launching it again often did nothing (Windows focus-stealing, lock taken
+late). Relaunch now restores and focuses the existing window, including
+from the tray. The first hide-to-tray shows a balloon so it is obvious
+the app is still running. New installs default "Minimize to tray" off;
+existing settings are left alone. A second launch during first window
+creation reuses the in-flight window instead of opening another. A
+second launch while the first window is still loading will not hide it
+behind autostart-minimized.
+
+### Windows size on disk for sparse files (#2)
+
+Windows scans used logical file size (Explorer "Size"), so a dynamically
+expanding Android/WSL VHDX showed as 512 GB even when it only occupies a
+slice of the SSD. The
+NTFS MFT path now uses `$DATA` allocated size, the FindFirstFile walker
+calls `GetCompressedFileSize` for sparse/compressed/cloud files, and USN
+incremental updates carry allocated size from the open-by-id handle.
+Unix already reported `stat.blocks * 512`. Overview totals are labeled
+"on disk". The first scan after this change is not comparable to older
+Windows history in Changes.
+
 ## 0.5.44 — 2026-06-02
 
 DiskHound now supports an opt-in beta update channel and gives users clearer

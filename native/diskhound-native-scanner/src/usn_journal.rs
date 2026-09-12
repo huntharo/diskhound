@@ -39,9 +39,11 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, GetFinalPathNameByHandleW, OpenFileById, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_ID_TYPE, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, FileBasicInfo, FileStandardInfo, GetFileInformationByHandleEx,
+    GetFinalPathNameByHandleW, OpenFileById, FILE_ATTRIBUTE_DIRECTORY, FILE_BASIC_INFO,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_DESCRIPTOR, FILE_ID_DESCRIPTOR_0, FILE_ID_TYPE,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_STANDARD_INFO, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::Ioctl::{
     FSCTL_QUERY_USN_JOURNAL, FSCTL_READ_USN_JOURNAL, USN_JOURNAL_DATA_V0,
@@ -123,6 +125,16 @@ enum OutputLine {
         #[serde(rename = "reasonMask")]
         reason_mask: u32,
         timestamp: u64,
+        /// Allocated size when FileStandardInfo succeeded. Omitted so the
+        /// Node side can stat instead of recording a false 0-byte file.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        size: Option<u64>,
+        mtime: u64,
+        #[serde(rename = "isDirectory")]
+        is_directory: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "linkCount")]
+        link_count: Option<u32>,
     },
     JournalCursor {
         cursor: i64,
@@ -313,11 +325,53 @@ where
     Ok(last_cursor)
 }
 
-/// Best-effort path resolution via OpenFileById → GetFinalPathNameByHandleW.
+struct ResolvedFile {
+    path: String,
+    allocated_size: Option<u64>,
+    mtime_ms: u64,
+    is_directory: Option<bool>,
+    number_of_links: Option<u32>,
+}
+
+fn file_standard_info(handle: HANDLE) -> Option<FILE_STANDARD_INFO> {
+    let mut info = unsafe { std::mem::zeroed::<FILE_STANDARD_INFO>() };
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileStandardInfo,
+            &mut info as *mut _ as *mut c_void,
+            std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        None
+    } else {
+        Some(info)
+    }
+}
+
+fn file_basic_info(handle: HANDLE) -> Option<FILE_BASIC_INFO> {
+    let mut info = unsafe { std::mem::zeroed::<FILE_BASIC_INFO>() };
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileBasicInfo,
+            &mut info as *mut _ as *mut c_void,
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    };
+    if ok == 0 {
+        None
+    } else {
+        Some(info)
+    }
+}
+
+/// Best-effort path + occupancy via OpenFileById.
 /// Returns None for files that can't be opened (deleted, insufficient
 /// permissions, race conditions). Callers should expect a meaningful
 /// fraction to fail on system volumes.
-fn resolve_path(volume: HANDLE, file_ref: u64) -> Option<String> {
+fn resolve_file(volume: HANDLE, file_ref: u64) -> Option<ResolvedFile> {
     let descriptor = FILE_ID_DESCRIPTOR {
         dwSize: std::mem::size_of::<FILE_ID_DESCRIPTOR>() as u32,
         Type: FILE_ID_TYPE_FILE_ID,
@@ -341,6 +395,17 @@ fn resolve_path(volume: HANDLE, file_ref: u64) -> Option<String> {
         return None;
     }
 
+    let standard = file_standard_info(handle);
+    let basic = file_basic_info(handle);
+    let allocated_size = standard
+        .as_ref()
+        .map(|info| info.AllocationSize.max(0) as u64);
+    let is_directory = standard.as_ref().map(|info| info.Directory != 0);
+    let number_of_links = standard.as_ref().map(|info| info.NumberOfLinks);
+    let mtime_ms = basic
+        .map(|info| windows_filetime_to_unix_ms(info.LastWriteTime))
+        .unwrap_or(0);
+
     let mut buffer = vec![0u16; 32_768];
     let chars_written = unsafe {
         GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, 0)
@@ -354,11 +419,16 @@ fn resolve_path(volume: HANDLE, file_ref: u64) -> Option<String> {
 
     let path = String::from_utf16_lossy(&buffer[..chars_written as usize]);
     // Strip the `\\?\` extended-length prefix for consistency with the scanner.
-    Some(
-        path.strip_prefix(r"\\?\")
+    Some(ResolvedFile {
+        path: path
+            .strip_prefix(r"\\?\")
             .map(str::to_string)
             .unwrap_or(path),
-    )
+        allocated_size,
+        mtime_ms,
+        is_directory,
+        number_of_links,
+    })
 }
 
 fn windows_filetime_to_unix_ms(ticks: i64) -> u64 {
@@ -409,7 +479,7 @@ pub fn run_journal_mode(drive_letter: char, start_cursor: Option<i64>) -> Result
     let mut dropped: u64 = 0;
 
     let final_cursor = read_journal(volume, info.journal_id, effective_start, |record, name_u16| {
-        let path = match resolve_path(volume, record.FileReferenceNumber) {
+        let resolved = match resolve_file(volume, record.FileReferenceNumber) {
             Some(p) => p,
             None => {
                 dropped += 1;
@@ -422,20 +492,27 @@ pub fn run_journal_mode(drive_letter: char, start_cursor: Option<i64>) -> Result
         // between journal write and our resolve), log the journal's name
         // as a hint.
         let _name = String::from_utf16_lossy(name_u16);
-        let basename = Path::new(&path)
+        let basename = Path::new(&resolved.path)
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("");
         let _ = basename; // used to assert basename == _name in a stricter build
 
+        let is_directory = resolved.is_directory.unwrap_or(
+            (record.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0,
+        );
         let line = OutputLine::JournalRecord {
             op: JournalOp::from_reason(record.Reason),
-            path,
+            path: resolved.path,
             file_ref: record.FileReferenceNumber,
             parent_ref: record.ParentFileReferenceNumber,
             usn: record.Usn,
             reason_mask: record.Reason,
             timestamp: windows_filetime_to_unix_ms(record.TimeStamp),
+            size: resolved.allocated_size,
+            mtime: resolved.mtime_ms,
+            is_directory,
+            link_count: resolved.number_of_links,
         };
         let _ = emit(&line);
         emitted += 1;
@@ -472,4 +549,43 @@ pub fn query_cursor(drive_letter: char) -> Result<(), String> {
 
     unsafe { CloseHandle(volume) };
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(size: Option<u64>) -> OutputLine {
+        OutputLine::JournalRecord {
+            op: JournalOp::Modify,
+            path: r"C:\tmp\file.bin".into(),
+            file_ref: 1,
+            parent_ref: 2,
+            usn: 3,
+            reason_mask: 0,
+            timestamp: 0,
+            size,
+            mtime: 0,
+            is_directory: false,
+            link_count: None,
+        }
+    }
+
+    #[test]
+    fn journal_record_omits_size_when_standard_info_failed() {
+        let json = serde_json::to_string(&record(None)).unwrap();
+        assert!(!json.contains("\"size\""), "unexpected size in {json}");
+    }
+
+    #[test]
+    fn journal_record_keeps_zero_allocated_size() {
+        let json = serde_json::to_string(&record(Some(0))).unwrap();
+        assert!(json.contains("\"size\":0"), "missing zero size in {json}");
+    }
+
+    #[test]
+    fn journal_record_omits_link_count_when_unknown() {
+        let json = serde_json::to_string(&record(Some(1))).unwrap();
+        assert!(!json.contains("linkCount"), "unexpected linkCount in {json}");
+    }
 }

@@ -1,9 +1,10 @@
-import type {
-  DirectoryDelta,
-  ExtensionDelta,
-  FileDelta,
-  ScanDiffResult,
-  ScanSnapshot,
+import {
+  sizeSemanticsCompatible,
+  type DirectoryDelta,
+  type ExtensionDelta,
+  type FileDelta,
+  type ScanDiffResult,
+  type ScanSnapshot,
 } from "./contracts";
 import { normPath } from "./pathUtils";
 
@@ -68,6 +69,8 @@ export function computeDiff(
     extensionDeltas: diffExtensions(baseline, current),
 
     timeBetweenMs: (current.finishedAt ?? 0) - (baseline.finishedAt ?? 0),
+
+    sizeSemanticsChanged: !sizeSemanticsCompatible(baseline, current),
   };
 }
 
