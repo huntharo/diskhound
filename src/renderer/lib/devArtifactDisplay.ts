@@ -103,6 +103,42 @@ export function identifyingParent(artifact: DevArtifact): string {
   return parent;
 }
 
+/**
+ * Home, Temp, profile shells, and drive roots do not identify a project.
+ * Named folders such as `pour-over-hub` stay informative.
+ */
+export function isUninformativeParent(parent: string): boolean {
+  const parts = splitPath(parent);
+  const rest = stripDrive(parts);
+  const key = rest.map((p) => p.toLowerCase());
+  if (rest.length === 0) return true;
+
+  const last = key[key.length - 1]!;
+  if (last === "temp" || last === "tmp" || last === "tmpdir") return true;
+
+  if (rest.length === 1 && (last === "users" || last === "home")) return true;
+
+  if (rest.length === 2 && (key[0] === "users" || key[0] === "home")) return true;
+
+  if (key[0] === "users" && key[2] === "appdata") {
+    if (rest.length === 3) return true;
+    if (rest.length === 4 && (key[3] === "local" || key[3] === "roaming" || key[3] === "locallow")) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function genericLeafLines(artifact: DevArtifact): { headline: string; tail: string } {
+  const parent = identifyingParent(artifact);
+  const leafRel = relativeFrom(artifact.path, parent);
+  if (isUninformativeParent(parent)) {
+    return { headline: leafRel, tail: shortenVisiblePath(parent) };
+  }
+  return { headline: shortenVisiblePath(parent), tail: leafRel };
+}
+
 /** Full path when it fits; otherwise `C:\Users\name\…\leaf`. */
 export function shortenVisiblePath(path: string, max = 52): string {
   if (path.length <= max) return path;
@@ -134,21 +170,25 @@ export function shortenUnscopedParent(parent: string): string {
 }
 
 export function artifactHeadline(artifact: DevArtifact): string {
-  if (hasDistinctProjectName(artifact)) return artifact.projectName;
+  const parent = identifyingParent(artifact);
+  if (hasDistinctProjectName(artifact) && !isUninformativeParent(parent)) {
+    return artifact.projectName;
+  }
   const leaf = basenameOf(artifact.path);
   if (isGenericArtifactLeaf(leaf) || isGenericArtifactLeaf(artifact.projectName)) {
-    return shortenVisiblePath(identifyingParent(artifact));
+    return genericLeafLines(artifact).headline;
   }
   return leaf || artifact.path;
 }
 
 export function artifactTail(artifact: DevArtifact): string {
-  if (hasDistinctProjectName(artifact) && artifact.projectPath) {
+  const parent = identifyingParent(artifact);
+  if (hasDistinctProjectName(artifact) && artifact.projectPath && !isUninformativeParent(parent)) {
     return relativeFrom(artifact.path, artifact.projectPath);
   }
   const leaf = basenameOf(artifact.path);
   if (isGenericArtifactLeaf(leaf) || isGenericArtifactLeaf(artifact.projectName)) {
-    return relativeFrom(artifact.path, identifyingParent(artifact));
+    return genericLeafLines(artifact).tail;
   }
   if (artifact.projectPath) {
     return relativeFrom(artifact.path, artifact.projectPath);
