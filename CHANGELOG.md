@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.6.1 — 2026-09-22
+
+Linux scans stay on one filesystem, the header no longer paints Stop
+over the drive pills, and a warm walk of `/usr` drops from 13.5 s to
+3.2 s.
+
 ### Linux scans
 
 A scan stays on the filesystem it started on. Scanning `/` still
