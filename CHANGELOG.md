@@ -2,6 +2,45 @@
 
 ## Unreleased
 
+## 0.6.1 — 2026-09-22
+
+Linux scans stay on one filesystem, the header no longer paints Stop
+over the drive pills, and a warm walk of `/usr` drops from 13.5 s to
+3.2 s.
+
+### Linux scans
+
+A scan stays on the filesystem it started on. Scanning `/` still
+includes same-pool btrfs subvolumes such as `/home`, and it no longer
+walks a different disk mounted underneath (`/mnt/windows`, `/boot`),
+tmpfs, or an AppImage FUSE mount. Those already have their own drive
+pills, or they are not storage. `stat` device ids are not the signal:
+btrfs gives each subvolume a different `st_dev` even when `df` shows
+one pool. The native walker and the JS fallback both use the
+major:minor from `/proc/self/mountinfo`.
+
+The `/` drive pill shows scan progress. The root key used to trim `/`
+down to an empty string, so that pill stayed on "656 GB free" while
+the scan ran. The pill that owns a path is the longest matching mount,
+so a scan of `/home/tom` lights `/home` and not every pill that starts
+with `/`.
+
+### Header
+
+Stop no longer draws on top of the root pill's free-space label. The
+scan controls keep their width and the drive pills scroll. On Linux
+the header leaves room for the title-bar window buttons, so Search,
+the system widget, and Settings are not covered by minimize, maximize,
+and close.
+
+### Scan speed
+
+The non-Windows walker ranks the hottest directories once at the end
+of the walk, the same as the Windows MFT path. Sorting that list on
+every ancestor of every file was the CPU cost once the filesystem was
+warm. A release scan of `/usr` (309,560 files) went from 13.5 s to
+3.2 s. Thread counts from 4 to 32 did not move it.
+
 ## 0.6.0 — 2026-09-12
 
 Size on disk, quieter first-run defaults, and Dev Artifacts land on
