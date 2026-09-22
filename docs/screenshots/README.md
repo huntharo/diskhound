@@ -3,6 +3,7 @@
 Drop PNG screenshots here with these filenames so the root README picks them up:
 
 - `overview.png` — the Overview tab with treemap + extension sidebar (hero)
+- `dev-artifacts.png` — the Dev Artifacts tab with the kind tape and a selected tree
 - `duplicates.png` — the Duplicates tab with found groups
 - `changes.png` — the Changes tab with scan history + quick-select pills
 - `folders.png` — the Folders tab mid-drilldown
