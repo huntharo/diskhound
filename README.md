@@ -50,6 +50,7 @@ WinDirStat was the gold standard for a decade. DiskHound is what it would be tod
 - 🔍 **Duplicate detection** — SHA-256 content hashing with two-pass optimization (4KB prefix rejection, then full hash). Concurrent I/O. "Keep newest" / "Keep oldest" bulk actions.
 - 🔗 **Easy Move** — move a large file to another drive, leave a symlink or junction in its place. Fully reversible. Tracks every move so you can put files back with one click. Offers a one-UAC fast-scan mode for system installs.
 - 📁 **Folder explorer** — drill into directories with breadcrumb navigation and proportional size bars.
+- 🧹 **Dev Artifacts** (`Ctrl+4`) — groups worktrees, `node_modules`, Rust `target/` trees, package caches, and venvs. Pick trees and permanently delete them. A finished scan writes a sidecar so the tab opens without reading the drive again.
 - 🛎️ **Drive monitoring** — periodic free-space polling with delta alerts when space drops meaningfully. Rolling history of drive-level events is persisted.
 - ⚙️ **Processes viewer** — real-time memory + CPU sampling for every process, with icons pulled from each executable. **Four views**: List, Treemap, scrolling CPU Heatmap (time on X, process on Y), and details.
 - 🎮 **GPU viewer** — per-process GPU utilisation + VRAM pulled from Windows `\GPU Engine(*)` / `\GPU Process Memory(*)` performance counters. Adapter overview (3D / Compute / Decode / Encode stats).
@@ -73,6 +74,12 @@ Use the one-click download links at the top of this README, or grab any release 
 ## Screenshots
 
 <table>
+  <tr>
+    <td align="center" colspan="2">
+      <img src="docs/screenshots/dev-artifacts.png" alt="Dev Artifacts" width="100%" /><br>
+      <sub><b>Dev Artifacts</b> — worktrees, package trees, Rust targets, and caches, grouped so you can delete what you pick</sub>
+    </td>
+  </tr>
   <tr>
     <td align="center">
       <img src="docs/screenshots/duplicates.png" alt="Duplicates" width="100%" /><br>
