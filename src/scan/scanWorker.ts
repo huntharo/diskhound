@@ -21,6 +21,7 @@ import {
   sidecarFromAcc,
   writeDevArtifactSidecar,
 } from "../shared/devArtifactSidecar";
+import { foreignMountPoints } from "../shared/linuxMounts";
 
 /**
  * Parsed baseline state used by the Phase-1 smart-rescan optimization. For
@@ -77,6 +78,10 @@ if (parentPort) {
 
 async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
   const rootPath = Path.resolve(input.rootPath);
+  // Mounts on a different filesystem than rootPath. Same-pool btrfs
+  // subvolumes are not in this set. Checked before we descend so a
+  // scan of `/` does not walk `/mnt/windows` or tmpfs.
+  const foreignMounts = foreignMountPoints(rootPath);
   const scanOptions = input.options;
   const TOP_FILE_LIMIT = input.limits?.topFileLimit ?? DEFAULT_TOP_FILE_LIMIT;
   const TOP_DIRECTORY_LIMIT = input.limits?.topDirectoryLimit ?? DEFAULT_TOP_DIRECTORY_LIMIT;
@@ -276,6 +281,9 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
       }
 
       if (entry.isDirectory()) {
+        if (foreignMounts.has(fullPath)) {
+          continue;
+        }
         if (!directoryTotals.has(fullPath)) {
           directoryTotals.set(fullPath, {
             path: fullPath,

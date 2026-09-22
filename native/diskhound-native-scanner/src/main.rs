@@ -5,6 +5,8 @@ use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "linux")]
+use std::sync::atomic::AtomicUsize;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use flate2::Compression;
@@ -1145,6 +1147,14 @@ fn scan_root(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
 /// overlayfs images + snap squashfs mounts multiply the visible
 /// file count 10-100× without telling the user anything useful
 /// about the host filesystem's free space.
+///
+/// Separately, `foreign_mount_points` drops any mount whose
+/// kernel device id differs from the scan root. btrfs subvolumes
+/// of the same pool share that id (so a scan of `/` still includes
+/// `/home` when both are subvolumes of one disk). A Windows NTFS
+/// mount, tmpfs, or AppImage FUSE mount does not, and is left for
+/// its own drive pill. `st_dev` is the wrong key here: btrfs gives
+/// each subvolume a distinct `st_dev` even when `df` shows one pool.
 #[cfg(not(windows))]
 const LINUX_SKIP_PREFIXES: &[&str] = &[
     "/proc",
@@ -1180,9 +1190,126 @@ fn should_skip_linux_path(path: &Path) -> bool {
     false
 }
 
+/// One line of `/proc/self/mountinfo`: mount point plus the
+/// major:minor of the filesystem. btrfs subvolumes of one pool
+/// share that id; `stat.st_dev` does not.
+#[cfg(target_os = "linux")]
+struct LinuxMount {
+    point: String,
+    dev: String,
+}
+
+#[cfg(target_os = "linux")]
+fn unescape_mountinfo(field: &str) -> String {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\'
+            && i + 3 < bytes.len()
+            && bytes[i + 1..i + 4].iter().all(|c| c.is_ascii_digit())
+        {
+            if let Ok(v) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 4]).unwrap_or(""), 8)
+            {
+                out.push(v);
+                i += 4;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(target_os = "linux")]
+fn trim_mount_point(path: &str) -> &str {
+    if path.len() > 1 {
+        path.trim_end_matches('/')
+    } else {
+        path
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_mountinfo(text: &str) -> Vec<LinuxMount> {
+    let mut mounts = Vec::new();
+    for line in text.lines() {
+        let Some((before, _)) = line.split_once(" - ") else {
+            continue;
+        };
+        let fields: Vec<&str> = before.split(' ').collect();
+        if fields.len() < 5 {
+            continue;
+        }
+        let dev = fields[2];
+        if dev.is_empty() || !dev.contains(':') {
+            continue;
+        }
+        let point = unescape_mountinfo(fields[4]);
+        let point = trim_mount_point(&point).to_string();
+        if point.is_empty() {
+            continue;
+        }
+        mounts.push(LinuxMount {
+            point,
+            dev: dev.to_string(),
+        });
+    }
+    mounts
+}
+
+#[cfg(target_os = "linux")]
+fn path_is_under(root: &str, path: &str) -> bool {
+    if root == "/" {
+        return path != "/";
+    }
+    path.starts_with(root) && path.as_bytes().get(root.len()) == Some(&b'/')
+}
+
+/// Mount points under `root` that live on a different filesystem.
+/// Same-pool btrfs subvolumes are kept. The scan root itself is never
+/// included, so an explicit scan of `/mnt/windows` still walks it.
+#[cfg(target_os = "linux")]
+fn foreign_mount_points(mounts: &[LinuxMount], root: &str) -> HashSet<String> {
+    let root = trim_mount_point(root);
+    let Some(root_dev) = mounts
+        .iter()
+        .filter(|m| root == m.point || path_is_under(&m.point, root))
+        .max_by_key(|m| m.point.len())
+        .map(|m| m.dev.clone())
+    else {
+        return HashSet::new();
+    };
+    mounts
+        .iter()
+        .filter(|m| m.dev != root_dev && path_is_under(root, &m.point))
+        .map(|m| m.point.clone())
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn load_foreign_mount_points(root: &Path) -> HashSet<String> {
+    let text = match std::fs::read_to_string("/proc/self/mountinfo") {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!(
+                "[diskhound-native-scanner] linux: could not read mountinfo ({err}) — scan may cross into other disks"
+            );
+            return HashSet::new();
+        }
+    };
+    foreign_mount_points(&parse_mountinfo(&text), &normalize_path(root))
+}
+
 #[cfg(not(windows))]
 fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
     state.scan_phase = ScanPhase::Indexing;
+    // Same tally-only directory rollup the Windows MFT path uses.
+    // The incremental top-N sort on every ancestor of every file was
+    // the CPU cost of a Linux walk once the filesystem was warm.
+    state.defer_hottest_dir_ranking = true;
     if let Some(baseline) = state.baseline.as_ref() {
         if let Some(total) = baseline.dir_file_counts.get(&state.root_path_string) {
             state.expected_total_files = Some(*total);
@@ -1211,6 +1338,16 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
         }
     });
 
+    // Other disks and pseudo filesystems mounted under the root.
+    // macOS keeps the old walk: firmlinks make st_dev / mount ids lie
+    // about where user files live, and this bug is the Linux one.
+    #[cfg(target_os = "linux")]
+    let foreign_mounts = load_foreign_mount_points(root_path);
+    #[cfg(target_os = "linux")]
+    let pruned_mounts = Arc::new(AtomicUsize::new(0));
+    #[cfg(target_os = "linux")]
+    let pruned_mounts_for_walk = Arc::clone(&pruned_mounts);
+
     let walker = WalkDir::new(root_path)
         .sort(false)
         .skip_hidden(false)
@@ -1220,13 +1357,27 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
         // we never touch kernel-generated content. Without this a
         // scan of `/` produced millions of bogus entries and sometimes
         // hung on e.g. /proc/kcore.
-        .process_read_dir(|_depth, _path, _state, children| {
+        //
+        // Also drop mount points that are a different filesystem than
+        // the scan root (NTFS at /mnt/windows, tmpfs, FUSE). Same-pool
+        // btrfs subvolumes stay. See foreign_mount_points.
+        .process_read_dir(move |_depth, _path, _state, children| {
             children.retain(|child_result| {
-                if let Ok(child) = child_result {
-                    !should_skip_linux_path(&child.path())
-                } else {
-                    true // Let the outer loop handle read errors.
+                let Ok(child) = child_result else {
+                    return true; // Let the outer loop handle read errors.
+                };
+                if should_skip_linux_path(&child.path()) {
+                    return false;
                 }
+                #[cfg(target_os = "linux")]
+                if child.file_type().is_dir() {
+                    let point = trim_mount_point(&normalize_path(&child.path())).to_string();
+                    if foreign_mounts.contains(&point) {
+                        pruned_mounts_for_walk.fetch_add(1, Ordering::Relaxed);
+                        return false;
+                    }
+                }
+                true
             });
         });
 
@@ -1238,6 +1389,7 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
 
     for entry in walker {
         if is_cancelled() {
+            finalize_hottest_directories(state);
             return Ok(());
         }
 
@@ -1304,13 +1456,19 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
         record_file(state, file_record)?;
     }
 
+    #[cfg(target_os = "linux")]
+    let pruned = pruned_mounts.load(Ordering::Relaxed);
+    #[cfg(not(target_os = "linux"))]
+    let pruned = 0usize;
     eprintln!(
-        "[diskhound-native-scanner] linux: walk done in {} ms (files={}, dirs={}, skipped={})",
+        "[diskhound-native-scanner] linux: walk done in {} ms (files={}, dirs={}, skipped={}, foreign_mounts_pruned={})",
         walk_started.elapsed().as_millis(),
         state.files_visited,
         state.directories_visited,
         state.skipped_entries,
+        pruned,
     );
+    finalize_hottest_directories(state);
     Ok(())
 }
 
@@ -4396,5 +4554,59 @@ mod index_line_parse_tests {
         assert!(parse_index_line("not json").is_none());
         assert!(parse_index_line("").is_none());
         assert!(parse_index_line(r#"{"s":1}"#).is_none());
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_mount_tests {
+    use super::{foreign_mount_points, parse_mountinfo, unescape_mountinfo};
+
+    const FIXTURE: &str = "\
+36 35 0:29 / / rw,relatime - btrfs /dev/mapper/root rw\n\
+37 36 0:29 /@home /home rw - btrfs /dev/mapper/root rw\n\
+38 36 0:29 /@log /var/log rw - btrfs /dev/mapper/root rw\n\
+39 36 0:58 / /tmp rw - tmpfs tmpfs rw\n\
+40 36 259:9 / /boot rw - vfat /dev/nvme0n1p1 rw\n\
+41 36 259:6 / /mnt/windows rw - ntfs3 /dev/nvme1n1p1 ro\n\
+42 36 259:7 / /mnt/windows-backup rw - ntfs3 /dev/sdc1 rw\n\
+43 39 0:99 / /tmp/.mount_DiskHo rw - fuse.AppImage DiskHound ro\n\
+44 36 0:30 / /mnt/my\\040disk rw - ext4 /dev/sdb1 rw\n\
+45 41 0:58 / /mnt/windows/nested-tmp rw - tmpfs tmpfs rw\n";
+
+    #[test]
+    fn unescapes_octal_space() {
+        assert_eq!(unescape_mountinfo(r"/mnt/my\040disk"), "/mnt/my disk");
+    }
+
+    #[test]
+    fn root_scan_keeps_same_pool_subvolumes_and_drops_other_disks() {
+        let mounts = parse_mountinfo(FIXTURE);
+        let foreign = foreign_mount_points(&mounts, "/");
+        assert!(foreign.contains("/mnt/windows"));
+        assert!(foreign.contains("/mnt/windows-backup"));
+        assert!(foreign.contains("/boot"));
+        assert!(foreign.contains("/tmp"));
+        assert!(foreign.contains("/tmp/.mount_DiskHo"));
+        assert!(foreign.contains("/mnt/my disk"));
+        assert!(foreign.contains("/mnt/windows/nested-tmp"));
+        assert!(!foreign.contains("/home"));
+        assert!(!foreign.contains("/var/log"));
+        assert!(!foreign.contains("/"));
+    }
+
+    #[test]
+    fn home_scan_does_not_include_windows() {
+        let mounts = parse_mountinfo(FIXTURE);
+        let foreign = foreign_mount_points(&mounts, "/home");
+        assert!(foreign.is_empty());
+    }
+
+    #[test]
+    fn explicit_windows_scan_walks_that_disk_and_skips_nested_other_fs() {
+        let mounts = parse_mountinfo(FIXTURE);
+        let foreign = foreign_mount_points(&mounts, "/mnt/windows");
+        assert!(foreign.contains("/mnt/windows/nested-tmp"));
+        assert!(!foreign.contains("/mnt/windows"));
+        assert!(!foreign.contains("/mnt/windows-backup"));
     }
 }

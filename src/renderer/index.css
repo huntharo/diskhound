@@ -871,13 +871,12 @@ button, input, select, textarea { font: inherit; }
 /* ── Header ────────────────────────────────── */
 .header {
   display: grid;
-  /* 4 columns in 0.5.13 — utility buttons (search / widget /
-   * settings) are now wrapped in a single .header-utilities
-   * flex container that occupies one cell, instead of three
-   * separate cells competing for width with the drive pills.
-   * Was 5 cols (auto 1fr auto auto auto); the third utility
-   * button used to spill into row 2 on narrow widths. */
-  grid-template-columns: auto 1fr auto auto;
+  /* Brand | scan controls | pills | utilities.
+   * Pills are the column that shrinks and scrolls. Scan controls
+   * used to be `1fr` with min-width: 0, so on a Linux window full of
+   * mount pills the Stop button overflowed and painted on top of the
+   * root pill's "free" label. */
+  grid-template-columns: auto minmax(168px, 320px) minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
   padding: 0 12px;
@@ -885,10 +884,13 @@ button, input, select, textarea { font: inherit; }
   border-bottom: 1px solid var(--border);
   -webkit-app-region: drag;
   user-select: none;
+  overflow: hidden;
 }
 
-:root.platform-windows .header {
-  /* Reserve space for Windows title-bar overlay buttons (min/max/close). */
+:root.platform-windows .header,
+:root.platform-linux .header {
+  /* titleBarOverlay draws min/max/close over the web content.
+   * Without this the utility buttons sit under those controls. */
   padding-right: 140px;
 }
 
@@ -912,17 +914,18 @@ button, input, select, textarea { font: inherit; }
   align-items: center;
   gap: 8px;
   min-width: 0;
+  overflow: hidden;
   -webkit-app-region: drag;
 }
 
 .scan-controls > * { -webkit-app-region: no-drag; }
 
 .scan-input {
-  flex: 1;
-  /* Tight min-width so a short path like "C:\" doesn't hog space at the
-   * expense of drive chips on the right — the input still grows via flex
-   * when the user pastes a long path. */
-  min-width: 120px;
+  flex: 1 1 auto;
+  /* Shrink inside the scan-controls column instead of pushing the
+   * Stop button out over the drive pills. */
+  min-width: 0;
+  width: 0;
   max-width: 360px;
   height: 28px;
   padding: 0 10px;
@@ -949,6 +952,7 @@ button, input, select, textarea { font: inherit; }
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
+  flex-shrink: 0;
   transition: all 0.12s;
 }
 .scan-btn:hover, .header-btn:hover {

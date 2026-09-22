@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
+import { owningDrive, rootKeyFor } from "./lib/driveMatch";
 
 import {
   type AppSettings,
@@ -110,12 +111,7 @@ function scanInputPlaceholder(): string {
  * separators so "C:\\" and "C:\\Users\\..." collide correctly.
  */
 function rootKey(rootPath: string | null | undefined): string {
-  if (!rootPath) return "";
-  const trimmed = rootPath.replace(/[\\/]+$/, "");
-  if (nativeApi.platform === "win32") {
-    return trimmed.toLowerCase();
-  }
-  return trimmed;
+  return rootKeyFor(rootPath, nativeApi.platform);
 }
 
 export function App() {
@@ -303,6 +299,22 @@ export function App() {
     const frac = scanProgressFraction(snapshot);
     return frac === null ? null : Math.round(frac * 100);
   }, [snapshot, scanProgressFraction]);
+
+  // Longest mount wins. A scan of `/` must not light every pill
+  // (every Linux path starts with `/`), and `/home/tom` belongs to
+  // `/home`, not `/`.
+  const drivePaths = useMemo(() => drives.map((drive) => drive.drive), [drives]);
+  const viewedDrive = rootPath
+    ? owningDrive(drivePaths, rootPath, nativeApi.platform)
+    : null;
+  const scanningDrives = useMemo(() => {
+    const owned = new Set<string>();
+    for (const key of activeScanKeys) {
+      const drive = owningDrive(drivePaths, key, nativeApi.platform);
+      if (drive) owned.add(drive);
+    }
+    return owned;
+  }, [activeScanKeys, drivePaths]);
 
   const applyResolvedTheme = useCallback((resolved: "dark" | "light") => {
     const root = document.documentElement;
@@ -1131,27 +1143,15 @@ export function App() {
             className={`drive-pills ${drivePillsOverflowing ? "overflowing" : ""}`}
           >
             {drives.map((d) => {
-              // A drive is "scanning" if ANY active-scan root starts with
-              // its letter — catches both `C:\` root scans and scans of
-              // sub-paths like `C:\Users\foo`.
-              const driveLetterPrefix = d.drive.toLowerCase().replace(/:?\\?$/, "");
-              const isScanning = Array.from(activeScanKeys).some((key) =>
-                key.startsWith(driveLetterPrefix),
-              );
-              // When this drive IS the one currently being scanned (it
-              // matches the viewed root's drive letter AND we have live
-              // progress), show the percent so the user can eye pace
-              // across multiple parallel scans.
-              const sharesRootLetter = rootPath
-                .toLowerCase()
-                .startsWith(d.drive.toLowerCase());
+              const isScanning = scanningDrives.has(d.drive);
+              const isViewed = viewedDrive === d.drive;
               const pillScanPercent =
-                isScanning && sharesRootLetter ? currentScanPercent : null;
+                isScanning && isViewed ? currentScanPercent : null;
               return (
                 <DrivePill
                   key={d.drive}
                   drive={d}
-                  active={sharesRootLetter}
+                  active={isViewed}
                   scanning={isScanning}
                   scanPercent={pillScanPercent}
                   onScan={() => void handleScanDrive(d.drive)}
