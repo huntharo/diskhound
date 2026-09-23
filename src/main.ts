@@ -3754,10 +3754,15 @@ void (async () => {
     if (!mainWindow) return;
     const isDark = theme === "dark";
     mainWindow.setBackgroundColor(isDark ? "#0a0a0f" : "#f8fafc");
-    mainWindow.setTitleBarOverlay({
-      color: isDark ? "#0a0a0f" : "#f8fafc",
-      symbolColor: isDark ? "#94a3b8" : "#475569",
-    });
+    // Windows and Linux draw caption buttons via titleBarOverlay.
+    // macOS uses traffic lights; BrowserWindow.setTitleBarOverlay is
+    // not a function there, and calling it throws the startup dialog.
+    if (process.platform !== "darwin" && typeof mainWindow.setTitleBarOverlay === "function") {
+      mainWindow.setTitleBarOverlay({
+        color: isDark ? "#0a0a0f" : "#f8fafc",
+        symbolColor: isDark ? "#94a3b8" : "#475569",
+      });
+    }
   });
 
   ipcMain.on("diskhound:minimize-to-tray", () => {
@@ -4337,11 +4342,17 @@ void (async () => {
       title: isDevelopment ? "DiskHound (Dev)" : "DiskHound",
       ...(linuxIcon ? { icon: linuxIcon } : {}),
       titleBarStyle: "hidden",
-      titleBarOverlay: {
-        color: "#0a0a0f",
-        symbolColor: "#94a3b8",
-        height: 40,
-      },
+      // Overlay caption buttons are Windows and Linux. On macOS the
+      // option is ignored and setTitleBarOverlay is missing.
+      ...(process.platform === "darwin"
+        ? {}
+        : {
+            titleBarOverlay: {
+              color: "#0a0a0f",
+              symbolColor: "#94a3b8",
+              height: 40,
+            },
+          }),
       webPreferences: {
         preload: Path.join(__dirname, "preload.cjs"),
         contextIsolation: true,
