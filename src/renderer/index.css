@@ -894,6 +894,12 @@ button, input, select, textarea { font: inherit; }
   padding-right: 140px;
 }
 
+:root.platform-macos .header {
+  /* Hidden title bar leaves the traffic lights over the web content.
+   * 78px clears the three buttons (12px inset, 12px each, 8px gaps). */
+  padding-left: 78px;
+}
+
 .header-brand {
   display: flex;
   align-items: center;

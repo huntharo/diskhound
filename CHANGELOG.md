@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### macOS
+
+- Theme changes no longer call `setTitleBarOverlay`. That method is
+  Windows and Linux only, and on Apple Silicon it threw
+  "DiskHound — Unexpected error" as soon as the window applied its theme.
+- The hidden title bar's traffic lights no longer cover the DiskHound
+  name. The header leaves 78px on the left for the three buttons.
+
 ## 0.6.1 — 2026-09-22
 
 Linux scans stay on one filesystem, the header no longer paints Stop
