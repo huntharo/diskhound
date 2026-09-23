@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.6.2 — 2026-09-23
+
+macOS no longer throws on startup when the theme is applied, and the
+traffic lights no longer cover the DiskHound name.
+
 ### macOS
 
 - Theme changes no longer call `setTitleBarOverlay`. That method is
