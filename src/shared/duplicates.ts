@@ -991,7 +991,7 @@ export function runDuplicateScan(
 
 // ── Candidate collection: index-streaming path ───────────────────────────
 
-interface CollectCallbacks {
+export interface CollectCallbacks {
   minSizeBytes: number;
   rootNorm: string;
   rootPrefix: string;
@@ -1023,13 +1023,16 @@ interface CollectCallbacks {
  * few thousand candidate-bearing sizes with a few tens of thousands of
  * candidate paths total.
  */
-async function collectFromIndex(
+export async function collectFromIndex(
   indexPath: string,
   cbs: CollectCallbacks,
 ): Promise<Map<number, FileCandidate[]>> {
   // ── Pass A: size → count ──
   const sizeCounts = new Map<number, number>();
   let walked = 0;
+  // Sizes seen at least twice, counted as each one reaches two, so a
+  // progress tick doesn't iterate every size seen so far.
+  let candGroups = 0;
   await streamIndex(indexPath, cbs.isCancelled, (rec) => {
     if (rec.t === "d") return true; // skip directory entries
     const size = rec.s;
@@ -1038,22 +1041,16 @@ async function collectFromIndex(
     if (cbs.userDataPrefixNorm && pathIsUnderPrefix(rec.p, cbs.userDataPrefixNorm)) return true;
     if (cbs.applyNoiseFilter !== false && isNoiseCandidatePath(normPath(rec.p))) return true;
     walked++;
-    sizeCounts.set(size, (sizeCounts.get(size) ?? 0) + 1);
-    if (walked % 5_000 === 0) {
-      let candGroups = 0;
-      for (const count of sizeCounts.values()) if (count >= 2) candGroups++;
-      cbs.onProgress(walked, candGroups);
-    }
+    const count = (sizeCounts.get(size) ?? 0) + 1;
+    sizeCounts.set(size, count);
+    if (count === 2) candGroups++;
+    if (walked % 5_000 === 0) cbs.onProgress(walked, candGroups);
     return true;
   });
   if (cbs.isCancelled()) return new Map();
   // Final tick after pass A so filesWalked reflects the true total
   // even when the index has < 5000 candidate files.
-  {
-    let candGroups = 0;
-    for (const count of sizeCounts.values()) if (count >= 2) candGroups++;
-    cbs.onProgress(walked, candGroups);
-  }
+  cbs.onProgress(walked, candGroups);
 
   // Compact the count map down to "sizes we care about".
   const candidateSizes = new Set<number>();
@@ -1159,7 +1156,7 @@ function pathIsUnderPrefix(path: string, prefixNorm: string): boolean {
 
 // ── Candidate collection: filesystem-walk fallback ───────────────────────
 
-interface WalkCallbacks {
+export interface WalkCallbacks {
   minSizeBytes: number;
   userDataPrefixNorm?: string;
   applyNoiseFilter?: boolean;
@@ -1181,7 +1178,7 @@ interface WalkCallbacks {
  * cancel signal from the renderer aborts within a single readdir
  * call, even on directories with millions of entries.
  */
-async function collectFromWalk(
+export async function collectFromWalk(
   rootPath: string,
   cbs: WalkCallbacks,
 ): Promise<Map<number, FileCandidate[]>> {
@@ -1189,6 +1186,8 @@ async function collectFromWalk(
   const sizeCounts = new Map<number, number>();
   const directoryStack = [Path.resolve(rootPath)];
   let walked = 0;
+  // Sizes seen at least twice (see collectFromIndex).
+  let candGroups = 0;
 
   while (directoryStack.length > 0) {
     if (cbs.isCancelled()) return new Map();
@@ -1216,27 +1215,21 @@ async function collectFromWalk(
       if (cbs.applyNoiseFilter !== false && isNoiseCandidatePath(normPath(fullPath))) continue;
 
       walked++;
-      sizeCounts.set(stat.size, (sizeCounts.get(stat.size) ?? 0) + 1);
+      const count = (sizeCounts.get(stat.size) ?? 0) + 1;
+      sizeCounts.set(stat.size, count);
+      if (count === 2) candGroups++;
       // No index: this walk is the scan, so read link identity from the
       // stat it already did. APFS clone data needs the native scanner.
       const linkId = stat.nlink > 1 ? await linkIdOf(fullPath, stat) : undefined;
       entries.push({ path: fullPath, size: stat.size, mtime: stat.mtimeMs, ...(linkId ? { linkId } : {}) });
-      if (walked % 500 === 0) {
-        let candGroups = 0;
-        for (const c of sizeCounts.values()) if (c >= 2) candGroups++;
-        cbs.onProgress(walked, candGroups);
-      }
+      if (walked % 500 === 0) cbs.onProgress(walked, candGroups);
     }
   }
 
   // Final tick so the summary log and progress UI show the true walk
   // count even for trees that finished without crossing the 500-file
   // sample boundary (small folders, or scan completed quickly).
-  {
-    let candGroups = 0;
-    for (const c of sizeCounts.values()) if (c >= 2) candGroups++;
-    cbs.onProgress(walked, candGroups);
-  }
+  cbs.onProgress(walked, candGroups);
 
   // Build the candidate map, keeping only sizes with ≥ 2 occurrences.
   // We have to keep the path list for the second pass because we
