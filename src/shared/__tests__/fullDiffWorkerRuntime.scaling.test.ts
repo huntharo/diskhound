@@ -2,7 +2,7 @@ import * as Path from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { ascendingFileRecords, makeTempDir, writeIndexFixture } from "../../testing/indexFixture";
+import { ascendingFileRecords, backslashParseOps, makeTempDir, writeIndexFixture } from "../../testing/indexFixture";
 import { expectNearLinear, measureOps, measureOpsSync } from "../../testing/opCounter";
 import type { FullFileChange } from "../contracts";
 import { computeFullDiffFromIndexFiles, createTopChangeAccumulator } from "../fullDiffWorkerRuntime";
@@ -78,6 +78,13 @@ describe("computeFullDiffFromIndexFiles scaling", () => {
       expect(result?.changes).toHaveLength(count / 10);
       return ops;
     };
-    expectNearLinear("computeFullDiffFromIndexFiles", await run(2_000), await run(16_000), { maxTotal: 16_000 * 60 });
+    const small = await run(2_000);
+    const large = await run(16_000);
+    // The diff's own line parser does one indexOf per `\` (Windows),
+    // at most what backslashParseOps measures. Both sides are 16,000 lines.
+    const [sample] = ascendingFileRecords(Path.join(tmp.dir, "root-16000"), 1);
+    expectNearLinear("computeFullDiffFromIndexFiles", small, large, {
+      maxTotal: 16_000 * 60 + 2 * 16_000 * backslashParseOps(sample!),
+    });
   });
 });
