@@ -301,7 +301,9 @@ export function buildTreemapLayout(
   if (totalWeight === 0) return { leaves: [], folders: [] };
 
   const rects: TreemapRect[] = [];
-  squarify(weighted, { x: 0, y: 0, w: width, h: height }, totalWeight, rects);
+  squarify(weighted, { x: 0, y: 0, w: width, h: height }, totalWeight, (item, rect) => {
+    rects.push({ ...rect, file: item.file, color: colorForExtension(item.file.extension) });
+  });
   return { leaves: rects, folders: [] };
 }
 
@@ -477,7 +479,7 @@ function squarifyTree(
   // Use the same sqrt-compression at every level so deeply-nested big files
   // don't completely swallow their containing folder.
   const sorted = children.slice().sort((a, b) => b.totalSize - a.totalSize);
-  const weighted: Weighted<TreeNode>[] = sorted.map((child) => ({
+  const weighted = sorted.map((child) => ({
     item: child,
     weight: Math.sqrt(child.totalSize),
   }));
@@ -485,181 +487,109 @@ function squarifyTree(
   if (totalWeight === 0) return;
 
   const childPlacements: Array<{ item: TreeNode; bounds: Rect }> = [];
-  squarifyGeneric(weighted, bounds, totalWeight, childPlacements);
+  squarify(weighted, bounds, totalWeight, (child, childBounds) => {
+    childPlacements.push({ item: child.item, bounds: childBounds });
+  });
 
   for (const { item, bounds: childBounds } of childPlacements) {
     squarifyTree(item, childBounds, depth + 1, leaves, folders);
   }
 }
 
-// ── Generic squarify (used by both flat and tree layouts) ──────────────────
+// ── Squarify (flat, tree and process treemaps) ─────────────────────────────
 
-interface Weighted<T> {
-  item: T;
-  weight: number;
-}
+export interface TreemapBounds { x: number; y: number; w: number; h: number; }
 
-function squarifyGeneric<T>(
-  items: Weighted<T>[],
-  bounds: Rect,
+type Rect = TreemapBounds;
+
+/**
+ * Squarified treemap: lay `items` (largest weight first) into `bounds`
+ * a row at a time along the short side, and call `place` with each
+ * item's rectangle.
+ *
+ * Linear in the number of items. A row's worst aspect ratio comes from
+ * its largest and smallest weights alone (aspect grows away from the
+ * row's mean either way), so adding a candidate costs O(1) instead of a
+ * pass over the row. Rows advance through `items` by index, with no
+ * slice per row, and in a loop rather than one stack frame per row.
+ */
+export function squarify<T extends { weight: number }>(
+  items: readonly T[],
+  bounds: TreemapBounds,
   totalWeight: number,
-  out: Array<{ item: T; bounds: Rect }>,
+  place: (item: T, rect: TreemapBounds) => void,
 ): void {
-  if (items.length === 0 || bounds.w <= 0 || bounds.h <= 0) return;
+  let { x, y, w, h } = bounds;
+  let restWeight = totalWeight;
+  let start = 0;
 
-  if (items.length === 1) {
-    out.push({ item: items[0]!.item, bounds });
-    return;
-  }
-
-  const isWide = bounds.w >= bounds.h;
-  const sideLen = isWide ? bounds.h : bounds.w;
-  const totalArea = bounds.w * bounds.h;
-
-  let rowItems: Weighted<T>[] = [];
-  let rowWeight = 0;
-  let bestAspect = Infinity;
-  let splitIndex = 0;
-
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i]!;
-    const nextRowWeight = rowWeight + item.weight;
-    const nextRowLen = (nextRowWeight / totalWeight) * (isWide ? bounds.w : bounds.h);
-
-    const nextItems = [...rowItems, item];
-    let worstAspect = 0;
-    for (const ri of nextItems) {
-      const itemLen = sideLen > 0 && nextRowLen > 0
-        ? (ri.weight / totalWeight) * totalArea / nextRowLen
-        : 1;
-      const aspect = Math.max(nextRowLen / itemLen, itemLen / nextRowLen);
-      worstAspect = Math.max(worstAspect, aspect);
+  while (start < items.length && w > 0 && h > 0) {
+    if (start === items.length - 1) {
+      place(items[start]!, { x, y, w, h });
+      return;
     }
 
-    if (worstAspect <= bestAspect || rowItems.length === 0) {
-      bestAspect = worstAspect;
-      rowItems = nextItems;
-      rowWeight = nextRowWeight;
-      splitIndex = i + 1;
+    const isWide = w >= h;
+    const sideLen = isWide ? h : w;
+    const span = isWide ? w : h;
+    const totalArea = w * h;
+
+    let rowWeight = 0;
+    let rowMin = Infinity;
+    let rowMax = -Infinity;
+    let bestAspect = Infinity;
+    let end = start;
+
+    for (let i = start; i < items.length; i++) {
+      const weight = items[i]!.weight;
+      const nextRowWeight = rowWeight + weight;
+      const nextRowLen = (nextRowWeight / restWeight) * span;
+      const nextMin = Math.min(rowMin, weight);
+      const nextMax = Math.max(rowMax, weight);
+      const worstAspect = Math.max(
+        aspectInRow(nextMin, nextRowLen, sideLen, restWeight, totalArea),
+        aspectInRow(nextMax, nextRowLen, sideLen, restWeight, totalArea),
+      );
+
+      if (worstAspect <= bestAspect || end === start) {
+        bestAspect = worstAspect;
+        rowWeight = nextRowWeight;
+        rowMin = nextMin;
+        rowMax = nextMax;
+        end = i + 1;
+      } else {
+        break;
+      }
+    }
+
+    const rowLen = span * (rowWeight / restWeight);
+    let offset = 0;
+    for (let i = start; i < end; i++) {
+      const item = items[i]!;
+      const itemFraction = rowWeight > 0 ? item.weight / rowWeight : 1 / (end - start);
+      const itemLen = sideLen * itemFraction;
+      place(item, isWide
+        ? { x, y: y + offset, w: rowLen, h: itemLen }
+        : { x: x + offset, y, w: itemLen, h: rowLen });
+      offset += itemLen;
+    }
+
+    if (isWide) {
+      x += rowLen;
+      w -= rowLen;
     } else {
-      break;
+      y += rowLen;
+      h -= rowLen;
     }
-  }
-
-  const rowFraction = rowWeight / totalWeight;
-  const rowLen = isWide ? bounds.w * rowFraction : bounds.h * rowFraction;
-
-  let offset = 0;
-  for (const item of rowItems) {
-    const itemFraction = rowWeight > 0 ? item.weight / rowWeight : 1 / rowItems.length;
-    const itemLen = sideLen * itemFraction;
-
-    const itemBounds: Rect = isWide
-      ? { x: bounds.x, y: bounds.y + offset, w: rowLen, h: itemLen }
-      : { x: bounds.x + offset, y: bounds.y, w: itemLen, h: rowLen };
-
-    out.push({ item: item.item, bounds: itemBounds });
-    offset += itemLen;
-  }
-
-  const remaining = items.slice(splitIndex);
-  if (remaining.length > 0) {
-    const newBounds: Rect = isWide
-      ? { x: bounds.x + rowLen, y: bounds.y, w: bounds.w - rowLen, h: bounds.h }
-      : { x: bounds.x, y: bounds.y + rowLen, w: bounds.w, h: bounds.h - rowLen };
-    squarifyGeneric(remaining, newBounds, totalWeight - rowWeight, out);
+    restWeight -= rowWeight;
+    start = end;
   }
 }
 
-interface WeightedFile {
-  file: ScanFileRecord;
-  weight: number;
-}
-
-interface Rect { x: number; y: number; w: number; h: number; }
-
-function squarify(
-  items: WeightedFile[],
-  bounds: Rect,
-  totalWeight: number,
-  out: TreemapRect[],
-): void {
-  if (items.length === 0 || bounds.w <= 0 || bounds.h <= 0) return;
-
-  if (items.length === 1) {
-    out.push({
-      ...bounds,
-      file: items[0]!.file,
-      color: colorForExtension(items[0]!.file.extension),
-    });
-    return;
-  }
-
-  const isWide = bounds.w >= bounds.h;
-  const sideLen = isWide ? bounds.h : bounds.w;
-  const totalArea = bounds.w * bounds.h;
-
-  let rowItems: WeightedFile[] = [];
-  let rowWeight = 0;
-  let bestAspect = Infinity;
-  let splitIndex = 0;
-
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i]!;
-    const nextRowWeight = rowWeight + item.weight;
-    const nextRowLen = (nextRowWeight / totalWeight) * (isWide ? bounds.w : bounds.h);
-
-    // Calculate worst aspect ratio for row with this item
-    const nextItems = [...rowItems, item];
-    let worstAspect = 0;
-    for (const ri of nextItems) {
-      const itemLen = sideLen > 0 && nextRowLen > 0
-        ? (ri.weight / totalWeight) * totalArea / nextRowLen
-        : 1;
-      const aspect = Math.max(nextRowLen / itemLen, itemLen / nextRowLen);
-      worstAspect = Math.max(worstAspect, aspect);
-    }
-
-    if (worstAspect <= bestAspect || rowItems.length === 0) {
-      bestAspect = worstAspect;
-      rowItems = nextItems;
-      rowWeight = nextRowWeight;
-      splitIndex = i + 1;
-    } else {
-      break;
-    }
-  }
-
-  // Layout the row
-  const rowFraction = rowWeight / totalWeight;
-  const rowLen = isWide
-    ? bounds.w * rowFraction
-    : bounds.h * rowFraction;
-
-  let offset = 0;
-  for (const item of rowItems) {
-    const itemFraction = rowWeight > 0 ? item.weight / rowWeight : 1 / rowItems.length;
-    const itemLen = sideLen * itemFraction;
-
-    const rect: Rect = isWide
-      ? { x: bounds.x, y: bounds.y + offset, w: rowLen, h: itemLen }
-      : { x: bounds.x + offset, y: bounds.y, w: itemLen, h: rowLen };
-
-    out.push({
-      ...rect,
-      file: item.file,
-      color: colorForExtension(item.file.extension),
-    });
-    offset += itemLen;
-  }
-
-  // Recurse on remaining items
-  const remaining = items.slice(splitIndex);
-  if (remaining.length > 0) {
-    const newBounds: Rect = isWide
-      ? { x: bounds.x + rowLen, y: bounds.y, w: bounds.w - rowLen, h: bounds.h }
-      : { x: bounds.x, y: bounds.y + rowLen, w: bounds.w, h: bounds.h - rowLen };
-
-    squarify(remaining, newBounds, totalWeight - rowWeight, out);
-  }
+/** Aspect ratio of an item of `weight` in a row `rowLen` long. */
+function aspectInRow(weight: number, rowLen: number, sideLen: number, totalWeight: number, totalArea: number): number {
+  const itemLen = sideLen > 0 && rowLen > 0
+    ? (weight / totalWeight) * totalArea / rowLen
+    : 1;
+  return Math.max(rowLen / itemLen, itemLen / rowLen);
 }
