@@ -13,6 +13,6 @@
     "jsxImportSource": "preact",
     "types": ["node", "electron"]
   },
-  "include": ["src", "tsdown.config.ts", "vite.config.ts"]
+  "include": ["src", "e2e", "tsdown.config.ts", "vite.config.ts", "playwright.config.ts"]
 }
 

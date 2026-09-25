@@ -17,3 +17,7 @@ DiskHound keeps its state in JSON and gzipped NDJSON files under Electron's user
 - In each scenario's note, project writes/day and MB/day at the default settings and at the most aggressive setting, such as the 1-minute monitoring interval.
 - Write only when something changed. Compare against what is on disk, keep a dirty flag, debounce bursts, and flush at quit.
 - If a design projects badly, report the numbers to the user and ask before shipping it. Thousands of writes a day, or tens of MB a day of rewritten content, projects badly.
+
+## E2E
+
+`bun run test:e2e` runs the Playwright suite in `e2e/` against the built app and the native scanner. CI runs it on Linux, Windows and macOS. Read `e2e/AGENTS.md` before adding a spec.
