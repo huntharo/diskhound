@@ -25,6 +25,7 @@
     "build:renderer": "vite build",
     "build:electron": "tsdown",
     "sync:version-from-tag": "node scripts/sync-version-from-tag.mjs",
+    "release:notes": "node scripts/collect-release-notes.mjs",
     "start": "bun run scripts/start-electron.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
