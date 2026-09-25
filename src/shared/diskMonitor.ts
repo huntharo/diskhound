@@ -1,9 +1,10 @@
 import { execFile } from "node:child_process";
+import * as FS_SYNC from "node:fs";
 import * as FS from "node:fs/promises";
 import * as Path from "node:path";
 import { promisify } from "node:util";
 
-import type { DiskDelta, DiskSpaceInfo, MonitoringSnapshot } from "./contracts";
+import type { DiskDelta, DiskSpaceInfo, MonitoringSettings, MonitoringSnapshot } from "./contracts";
 
 const execFileAsync = promisify(execFile);
 const BASELINE_FILE = "disk-baselines.json";
@@ -37,6 +38,15 @@ let deltaHistory: DiskDelta[] = [];
  * mount that is already hung at launch does not empty the list.
  */
 let lastDfDrives: DiskSpaceInfo[] = [];
+/**
+ * A check moved the baseline in memory but did not write it. Every
+ * check changes lastCheckedAt and the free-space readings, yet only a
+ * delta past the noise floor or a drive coming or going is worth
+ * rewriting the file, with its 500-entry history, right away. The
+ * rest waits for flushDiskMonitor() at quit, so an idle machine does
+ * not rewrite it on every check.
+ */
+let baselineDirty = false;
 
 // ── Initialization (call once at startup) ───────────────────
 
@@ -62,8 +72,7 @@ export async function initDiskMonitor(dataDir: string): Promise<void> {
   }
 }
 
-async function persistState(): Promise<void> {
-  if (!persistDir) return;
+function serializeState(): string {
   const state: PersistedState = {
     previousDrives: Object.fromEntries(previousDriveMap),
     lastFullScanAt,
@@ -72,15 +81,18 @@ async function persistState(): Promise<void> {
     lastCheckedAt,
     deltaHistory,
   };
+  return JSON.stringify(state, null, 2);
+}
+
+async function persistState(): Promise<void> {
+  if (!persistDir) return;
+  baselineDirty = false;
   try {
     await FS.mkdir(persistDir, { recursive: true });
-    await FS.writeFile(
-      Path.join(persistDir, BASELINE_FILE),
-      JSON.stringify(state, null, 2),
-      "utf8",
-    );
+    await FS.writeFile(Path.join(persistDir, BASELINE_FILE), serializeState(), "utf8");
   } catch {
-    // Non-fatal — baselines will be lost on restart
+    // Non-fatal — the quit flush tries again.
+    baselineDirty = true;
   }
 }
 
@@ -100,8 +112,11 @@ export async function getDiskSpace(): Promise<DiskSpaceInfo[]> {
   return drives;
 }
 
-export async function checkDiskDeltas(): Promise<MonitoringSnapshot> {
-  const drives = await getDiskSpace();
+/** `readDrives` is for tests. */
+export async function checkDiskDeltas(
+  readDrives: () => Promise<DiskSpaceInfo[]> = getDiskSpace,
+): Promise<MonitoringSnapshot> {
+  const drives = await readDrives();
   const deltas: DiskDelta[] = [];
   const now = Date.now();
 
@@ -127,6 +142,9 @@ export async function checkDiskDeltas(): Promise<MonitoringSnapshot> {
     }
   }
 
+  const drivesChanged =
+    drives.length !== previousDriveMap.size
+    || drives.some((d) => !previousDriveMap.has(d.drive));
   previousDriveMap = new Map(drives.map((d) => [d.drive, d]));
   lastDrives = drives;
   lastDeltas = deltas;
@@ -138,7 +156,11 @@ export async function checkDiskDeltas(): Promise<MonitoringSnapshot> {
     deltaHistory = [...deltas, ...deltaHistory].slice(0, DELTA_HISTORY_CAP);
   }
 
-  void persistState();
+  if (deltas.length > 0 || drivesChanged) {
+    void persistState();
+  } else {
+    baselineDirty = true;
+  }
 
   return {
     drives: lastDrives,
@@ -146,6 +168,30 @@ export async function checkDiskDeltas(): Promise<MonitoringSnapshot> {
     lastFullScanAt,
     lastCheckedAt,
   };
+}
+
+/**
+ * Runs `check` (checkDiskDeltas by default) every
+ * `checkIntervalMinutes` and hands each result to `onChecked`. With
+ * `requireIdle`, a tick is skipped until the system has been idle for
+ * `idleMinutes`. Returns null when monitoring is off.
+ */
+export function startDiskMonitoring(
+  monitoring: Pick<MonitoringSettings, "enabled" | "checkIntervalMinutes" | "requireIdle" | "idleMinutes">,
+  deps: {
+    systemIdleSeconds: () => number;
+    onChecked: (snapshot: MonitoringSnapshot) => void | Promise<void>;
+    check?: () => Promise<MonitoringSnapshot>;
+  },
+): ReturnType<typeof setInterval> | null {
+  if (!monitoring.enabled) return null;
+  const check = deps.check ?? (() => checkDiskDeltas());
+  return setInterval(async () => {
+    if (monitoring.requireIdle && deps.systemIdleSeconds() < monitoring.idleMinutes * 60) {
+      return; // System not idle long enough, skip this check
+    }
+    await deps.onChecked(await check());
+  }, monitoring.checkIntervalMinutes * 60 * 1000);
 }
 
 export function getMonitoringSnapshot(): MonitoringSnapshot {
@@ -162,6 +208,25 @@ export function markFullScan(): void {
   void persistState();
 }
 
+/**
+ * Writes the baseline if a check moved it since the last write. Call
+ * at quit, so the next launch measures its first delta from the last
+ * check rather than from the last change. Synchronous because
+ * before-quit cannot wait, and an async write cut off at exit would
+ * leave the file, history and all, truncated.
+ */
+export function flushDiskMonitor(): void {
+  if (!baselineDirty || !persistDir) return;
+  baselineDirty = false;
+  try {
+    FS_SYNC.mkdirSync(persistDir, { recursive: true });
+    FS_SYNC.writeFileSync(Path.join(persistDir, BASELINE_FILE), serializeState(), "utf8");
+  } catch {
+    // Non-fatal — the next launch measures from the last write.
+    baselineDirty = true;
+  }
+}
+
 export function getLastFullScanAt(): number | null {
   return lastFullScanAt;
 }
@@ -169,6 +234,19 @@ export function getLastFullScanAt(): number | null {
 /** Return the rolling drive-level delta timeline, newest first. */
 export function getDiskDeltaHistory(): DiskDelta[] {
   return deltaHistory.slice();
+}
+
+/** Exported for tests — only use from test code. */
+export function __resetDiskMonitorForTests(): void {
+  previousDriveMap = new Map();
+  lastFullScanAt = null;
+  persistDir = null;
+  lastDrives = [];
+  lastDeltas = [];
+  lastCheckedAt = 0;
+  deltaHistory = [];
+  lastDfDrives = [];
+  baselineDirty = false;
 }
 
 // ── Platform-specific disk space queries ────────────────────

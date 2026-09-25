@@ -29,7 +29,8 @@ import * as Path from "node:path";
  * not to gate on a flag):
  *
  *   1. Copy the PNGs we ship in `resources/icons/` into
- *      `~/.local/share/icons/hicolor/<size>/apps/diskhound.png`.
+ *      `~/.local/share/icons/hicolor/<size>/apps/diskhound.png`,
+ *      skipping any that already match.
  *      These are what the `.desktop` file's `Icon=diskhound` entry
  *      resolves against via the freedesktop icon-theme spec.
  *
@@ -41,7 +42,8 @@ import * as Path from "node:path";
  *        - StartupWMClass=diskhound (matches the `class` switch we
  *          pass to Chromium via app.commandLine in main.ts).
  *
- *   3. Run `update-desktop-database` and `gtk-update-icon-cache` so
+ *   3. Run `update-desktop-database` (when step 2 wrote the file)
+ *      and `gtk-update-icon-cache` (when step 1 copied an icon) so
  *      GNOME notices the new entry without a log-out/log-in. Both
  *      are best-effort — if they fail (missing on headless systems,
  *      permission issues) we still leave the files in place for
@@ -52,9 +54,9 @@ import * as Path from "node:path";
  * The `.desktop` file's Exec= encodes the current exe path. If the
  * user moves the AppImage or reinstalls to a different location the
  * path changes and we re-write. If nothing changed we skip the
- * write. The hicolor icon files are overwritten on every run — the
- * compare-before-write dance isn't worth the I/O cost for 8 small
- * PNGs.
+ * write. Each hicolor icon is compared with the shipped PNG first,
+ * so a normal launch reads 20 small files, copies none of the 10
+ * icons, and does not rebuild the icon cache.
  *
  * ## Non-goals
  *
@@ -71,7 +73,7 @@ import * as Path from "node:path";
  *  96 and 192 added in 0.5.7 because GNOME's dock at default scale
  *  picks an icon size in the 64-96 px range and upscales when no
  *  exact match exists; explicit 96.png removes the upscale step. */
-const ICON_SIZES = [16, 24, 32, 48, 64, 96, 128, 192, 256, 512];
+export const ICON_SIZES = [16, 24, 32, 48, 64, 96, 128, 192, 256, 512];
 
 /** Match the WM class we set via app.commandLine.appendSwitch("class", ...) in main.ts. */
 const APP_WM_CLASS = "diskhound";
@@ -121,6 +123,7 @@ export async function integrateLinuxDesktop(params: {
         const destDir = Path.join(iconBaseDir, `${size}x${size}`, "apps");
         const dest = Path.join(destDir, `${APP_WM_CLASS}.png`);
         try {
+          if (await sameBytes(source, dest)) continue;
           await FS.mkdir(destDir, { recursive: true });
           await FS.copyFile(source, dest);
           iconsWritten += 1;
@@ -174,6 +177,16 @@ export async function integrateLinuxDesktop(params: {
       "linux-integration",
       `unexpected failure: ${err instanceof Error ? err.message : String(err)}`,
     );
+  }
+}
+
+/** True when both files exist with identical contents. */
+async function sameBytes(left: string, right: string): Promise<boolean> {
+  try {
+    const [a, b] = await Promise.all([FS.readFile(left), FS.readFile(right)]);
+    return a.equals(b);
+  } catch {
+    return false;
   }
 }
 

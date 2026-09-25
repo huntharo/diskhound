@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks"
 import type { AffinityRule, ProcessInfo, SystemMemorySnapshot } from "../../shared/contracts";
 import { findMatchingRule } from "../lib/affinityMatch";
 import { formatBytes, formatCount } from "../lib/format";
+import { saveLocalPreference } from "../lib/localPreference";
 import { processMetadataParts, processSearchText } from "../lib/processMetadata";
 import { nativeApi } from "../nativeApi";
 import { GpuView } from "./GpuView";
@@ -148,16 +149,16 @@ export function MemoryView() {
   const [samplesCollected, setSamplesCollected] = useState(0);
 
   useEffect(() => {
-    try { window.localStorage.setItem(VIEW_MODE_KEY, viewMode); } catch { /* ignore */ }
+    saveLocalPreference(VIEW_MODE_KEY, viewMode);
   }, [viewMode]);
   useEffect(() => {
-    try { window.localStorage.setItem(REFRESH_MS_KEY, String(refreshMs)); } catch { /* ignore */ }
+    saveLocalPreference(REFRESH_MS_KEY, String(refreshMs));
   }, [refreshMs]);
   useEffect(() => {
-    try { window.localStorage.setItem(CPU_SCALE_KEY, cpuScale); } catch { /* ignore */ }
+    saveLocalPreference(CPU_SCALE_KEY, cpuScale);
   }, [cpuScale]);
   useEffect(() => {
-    try { window.localStorage.setItem(PROCESS_METADATA_KEY, showProcessMetadata ? "1" : "0"); } catch { /* ignore */ }
+    saveLocalPreference(PROCESS_METADATA_KEY, showProcessMetadata ? "1" : "0");
   }, [showProcessMetadata]);
 
   // Project the chosen CPU scale onto every process's cpuPercent so
