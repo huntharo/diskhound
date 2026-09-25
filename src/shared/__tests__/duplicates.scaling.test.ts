@@ -4,7 +4,7 @@ import * as Path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { makeTempDir, writeIndexFixture } from "../../testing/indexFixture";
-import { expectNearLinear, measureOps } from "../../testing/opCounter";
+import { expectNearLinear, measureOps, totalOps } from "../../testing/opCounter";
 import { collectFromIndex, collectFromWalk } from "../duplicates";
 import { normPath } from "../pathUtils";
 
@@ -85,6 +85,15 @@ describe("collectFromWalk scaling", () => {
       expect(ticks.at(-1)).toEqual([count, count / 10]);
       return ops;
     };
-    expectNearLinear("collectFromWalk", await run(500), await run(4_000), { maxTotal: 4_000 * 6 });
+    const small = await run(500);
+    const large = await run(4_000);
+    // On Windows, Path.join and fs.stat do array work inside Node that
+    // the counter sees (about 10 ops per file on CI's Node, 0 on macOS
+    // and Linux). The walk makes those calls once per entry (4,000 files
+    // and 20 folders), so the cap allows for them on top of its own ~2
+    // per file.
+    const dir = Path.join(tmp.dir, "walk-root-500", "d0");
+    const nodeOps = totalOps((await measureOps(() => FS.promises.stat(Path.join(dir, "f0.bin")))).ops);
+    expectNearLinear("collectFromWalk", small, large, { maxTotal: 4_000 * 6 + 4_020 * nodeOps });
   });
 });
