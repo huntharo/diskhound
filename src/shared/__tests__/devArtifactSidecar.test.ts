@@ -7,30 +7,25 @@ import { pipeline } from "node:stream/promises";
 import { createGzip } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { analyzeDevArtifacts } from "../devArtifactsIndex";
-import { indexFilePath, initScanIndex, openIndexWriter } from "../scanIndex";
-
 let tempDir: string;
 
 beforeEach(async () => {
-  tempDir = await FSP.mkdtemp(Path.join(OS.tmpdir(), "diskhound-dev-index-"));
-  initScanIndex(tempDir);
+  tempDir = await FSP.mkdtemp(Path.join(OS.tmpdir(), "diskhound-dev-sidecar-"));
 });
 
 afterEach(async () => {
   await FSP.rm(tempDir, { recursive: true, force: true });
 });
 
-describe("analyzeDevArtifacts", () => {
+describe("noteDevFile", () => {
   it("rolls node_modules occupancy and skips extra hardlinks", async () => {
-    const filePath = indexFilePath("scan");
-    const { stream, finalize } = openIndexWriter(filePath);
-    stream.write(`${JSON.stringify({ p: "C:\\proj\\package.json", s: 200, m: 1 })}\n`);
-    stream.write(`${JSON.stringify({ p: "C:\\proj\\node_modules\\preact\\dist\\preact.js", s: 5_000_000, m: 1 })}\n`);
-    stream.write(`${JSON.stringify({ p: "C:\\proj\\node_modules\\dup\\x.js", s: 5_000_000, m: 1, h: 1 })}\n`);
-    await finalize();
+    const { createDevAcc, noteDevFile, sidecarFromAcc, reportFromSidecar } = await import("../devArtifactSidecar");
+    const acc = createDevAcc();
+    noteDevFile(acc, "C:\\proj\\package.json", 200, false);
+    noteDevFile(acc, "C:\\proj\\node_modules\\preact\\dist\\preact.js", 5_000_000, false);
+    noteDevFile(acc, "C:\\proj\\node_modules\\dup\\x.js", 5_000_000, true);
 
-    const result = await analyzeDevArtifacts("C:\\proj", filePath);
+    const result = reportFromSidecar(sidecarFromAcc(acc, "C:\\proj"));
     expect(result.totalBytes).toBe(5_000_000);
     expect(result.artifacts.some((a) => a.kind === "node-modules")).toBe(true);
   });

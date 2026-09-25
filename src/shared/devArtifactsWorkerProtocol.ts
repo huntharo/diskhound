@@ -1,12 +1,6 @@
 import type { DevArtifactReport } from "./contracts";
 import type { DevArtifactsRescanProgress } from "./devArtifactSidecar";
 
-export interface DevArtifactsWorkerInput {
-  rootPath: string;
-  currentIndexPath: string;
-  previousIndexPath?: string | null;
-}
-
 export interface DevArtifactsRescanInput {
   rootPath: string;
   sidecarPath: string;
@@ -20,19 +14,7 @@ export interface DevArtifactsClassifyInput {
   previousSidecarPath?: string | null;
 }
 
-export interface DevArtifactsLoadInput {
-  destSidecarPath: string;
-  scanRoot: string;
-  pendingPaths: string[];
-  previousSidecarPath?: string | null;
-}
-
 export type DevArtifactsWorkerRequest =
-  | {
-      type: "analyze";
-      requestId: string;
-      input: DevArtifactsWorkerInput;
-    }
   | {
       type: "rescan";
       requestId: string;
@@ -42,18 +24,13 @@ export type DevArtifactsWorkerRequest =
       type: "classify";
       requestId: string;
       input: DevArtifactsClassifyInput;
-    }
-  | {
-      type: "load";
-      requestId: string;
-      input: DevArtifactsLoadInput;
     };
 
 export type DevArtifactsWorkerResponse =
   | {
       type: "result";
       requestId: string;
-      report: DevArtifactReport | null;
+      report: DevArtifactReport;
     }
   | {
       type: "progress";
