@@ -83,3 +83,69 @@ jobs:
 
       - name: Cargo build (release)
         run: cargo build --release --manifest-path native/diskhound-native-scanner/Cargo.toml
+
+  # Launches the built app with Playwright and scans a fixture tree
+  # with the native scanner. See e2e/AGENTS.md.
+  e2e:
+    name: E2E (${{ matrix.os }})
+    if: github.event.action != 'edited' || github.event.changes.title
+    strategy:
+      fail-fast: false
+      matrix:
+        # Same windows-2022 pin as vitest-cross-os.
+        os: [ubuntu-latest, windows-2022, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # Electron's own installer, which test:e2e runs because bun skips
+      # it, exits 0 without extracting anything on Node 26.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/diskhound-native-scanner
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Linux needs a virtual display. The Windows and macOS runners
+      # have a desktop session.
+      - name: E2E
+        run: ${{ runner.os == 'Linux' && 'xvfb-run --auto-servernum ' || '' }}bun run test:e2e
+
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-${{ matrix.os }}
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # One check to require in branch protection. A matrix job's result
+  # is success only when every OS passed. Without always(), a failed OS
+  # would skip this job, and a skipped required check counts as passing.
+  e2e-result:
+    name: E2E
+    needs: e2e
+    if: always() && (github.event.action != 'edited' || github.event.changes.title)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require E2E on Linux, Windows and macOS
+        env:
+          RESULT: ${{ needs.e2e.result }}
+        run: |
+          echo "E2E matrix result: $RESULT"
+          test "$RESULT" = success

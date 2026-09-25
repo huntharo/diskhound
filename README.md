@@ -139,6 +139,7 @@ bun run dev
 | `bun run start` | Launch the built production app |
 | `bun run dist` | Build everything and create the installer |
 | `bun run test` | Run the Vitest test suite |
+| `bun run test:e2e` | Build, then run the Playwright E2E suite against the Electron app (Node 24; `xvfb-run` on Linux) |
 | `bun run typecheck` | TypeScript type checking |
 
 ### Architecture

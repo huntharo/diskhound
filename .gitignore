@@ -3,6 +3,8 @@ dist-electron/
 dist-renderer/
 /release/
 native/diskhound-native-scanner/target/
+/test-results/
+/playwright-report/
 .turbo/
 .vscode/
 .idea/

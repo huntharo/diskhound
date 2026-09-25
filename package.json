@@ -29,6 +29,8 @@
     "start": "bun run scripts/start-electron.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "build:e2e": "node node_modules/electron/install.js && bun run build:native:debug && bun run build:renderer && bun run build:electron",
+    "test:e2e": "bun run build:e2e && playwright test",
     "dist": "bun run build:native && bun run build && electron-builder --config electron-builder.yml"
   },
   "dependencies": {
@@ -37,14 +39,15 @@
     "preact": "^10.26.9"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@preact/preset-vite": "^2.10.2",
     "@types/node": "^24.12.0",
     "electron": "40.6.0",
     "electron-builder": "^26.0.12",
-    "vitest": "^3.2.1",
     "tsdown": "^0.20.3",
     "typescript": "^5.7.3",
     "vite": "^7.1.12",
+    "vitest": "^3.2.1",
     "wait-on": "^8.0.2"
   },
   "trustedDependencies": [
