@@ -24,6 +24,9 @@ export function splitForMiddleEllipsis(
   let start = Math.max(cut, 0);
   if (label.length - start > maxTail) {
     start = Math.max(label.length - maxTail, 0);
+    // Don't cut between the halves of a surrogate pair (emoji in a
+    // volume name); step forward to the start of the next character.
+    if (/[\uDC00-\uDFFF]/.test(label[start] ?? "")) start += 1;
     const wordBreak = label.slice(start).search(/[\s._-]/);
     if (wordBreak >= 0 && wordBreak <= maxTail / 2) start += wordBreak;
   }

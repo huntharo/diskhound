@@ -48,6 +48,13 @@ describe("splitForMiddleEllipsis", () => {
     expect(splitForMiddleEllipsis("/Volumes/ABCDEFGHIJKLMNOPQRSTUVW.X", 12).tail).toBe("NOPQRSTUVW.X");
   });
 
+  it("does not split a surrogate pair at the tail cut", () => {
+    // "📷" is two UTF-16 code units; a 12-unit cut would land between them.
+    const { head, tail } = splitForMiddleEllipsis("/Volumes/Photos📷ABCDEFGHIJK", 12);
+    expect(head.endsWith("📷")).toBe(true);
+    expect(tail).toBe("ABCDEFGHIJK");
+  });
+
   it("always reassembles to the original label", () => {
     for (const label of ["", "/", "C:", "/a/b/c", "no-separators-but-quite-long-label", "/x/"]) {
       expect(join(splitForMiddleEllipsis(label, 8))).toBe(label);
