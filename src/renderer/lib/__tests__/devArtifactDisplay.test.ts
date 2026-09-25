@@ -143,6 +143,24 @@ describe("artifact display", () => {
     expect(shortenVisiblePath("C:\\Users\\thoma\\.gradle")).toBe("C:\\Users\\thoma\\.gradle");
   });
 
+  it("keeps the leading slash when ellipsizing a POSIX path", () => {
+    expect(shortenVisiblePath("/Users/dev/local-experimentation/crosslink_monolith/zebra-crosslink", 40))
+      .toBe("/Users/dev/…/zebra-crosslink");
+    expect(shortenVisiblePath("/home/dev/local-experimentation/crosslink_monolith/zebra-crosslink", 40))
+      .toBe("/home/…/zebra-crosslink");
+    expect(shortenVisiblePath("/mnt/c/Users/dev/local-experimentation/crosslink_monolith/zebra-crosslink", 40))
+      .toBe("/mnt/c/Users/dev/…/zebra-crosslink");
+    expect(shortenVisiblePath("\\\\server\\share\\local-experimentation\\crosslink_monolith\\zebra-crosslink", 40))
+      .toBe("\\\\server\\…\\zebra-crosslink");
+
+    const row = artifact({
+      path: "/Users/dev/local-experimentation/crosslink_monolith/zebra-crosslink/target/debug",
+      kind: "rust-target",
+    });
+    expect(artifactHeadline(row)).toBe("/Users/dev/…/zebra-crosslink");
+    expect(artifactTail(row)).toBe("target/debug");
+  });
+
   it("keeps a short unscoped parent as-is after the drive", () => {
     expect(shortenUnscopedParent("C:\\Windows\\Temp")).toBe("Windows\\Temp");
   });
