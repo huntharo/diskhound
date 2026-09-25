@@ -66,8 +66,18 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/diskhound-native-scanner
+
       - name: Cargo check
         run: cargo check --manifest-path native/diskhound-native-scanner/Cargo.toml
+
+      # Before the release build, which is slow with LTO. Some tests are
+      # OS-gated: the MFT and USN journal tests only build on Windows,
+      # the mountinfo tests only on Linux.
+      - name: Cargo test
+        run: cargo test --manifest-path native/diskhound-native-scanner/Cargo.toml
 
       - name: Cargo build (release)
         run: cargo build --release --manifest-path native/diskhound-native-scanner/Cargo.toml
