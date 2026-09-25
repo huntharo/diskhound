@@ -6,9 +6,7 @@ import type { DevArtifactReport } from "./contracts";
 import type { DevArtifactsRescanProgress } from "./devArtifactSidecar";
 import type {
   DevArtifactsClassifyInput,
-  DevArtifactsLoadInput,
   DevArtifactsRescanInput,
-  DevArtifactsWorkerInput,
   DevArtifactsWorkerRequest,
   DevArtifactsWorkerResponse,
 } from "./devArtifactsWorkerProtocol";
@@ -26,20 +24,15 @@ export interface RunDevArtifactsWorkerOptions {
 function runDevArtifactsRequest(
   request: DevArtifactsWorkerRequest,
   options: RunDevArtifactsWorkerOptions,
-): Promise<DevArtifactReport | null> {
-  const worker = new Worker(
-    options.workerPath,
-    request.type === "load"
-      ? {}
-      : {
-          resourceLimits: {
-            maxOldGenerationSizeMb: 4096,
-            maxYoungGenerationSizeMb: 256,
-          },
-        },
-  );
+): Promise<DevArtifactReport> {
+  const worker = new Worker(options.workerPath, {
+    resourceLimits: {
+      maxOldGenerationSizeMb: 4096,
+      maxYoungGenerationSizeMb: 256,
+    },
+  });
 
-  return new Promise<DevArtifactReport | null>((resolve, reject) => {
+  return new Promise<DevArtifactReport>((resolve, reject) => {
     let settled = false;
 
     // Mark settled and drop the listeners BEFORE terminate(). A
@@ -110,46 +103,20 @@ function runDevArtifactsRequest(
   });
 }
 
-async function requireReport(
-  request: DevArtifactsWorkerRequest,
-  options: RunDevArtifactsWorkerOptions,
-): Promise<DevArtifactReport> {
-  const report = await runDevArtifactsRequest(request, options);
-  if (!report) throw new Error("Dev artifacts worker returned no report");
-  return report;
-}
-
 function nextRequestId(): string {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-export async function runDevArtifactsWorker(
-  input: DevArtifactsWorkerInput,
-  options: RunDevArtifactsWorkerOptions,
-): Promise<DevArtifactReport> {
-  return requireReport({ type: "analyze", requestId: nextRequestId(), input }, options);
 }
 
 export async function runDevArtifactsRescanWorker(
   input: DevArtifactsRescanInput,
   options: RunDevArtifactsWorkerOptions,
 ): Promise<DevArtifactReport> {
-  return requireReport({ type: "rescan", requestId: nextRequestId(), input }, options);
+  return runDevArtifactsRequest({ type: "rescan", requestId: nextRequestId(), input }, options);
 }
 
 export async function runDevArtifactsClassifyWorker(
   input: DevArtifactsClassifyInput,
   options: RunDevArtifactsWorkerOptions,
 ): Promise<DevArtifactReport> {
-  return requireReport({ type: "classify", requestId: nextRequestId(), input }, options);
-}
-
-export async function runDevArtifactsLoadWorker(
-  input: DevArtifactsLoadInput,
-  options: RunDevArtifactsWorkerOptions,
-): Promise<DevArtifactReport | null> {
-  return runDevArtifactsRequest(
-    { type: "load", requestId: nextRequestId(), input },
-    options,
-  );
+  return runDevArtifactsRequest({ type: "classify", requestId: nextRequestId(), input }, options);
 }

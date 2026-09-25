@@ -1,8 +1,6 @@
 import { parentPort } from "node:worker_threads";
 
-import { analyzeDevArtifacts } from "../shared/devArtifactsIndex";
 import {
-  loadDevArtifactReport,
   readDevArtifactSidecar,
   reportFromSidecar,
   rescanDevArtifactSidecar,
@@ -11,7 +9,6 @@ import {
 } from "../shared/devArtifactSidecar";
 import type {
   DevArtifactsClassifyInput,
-  DevArtifactsLoadInput,
   DevArtifactsRescanInput,
   DevArtifactsWorkerRequest,
   DevArtifactsWorkerResponse,
@@ -27,15 +24,6 @@ async function classifyFromFolderTree(input: DevArtifactsClassifyInput) {
     ? await readDevArtifactSidecar(input.previousSidecarPath)
     : null;
   return reportFromSidecar(sidecar, previous);
-}
-
-async function loadSidecarReport(input: DevArtifactsLoadInput) {
-  return loadDevArtifactReport(
-    input.destSidecarPath,
-    input.scanRoot,
-    input.pendingPaths,
-    input.previousSidecarPath,
-  );
 }
 
 async function rescanKnownTrees(input: DevArtifactsRescanInput, requestId: string) {
@@ -61,23 +49,12 @@ if (parentPort) {
   parentPort.on("message", (message: DevArtifactsWorkerRequest) => {
     if (
       !message
-      || (message.type !== "analyze"
-        && message.type !== "rescan"
-        && message.type !== "classify"
-        && message.type !== "load")
+      || (message.type !== "rescan" && message.type !== "classify")
     ) return;
 
     const work = message.type === "classify"
       ? classifyFromFolderTree(message.input)
-      : message.type === "rescan"
-        ? rescanKnownTrees(message.input, message.requestId)
-        : message.type === "load"
-          ? loadSidecarReport(message.input)
-          : analyzeDevArtifacts(
-              message.input.rootPath,
-              message.input.currentIndexPath,
-              message.input.previousIndexPath,
-            );
+      : rescanKnownTrees(message.input, message.requestId);
 
     void work
       .then((report) => {
