@@ -1149,6 +1149,62 @@ button, input, select, textarea { font: inherit; }
   pointer-events: none;
 }
 
+/* Git branch chip, development builds only (DevBranchChip.tsx).
+ * It gets a column between the pills and the utilities. The pills
+ * column sizes to its content and the chip's column takes what's
+ * left, so the chip shrinks, down to its min-width, before the pills
+ * start to scroll. With no chip the header keeps its release layout. */
+.header:has(> .dev-branch-chip) {
+  grid-template-columns: auto minmax(168px, 320px) minmax(0, max-content) 1fr auto;
+}
+.dev-branch-chip {
+  justify-self: end;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  max-width: 100%;
+  /* --dev-branch-min-ch keeps a few leading characters, the "…" and
+   * the tail. 37px is the padding, border, icon and gap, plus the
+   * head's 1px of slack (below). */
+  min-width: calc(var(--dev-branch-min-ch, 0) * 1ch + 37px);
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--teal) 40%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--teal) 10%, transparent);
+  color: var(--teal);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+  -webkit-app-region: no-drag;
+}
+.dev-branch-chip svg { flex-shrink: 0; }
+/* The "…" only ever replaces whole characters, so a head a fraction
+ * of a character wider than its text shows a gap before the tail that
+ * reads as a space in the branch name. Size the head in whole
+ * characters; the chip centres its content, so the fraction splits
+ * between the two edges. The 1px keeps subpixel rounding from costing
+ * the head one of those characters. */
+.dev-branch-chip .middle-ellipsis-head {
+  max-width: calc(round(down, 100% - var(--dev-branch-tail-ch, 0) * 1ch, 1ch) + 1px);
+}
+.dev-branch-chip:hover {
+  background: color-mix(in srgb, var(--teal) 18%, transparent);
+  border-color: color-mix(in srgb, var(--teal) 60%, transparent);
+}
+.dev-branch-chip:focus-visible {
+  outline: 1px solid var(--teal);
+  outline-offset: 1px;
+}
+.dev-branch-chip.copied {
+  border-color: color-mix(in srgb, var(--green) 50%, transparent);
+  background: color-mix(in srgb, var(--green) 12%, transparent);
+  color: var(--green);
+}
+
 /* Utility button group — search / system-widget / settings.
  * Pinned together at the right end of the header with a thin
  * vertical divider in front of them, so the trio reads as a

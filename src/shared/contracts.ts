@@ -1070,6 +1070,17 @@ export interface NavigateViewPayload {
  */
 export type DiskhoundPlatform = "win32" | "darwin" | "linux";
 
+/**
+ * The Git checkout a development build runs from. The header shows it
+ * so two dev instances, or a dev build next to the installed app, can
+ * be told apart. Packaged builds have none.
+ */
+export interface DevBranch {
+  /** Branch name, or the full commit SHA when HEAD is detached. */
+  name: string;
+  detached: boolean;
+}
+
 export interface DiskhoundNativeApi {
   /** Static OS identifier, resolved once at preload time. Lets the
    *  renderer gate Windows-only UI (MFT elevation, CPU affinity rules,
@@ -1318,6 +1329,11 @@ export interface DiskhoundNativeApi {
   /** Load the persisted updater state (lastCheckedAt) so the UI shows a
    *  real timestamp across app restarts instead of "Never". */
   getUpdateState: () => Promise<UpdateState>;
+
+  // Build identity
+  /** Branch of the checkout a development build was launched from.
+   *  Null in packaged builds, or when Git can't say. */
+  getDevBranch: () => Promise<DevBranch | null>;
 
   // Tray
   minimizeToTray: () => void;
