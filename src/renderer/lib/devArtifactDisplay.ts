@@ -61,8 +61,8 @@ function pathSep(path: string, parts: string[]): string {
   return "/";
 }
 
-function joinTail(parts: string[]): string {
-  return parts.join("\\");
+function joinTail(parts: string[], sep: string): string {
+  return parts.join(sep);
 }
 
 function relativeFrom(path: string, root: string): string {
@@ -74,7 +74,7 @@ function relativeFrom(path: string, root: string): string {
   while (i < rootKey.length && i < pathKey.length && rootKey[i] === pathKey[i]) i += 1;
   if (i === 0) return basenameOf(path);
   const tail = pathParts.slice(i);
-  return tail.length > 0 ? joinTail(tail) : basenameOf(path);
+  return tail.length > 0 ? joinTail(tail, pathSep(path, pathParts)) : basenameOf(path);
 }
 
 export function isGenericArtifactLeaf(name: string): boolean {
@@ -139,34 +139,36 @@ function genericLeafLines(artifact: DevArtifact): { headline: string; tail: stri
   return { headline: shortenVisiblePath(parent), tail: leafRel };
 }
 
-/** Full path when it fits; otherwise `C:\Users\name\…\leaf`. */
+/** Full path when it fits; otherwise `C:\Users\name\…\leaf` or `/Users/name/…/leaf`. */
 export function shortenVisiblePath(path: string, max = 52): string {
   if (path.length <= max) return path;
   const parts = splitPath(path);
   if (parts.length <= 2) return path;
   const sep = pathSep(path, parts);
+  // splitPath drops the leading `/` (or `\\` for UNC); put it back on the output.
+  const root = path.match(/^[\\/]+/)?.[0] ?? "";
   const rest = stripDrive(parts);
   const usersIdx = rest.findIndex((p) => p.toLowerCase() === "users");
   const last = parts[parts.length - 1]!;
   if (usersIdx >= 0 && rest[usersIdx + 1]) {
     const user = rest[usersIdx + 1]!;
     if (last.toLowerCase() === user.toLowerCase()) return path;
-    const prefix = /^[A-Za-z]:$/.test(parts[0] ?? "")
-      ? `${parts[0]}${sep}Users${sep}${user}`
-      : `Users${sep}${user}`;
-    return `${prefix}${sep}…${sep}${last}`;
+    const userEnd = parts.length - rest.length + usersIdx + 2;
+    return `${root}${parts.slice(0, userEnd).join(sep)}${sep}…${sep}${last}`;
   }
-  return `${parts[0]}${sep}…${sep}${last}`;
+  return `${root}${parts[0]}${sep}…${sep}${last}`;
 }
 
 export function shortenUnscopedParent(parent: string): string {
-  const rest = stripDrive(splitPath(parent));
+  const parts = splitPath(parent);
+  const sep = pathSep(parent, parts);
+  const rest = stripDrive(parts);
   const usersIdx = rest.findIndex((p) => p.toLowerCase() === "users");
   if (usersIdx >= 0 && rest[usersIdx + 2]?.toLowerCase() === "appdata") {
-    return joinTail(rest.slice(usersIdx + 2));
+    return joinTail(rest.slice(usersIdx + 2), sep);
   }
-  if (rest.length <= 3) return joinTail(rest);
-  return joinTail(rest.slice(-3));
+  if (rest.length <= 3) return joinTail(rest, sep);
+  return joinTail(rest.slice(-3), sep);
 }
 
 export function artifactHeadline(artifact: DevArtifact): string {
