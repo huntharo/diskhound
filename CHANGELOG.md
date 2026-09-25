@@ -6,6 +6,9 @@
 
 - The traffic lights are now vertically centred in the header, in line
   with the DiskHound name. They used to sit about 3.5pt high.
+
+### macOS drive list
+
 - The startup disk shows how full the disk is. `/` is the sealed System
   volume, and `df` counts only the OS there (about 12 GB), so a Mac
   that was 95% full showed "11.8 GB used" and an almost empty bar. `/`
@@ -15,8 +18,9 @@
   and the scan progress estimate all read it.
 - Xcode simulator runtimes, cryptex mounts, and other disk images macOS
   manages under `/System`, `/Library/Developer/CoreSimulator`,
-  `/private/var/run`, and `/private/var/folders` are no longer listed as
-  drives. `/Volumes` disks, shares, and other device mounts still are.
+  `/private/var/run`, `/private/var/folders`, and `/private/var/vm` are
+  no longer listed as drives. `/Volumes` disks, shares, and other
+  device mounts still are.
 
 ## 0.6.2 — 2026-09-23
 
