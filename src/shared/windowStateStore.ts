@@ -57,6 +57,11 @@ import { app, type BrowserWindow, screen } from "electron";
  * transitions persist immediately because they're discrete events
  * (no debounce useful). On window close any pending debounce is
  * flushed synchronously so we never lose the final state.
+ *
+ * Only a change is written. flush() on quit does nothing when no
+ * event arrived since the last save (a widget that was never opened
+ * writes nothing), and a save whose JSON matches the file, such as
+ * the maximize event a restored maximized window reports, is skipped.
  */
 
 const FILE_NAME = "window-state.json";
@@ -96,7 +101,8 @@ export interface WindowStateStore {
   track(window: BrowserWindow): void;
   /** Synchronously flush any pending debounced write. Call from
    *  app.on("before-quit") so we don't lose state if the user
-   *  quits during the debounce window. */
+   *  quits during the debounce window. Writes nothing when no
+   *  change is waiting. */
   flush(): Promise<void>;
 }
 
@@ -125,9 +131,12 @@ export async function createWindowStateStore(opts: {
   };
   let isMaximized = false;
   let isFullScreen = false;
+  /** The file's text as last read or written; null when there is none. */
+  let persistedText: string | null = null;
 
   try {
     const raw = await FS.readFile(filePath, "utf8");
+    persistedText = raw;
     const parsed = JSON.parse(raw) as PersistedShape;
     if (parsed.bounds) {
       const w = parsed.bounds.width;
@@ -154,24 +163,33 @@ export async function createWindowStateStore(opts: {
   const normalBounds: WindowBounds = { ...bounds };
 
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  /** An event changed the state since the last save. */
+  let dirty = false;
 
   const persistNow = async (): Promise<void> => {
     saveTimer = null;
+    if (!dirty) return;
+    dirty = false;
+    const payload: PersistedShape = {
+      bounds: { ...normalBounds },
+      isMaximized,
+      isFullScreen,
+    };
+    const text = JSON.stringify(payload, null, 2);
+    if (text === persistedText) return;
     try {
       await FS.mkdir(dir, { recursive: true });
-      const payload: PersistedShape = {
-        bounds: { ...normalBounds },
-        isMaximized,
-        isFullScreen,
-      };
-      await FS.writeFile(filePath, JSON.stringify(payload, null, 2), "utf8");
+      await FS.writeFile(filePath, text, "utf8");
+      persistedText = text;
     } catch {
       // Persistence failure is non-fatal. The user just loses one
-      // session's worth of geometry; we'll succeed next time.
+      // session's worth of geometry; the quit flush tries again.
+      dirty = true;
     }
   };
 
   const schedulePersist = (): void => {
+    dirty = true;
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       void persistNow();

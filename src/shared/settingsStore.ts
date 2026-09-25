@@ -15,7 +15,8 @@ export interface SettingsStore {
   update: (transform: (current: AppSettings) => AppSettings) => Promise<AppSettings>;
   /**
    * Subscribe to post-persist change notifications. Fires after
-   * every successful `set` / `update`, with the normalized
+   * every successful `set` / `update` (including one that changed
+   * nothing and so skipped the disk write), with the normalized
    * settings as they're now stored. main.ts wires this to a
    * `BrowserWindow.webContents.send` broadcast so all renderer
    * windows (main app + system widget) get push notifications
@@ -32,18 +33,34 @@ export async function createSettingsStore(): Promise<SettingsStore> {
   const settingsPath = Path.join(settingsDir, SETTINGS_FILE_NAME);
 
   let current = defaultSettings();
+  /**
+   * The text settings.json holds, as last read or written; null when
+   * unknown. A save whose text matches is skipped, so re-saving
+   * unchanged settings does not rewrite the file.
+   */
+  let persistedText: string | null = null;
 
   try {
     const raw = await FS.readFile(settingsPath, "utf8");
     const parsed = JSON.parse(raw) as Partial<AppSettings>;
     current = normalizeAppSettings(mergeSettings(current, parsed));
+    persistedText = raw;
   } catch {
     // No existing settings file - use defaults
   }
 
   const persist = async (settings: AppSettings) => {
-    await FS.mkdir(settingsDir, { recursive: true });
-    await FS.writeFile(settingsPath, JSON.stringify(settings, null, 2), "utf8");
+    const text = JSON.stringify(settings, null, 2);
+    if (text === persistedText) return;
+    // Claimed before the write so a concurrent identical save skips.
+    persistedText = text;
+    try {
+      await FS.mkdir(settingsDir, { recursive: true });
+      await FS.writeFile(settingsPath, text, "utf8");
+    } catch (error) {
+      persistedText = null;
+      throw error;
+    }
   };
 
   const listeners = new Set<SettingsListener>();

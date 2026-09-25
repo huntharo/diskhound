@@ -55,8 +55,9 @@ function cachePath(): string {
 
 /**
  * Initialize the cache. Call once per scan — reads the prior cache
- * from disk in the background. Subsequent calls are no-ops until
- * `reset()` is called (not currently exposed; tests only).
+ * from disk in the background. Subsequent calls are no-ops for the
+ * rest of the process (tests start over with
+ * `__resetHashCacheForTests`).
  */
 export async function initHashCache(dataDirPath: string): Promise<void> {
   if (loaded) return;
@@ -148,6 +149,14 @@ export async function persistHashCache(): Promise<void> {
 /** Total entries. Exposed for diagnostics / tests. */
 export function cacheSize(): number {
   return cache.size;
+}
+
+/** Exported for tests — only use from test code. Forgets the loaded cache, as a restart does. */
+export function __resetHashCacheForTests(): void {
+  dataDir = "";
+  cache = new Map();
+  loaded = false;
+  dirty = false;
 }
 
 // ── I/O helpers ────────────────────────────────────────────────────────

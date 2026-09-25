@@ -29,6 +29,7 @@ import {
   type DiskIoSnapshot,
   type FullDiffStatus,
   type FullDiffResult,
+  type MonitoringSnapshot,
   type NavigateViewPayload,
   type PathActionResult,
   type PermanentDeleteProgress,
@@ -49,15 +50,18 @@ import {
 } from "./shared/contracts";
 import {
   checkDiskDeltas,
+  flushDiskMonitor,
   getDiskDeltaHistory,
   getDiskSpace,
   getLastFullScanAt,
   getMonitoringSnapshot,
   initDiskMonitor,
   markFullScan,
+  startDiskMonitoring,
 } from "./shared/diskMonitor";
 import { createScanSnapshotStore } from "./shared/scanStore";
 import { createSettingsStore, type SettingsStore } from "./shared/settingsStore";
+import { createUpdaterStateStore } from "./shared/updaterStateStore";
 import { createWindowStateStore, type WindowStateStore } from "./shared/windowStateStore";
 import {
   easyMove,
@@ -3815,23 +3819,7 @@ void (async () => {
       monitoringInterval = null;
     }
 
-    if (!settings.monitoring.enabled) return;
-
-    const checkMs = settings.monitoring.checkIntervalMinutes * 60 * 1000;
-
-    monitoringInterval = setInterval(async () => {
-      // Gate on system idle if configured
-      if (settings.monitoring.requireIdle) {
-        const idleSeconds = powerMonitor.getSystemIdleTime();
-        const requiredIdleSeconds = settings.monitoring.idleMinutes * 60;
-        if (idleSeconds < requiredIdleSeconds) {
-          return; // System not idle long enough, skip this check
-        }
-      }
-
-      // Check disk deltas
-      const snapshot = await checkDiskDeltas();
-
+    const onChecked = async (snapshot: MonitoringSnapshot) => {
       const excludedSet = new Set(
         (settings.monitoring.excludedDrives ?? []).map((d) => d.toUpperCase()),
       );
@@ -3894,7 +3882,12 @@ void (async () => {
           }
         }
       }
-    }, checkMs);
+    };
+
+    monitoringInterval = startDiskMonitoring(settings.monitoring, {
+      systemIdleSeconds: () => powerMonitor.getSystemIdleTime(),
+      onChecked,
+    });
   };
 
   /**
@@ -4499,39 +4492,9 @@ void (async () => {
   let updateCheckTimer: ReturnType<typeof setTimeout> | null = null;
   let lastUpdateStatus: UpdateStatus | null = null;
 
-  /**
-   * Persisted timestamp of the last time we successfully *attempted* an
-   * update check (whether or not an update was available). Stored on
-   * the in-memory updateState stub — the renderer pulls it via
-   * getUpdateState() on mount so "last checked" survives restarts
-   * instead of reading "Never" every time the app cold-boots.
-   */
-  const updaterStatePath = Path.join(app.getPath("userData"), "updater-state.json");
-  type UpdaterState = {
-    lastCheckedAt: number | null;
-    pendingInstallVersion: string | null;
-    pendingInstallStartedAt: number | null;
-  };
-  const readUpdaterState = (): UpdaterState => {
-    try {
-      const raw = FS_SYNC.readFileSync(updaterStatePath, "utf8");
-      const parsed = JSON.parse(raw) as Partial<UpdaterState>;
-      return {
-        lastCheckedAt: typeof parsed.lastCheckedAt === "number" ? parsed.lastCheckedAt : null,
-        pendingInstallVersion:
-          typeof parsed.pendingInstallVersion === "string" ? parsed.pendingInstallVersion : null,
-        pendingInstallStartedAt:
-          typeof parsed.pendingInstallStartedAt === "number" ? parsed.pendingInstallStartedAt : null,
-      };
-    } catch { /* missing / corrupt — treat as "never checked" */ }
-    return { lastCheckedAt: null, pendingInstallVersion: null, pendingInstallStartedAt: null };
-  };
-  let updaterState: UpdaterState = readUpdaterState();
-  const persistUpdaterState = () => {
-    try {
-      FS_SYNC.writeFileSync(updaterStatePath, JSON.stringify(updaterState));
-    } catch { /* best effort */ }
-  };
+  const updaterState = createUpdaterStateStore(
+    Path.join(app.getPath("userData"), "updater-state.json"),
+  );
 
   const updateChannelForSettings = (value: AppSettings): UpdateChannel =>
     value.general.betaUpdates ? "beta" : "latest";
@@ -4554,31 +4517,25 @@ void (async () => {
     const enriched: UpdateStatus = {
       ...status,
       channel: status.channel ?? currentUpdateChannel(),
-      lastCheckedAt: updaterState.lastCheckedAt,
+      lastCheckedAt: updaterState.get().lastCheckedAt,
     };
     lastUpdateStatus = enriched;
     mainWindow?.webContents.send(UPDATE_STATUS_CHANNEL, enriched);
   };
 
   const recordCheck = () => {
-    updaterState = { ...updaterState, lastCheckedAt: Date.now() };
-    persistUpdaterState();
+    updaterState.update({ lastCheckedAt: Date.now() });
   };
 
   const clearPendingInstall = () => {
-    updaterState = {
-      ...updaterState,
-      pendingInstallVersion: null,
-      pendingInstallStartedAt: null,
-    };
-    persistUpdaterState();
+    updaterState.update({ pendingInstallVersion: null, pendingInstallStartedAt: null });
   };
 
   const emitCompletedInstallIfNeeded = () => {
-    const pendingVersion = updaterState.pendingInstallVersion;
+    const pendingVersion = updaterState.get().pendingInstallVersion;
     if (!pendingVersion) return;
 
-    const startedAt = updaterState.pendingInstallStartedAt ?? Date.now();
+    const startedAt = updaterState.get().pendingInstallStartedAt ?? Date.now();
     clearPendingInstall();
     if (pendingVersion !== currentVersion) return;
 
@@ -4699,7 +4656,7 @@ void (async () => {
   // the stale-looking "Never" that the in-memory UpdateStatus gives us.
   ipcMain.handle("diskhound:get-update-state", () => {
     return {
-      lastCheckedAt: updaterState.lastCheckedAt,
+      lastCheckedAt: updaterState.get().lastCheckedAt,
       currentVersion,
       channel: currentUpdateChannel(),
       lastStatus: lastUpdateStatus,
@@ -4710,12 +4667,10 @@ void (async () => {
     if (!autoUpdater) return;
     const availableVersion = lastUpdateStatus?.availableVersion ?? null;
     const installStartedAt = Date.now();
-    updaterState = {
-      ...updaterState,
+    updaterState.update({
       pendingInstallVersion: availableVersion,
       pendingInstallStartedAt: installStartedAt,
-    };
-    persistUpdaterState();
+    });
     emitUpdateStatus({
       phase: "installing",
       currentVersion,
@@ -4784,6 +4739,10 @@ void (async () => {
     // calls persistNow as a belt-and-suspenders.
     void windowStateStore?.flush();
     void widgetWindowStateStore?.flush();
+    // Idle monitoring checks leave the latest drive readings in
+    // memory only; write them so the next launch's first delta starts
+    // from this session's last check.
+    void flushDiskMonitor();
   });
 })().catch((err: unknown) => {
   const error = err as { stack?: string; message?: string };
