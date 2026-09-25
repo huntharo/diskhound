@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { changelogEditAllowed } from "../../../scripts/changelog-guard.mjs";
+import { changelogEditAllowed } from "./changelog-guard.mjs";
 import {
   formatReleaseNotes,
   latestChangelogVersion,
   pullRequestInRange,
-} from "../../../scripts/collect-release-notes.mjs";
+} from "./collect-release-notes.mjs";
 
 describe("latestChangelogVersion", () => {
   it("skips Unreleased and reads the newest dated heading", () => {
