@@ -11,9 +11,25 @@ on:
     branches: [main, master]
 
 jobs:
+  # Its own job, and it runs on every pull_request event, including a
+  # body-only edit. Skipping it would post a successful skipped check
+  # on the same commit and cover a failed title edit.
+  changelog-guard:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reject feature-branch changelog edits
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --depth=1 origin "$BASE_SHA"
+          node scripts/changelog-guard.mjs
+
   typecheck-and-test:
-    # A body-only edit does not change the guard's answer. A title
-    # edit does, so the whole job runs again.
+    # A body-only edit does not change the build. A title edit does.
     if: github.event.action != 'edited' || github.event.changes.title
     runs-on: ubuntu-latest
     steps:
@@ -25,15 +41,6 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
-
-      - name: Reject feature-branch changelog edits
-        if: github.event_name == 'pull_request'
-        env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          git fetch --depth=1 origin "$BASE_SHA"
-          bun run scripts/changelog-guard.mjs
 
       - name: Typecheck
         run: bun run typecheck
