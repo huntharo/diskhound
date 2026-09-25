@@ -69,6 +69,24 @@ export function sizeSemanticsCompatible(
 }
 
 /**
+ * macOS/Linux scans count a hardlinked file's bytes once: the first link
+ * in walk order owns them and later links are indexed with `h:1`. History
+ * without this marker counted every link, so its totals run high.
+ * Windows already went by the MFT's `h:1`; the marker is Unix only.
+ */
+export type HardlinkAccounting = "once";
+
+export const UNIX_HARDLINK_ACCOUNTING: HardlinkAccounting = "once";
+
+export function hardlinkAccountingCompatible(
+  a: { hardlinkAccounting?: HardlinkAccounting } | null | undefined,
+  b: { hardlinkAccounting?: HardlinkAccounting } | null | undefined,
+): boolean {
+  if (process.platform === "win32") return true;
+  return a?.hardlinkAccounting === b?.hardlinkAccounting;
+}
+
+/**
  * Whether a persisted scan's `s` / `bytesSeen` values are size-on-disk.
  * Pre-field history: Unix already used allocated occupancy; Windows used
  * logical EOF. Mixing those Windows indexes into a new scan would keep
@@ -113,6 +131,8 @@ export interface ScanSnapshot {
    * `allocated` (size on disk). Omitted on snapshots from older builds.
    */
   sizeSemantics?: ScanSizeSemantics;
+  /** macOS/Linux: `once` when hardlinked bytes were counted once. */
+  hardlinkAccounting?: HardlinkAccounting;
 }
 
 export interface PathActionResult {
@@ -623,6 +643,8 @@ export interface ScanHistoryEntry {
   engine?: ScanEngine;
   /** How `bytesSeen` was measured. Missing on pre-allocated-size history. */
   sizeSemantics?: ScanSizeSemantics;
+  /** macOS/Linux: missing on history that counted every hardlink. */
+  hardlinkAccounting?: HardlinkAccounting;
 }
 
 export type FileDeltaKind = "added" | "removed" | "grew" | "shrank";
@@ -690,6 +712,11 @@ export interface ScanDiffResult {
    * Explorer size vs size on disk). Totals are not comparable.
    */
   sizeSemanticsChanged: boolean;
+  /**
+   * True when one scan counted every hardlink and the other counted each
+   * hardlinked file once. Totals are not comparable.
+   */
+  hardlinkAccountingChanged: boolean;
 }
 
 // ── Full File-Index Diff Types ─────────────────────────────

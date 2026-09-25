@@ -37,8 +37,10 @@ import {
   type ScanOptions,
   type ScanSnapshot,
   ALLOCATED_SIZE_SEMANTICS,
+  hardlinkAccountingCompatible,
   indexUsesAllocatedSize,
   sizeSemanticsCompatible,
+  UNIX_HARDLINK_ACCOUNTING,
   type SystemMemorySnapshot,
   type ToastMessage,
   type UpdateChannel,
@@ -1043,6 +1045,9 @@ void (async () => {
         engine === "js-worker" && process.platform === "win32"
           ? "logical"
           : ALLOCATED_SIZE_SEMANTICS;
+      if (process.platform !== "win32") {
+        message.snapshot.hardlinkAccounting = UNIX_HARDLINK_ACCOUNTING;
+      }
       if (message.type === "done") {
         // Persist history before notifying the renderer so immediate diff
         // lookups can see the just-finished scan.
@@ -1206,7 +1211,11 @@ void (async () => {
 
         if (session.trigger === "scheduled" && settings?.notifications.deltaAlerts && message.snapshot.rootPath) {
           const latestPair = getLatestPair(message.snapshot.rootPath);
-          if (latestPair && sizeSemanticsCompatible(latestPair.baseline, latestPair.current)) {
+          if (
+            latestPair
+            && sizeSemanticsCompatible(latestPair.baseline, latestPair.current)
+            && hardlinkAccountingCompatible(latestPair.baseline, latestPair.current)
+          ) {
             const [baseline, current] = await Promise.all([
               loadHistoricalSnapshot(latestPair.baseline.id),
               loadHistoricalSnapshot(latestPair.current.id),
@@ -1296,6 +1305,9 @@ void (async () => {
     const history = getScanHistory(rootPath);
     for (const entry of history) {
       if (!indexUsesAllocatedSize(entry)) continue;
+      // A Unix index that counted every hardlink would let the JS worker
+      // inherit the double count.
+      if (!hardlinkAccountingCompatible(entry, { hardlinkAccounting: UNIX_HARDLINK_ACCOUNTING })) continue;
       const candidate = indexFilePath(entry.id);
       try {
         if (FS_SYNC.existsSync(candidate)) return candidate;

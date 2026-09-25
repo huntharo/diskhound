@@ -31,6 +31,8 @@ mod mft;
 mod sample;
 mod dev_artifacts;
 mod index_line;
+#[cfg(not(windows))]
+mod hardlinks;
 
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{GetLastError, ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE};
@@ -469,7 +471,10 @@ struct Baseline {
     dirs: HashSet<String>,
     /// Extra NTFS names (`h:1`) from the previous index. The walker cannot
     /// see link counts, so a re-walk of a touched directory keeps this flag
-    /// when the same path is still present.
+    /// when the same path is still present. Windows only: the Unix walker
+    /// reads link counts itself, and a pnpm-heavy index can carry millions
+    /// of `h:1` paths.
+    #[cfg(windows)]
     extra_hardlink_paths: HashSet<String>,
 }
 
@@ -493,6 +498,7 @@ impl Baseline {
         let mut dirs: HashSet<String> = HashSet::new();
         let mut dir_file_counts: HashMap<String, u64> = HashMap::new();
         let mut dir_total_sizes: HashMap<String, u64> = HashMap::new();
+        #[cfg(windows)]
         let mut extra_hardlink_paths: HashSet<String> = HashSet::new();
         let mut lines_read: u64 = 0;
         // Separately count files so we can detect truncated baselines
@@ -538,6 +544,7 @@ impl Baseline {
             };
             file_records += 1;
             let extra_hardlink = rec.extra_hardlink;
+            #[cfg(windows)]
             if extra_hardlink {
                 extra_hardlink_paths.insert(normalized.clone());
             }
@@ -609,6 +616,7 @@ impl Baseline {
             dir_file_counts,
             dir_total_sizes,
             dirs,
+            #[cfg(windows)]
             extra_hardlink_paths,
         })
     }
@@ -1379,6 +1387,21 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
                 }
                 true
             });
+            // Fixed order so the first link of a hardlinked file, which
+            // owns its bytes, is the same link on every scan. jwalk
+            // streams entries depth-first in this order even when the
+            // reads run in parallel.
+            children.sort_by(|a, b| match (a, b) {
+                (Ok(a), Ok(b)) => hardlinks::walk_order(
+                    a.file_type.is_dir(),
+                    &a.file_name,
+                    b.file_type.is_dir(),
+                    &b.file_name,
+                ),
+                (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+                (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+                (Err(_), Err(_)) => std::cmp::Ordering::Equal,
+            });
         });
 
     eprintln!(
@@ -1386,6 +1409,8 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
         thread_count
     );
     let walk_started = Instant::now();
+    let mut hardlinks = hardlinks::HardlinkTracker::default();
+    let mut hardlink_bytes_deduped: u64 = 0;
 
     for entry in walker {
         if is_cancelled() {
@@ -1444,16 +1469,22 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
             .map(normalize_path)
             .unwrap_or_else(|| state.root_path_string.clone());
         let file_name = entry.file_name().to_string_lossy().into_owned();
+        let size = allocated_size(&metadata);
+        let extra_hardlink =
+            hardlinks.is_extra_link(metadata.dev(), metadata.ino(), metadata.nlink());
+        if extra_hardlink {
+            hardlink_bytes_deduped = hardlink_bytes_deduped.saturating_add(size);
+        }
         let file_record = ScanFileRecord {
             path: normalize_path(&file_path),
             name: file_name.clone(),
             parent_path,
             extension: file_extension(&file_name),
-            size: allocated_size(&metadata),
+            size,
             modified_at: metadata_modified_at_ms(&metadata),
         };
 
-        record_file(state, file_record)?;
+        record_file_with_link_flag(state, file_record, extra_hardlink)?;
     }
 
     #[cfg(target_os = "linux")]
@@ -1467,6 +1498,12 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
         state.directories_visited,
         state.skipped_entries,
         pruned,
+    );
+    eprintln!(
+        "[diskhound-native-scanner] hardlinks: {} extra links counted once ({} bytes), {} inodes with links outside the scan",
+        hardlinks.extra_links(),
+        hardlink_bytes_deduped,
+        hardlinks.inodes_with_unseen_links(),
     );
     finalize_hottest_directories(state);
     Ok(())
@@ -3416,11 +3453,25 @@ fn enumerate_windows_directory(
     Ok(())
 }
 
+/// Windows walkers can't read link counts, so they keep `h:1` on a path
+/// the previous index flagged. The Unix walker decides from the inode.
+#[cfg(windows)]
 fn record_file(state: &mut ScanState, file_record: ScanFileRecord) -> Result<(), String> {
     let extra_hardlink = state
         .baseline
         .as_ref()
         .is_some_and(|baseline| baseline.extra_hardlink_paths.contains(&file_record.path));
+    record_file_with_link_flag(state, file_record, extra_hardlink)
+}
+
+/// An extra hardlink still counts as a file in its folder and keeps its
+/// size in the index and folder-tree rows, but adds 0 bytes and stays off
+/// the largest-files and extension lists.
+fn record_file_with_link_flag(
+    state: &mut ScanState,
+    file_record: ScanFileRecord,
+    extra_hardlink: bool,
+) -> Result<(), String> {
     let occupancy = if extra_hardlink { 0 } else { file_record.size };
     state.files_visited += 1;
     state.bytes_seen += occupancy;
@@ -4554,6 +4605,195 @@ mod index_line_parse_tests {
         assert!(parse_index_line("not json").is_none());
         assert!(parse_index_line("").is_none());
         assert!(parse_index_line(r#"{"s":1}"#).is_none());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod unix_hardlink_scan_tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::MetadataExt;
+
+    struct TempTree(PathBuf);
+
+    impl TempTree {
+        fn new(label: &str) -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let dir = std::env::temp_dir().join(format!(
+                "diskhound-{label}-{}-{nanos}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&dir).unwrap();
+            // /var → /private/var on macOS; run() scans the canonical root.
+            TempTree(dir.canonicalize().unwrap())
+        }
+
+        fn path(&self, rel: &str) -> PathBuf {
+            self.0.join(rel)
+        }
+
+        fn write(&self, rel: &str, bytes: usize) -> PathBuf {
+            let path = self.path(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, vec![7u8; bytes]).unwrap();
+            path
+        }
+
+        fn link(&self, target: &Path, rel: &str) {
+            let path = self.path(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::hard_link(target, path).unwrap();
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn test_state(root: &Path, index_output: &Path) -> ScanState {
+        let root_path_string = normalize_path(root);
+        let index_writer =
+            IndexWriter::create(index_output, None, root_path_string.clone()).unwrap();
+        let mut directory_totals = HashMap::new();
+        directory_totals.insert(
+            root_path_string.clone(),
+            DirectoryHotspot {
+                path: root_path_string.clone(),
+                size: 0,
+                file_count: 0,
+                depth: 0,
+            },
+        );
+        ScanState {
+            input: ScanInput {
+                root_path: root.to_path_buf(),
+                top_file_limit: 100,
+                top_directory_limit: 100,
+                index_output: Some(index_output.to_path_buf()),
+                baseline_index: None,
+                folder_tree_output: None,
+                dev_artifacts_output: None,
+            },
+            root_path_string,
+            started_at_ms: 0,
+            started_at_instant: Instant::now(),
+            files_visited: 0,
+            directories_visited: 0,
+            skipped_entries: 0,
+            bytes_seen: 0,
+            largest_files: Vec::new(),
+            hottest_directories: Vec::new(),
+            directory_totals,
+            extension_totals: HashMap::new(),
+            folder_tree_files: HashMap::new(),
+            last_emit_elapsed_ms: 0,
+            index_writer: Some(index_writer),
+            baseline: None,
+            inherited_prefixes: Vec::new(),
+            inherited_dirs: 0,
+            inherited_files: 0,
+            emit_lite_snapshots: false,
+            scan_phase: ScanPhase::Starting,
+            expected_total_files: None,
+            defer_hottest_dir_ranking: false,
+        }
+    }
+
+    /// Scan `root` and return the state plus every file path the index
+    /// flagged `h:1`, sorted.
+    fn scan(root: &Path, index_output: &Path) -> (ScanState, Vec<String>) {
+        let mut state = test_state(root, index_output);
+        scan_generic(root, &mut state).unwrap();
+        state.index_writer.take().unwrap().finish().unwrap();
+
+        let reader = BufReader::new(GzDecoder::new(File::open(index_output).unwrap()));
+        let mut extra: Vec<String> = reader
+            .lines()
+            .map(|line| line.unwrap())
+            .filter_map(|line| index_line::parse_index_line(&line))
+            .filter(|rec| rec.extra_hardlink)
+            .map(|rec| rec.path)
+            .collect();
+        extra.sort();
+        (state, extra)
+    }
+
+    fn occupancy(path: &Path) -> u64 {
+        fs::metadata(path).unwrap().blocks() * 512
+    }
+
+    #[test]
+    fn hardlinked_bytes_count_once_and_later_links_are_flagged() {
+        let tree = TempTree::new("hardlinks");
+        let root = tree.path("root");
+        let shared = tree.write("root/a.bin", 64 * 1024);
+        tree.link(&shared, "root/sub/b.bin");
+        tree.link(&shared, "root/sub/deeper/c.bin");
+        let solo = tree.write("root/solo.bin", 16 * 1024);
+        // Other name lives outside the scan root: the link inside owns it.
+        let outside = tree.write("elsewhere/lib.so", 32 * 1024);
+        tree.link(&outside, "root/vendor/lib.so");
+        let index = tree.path("index.ndjson.gz");
+
+        let (state, extra) = scan(&root, &index);
+
+        let root_s = normalize_path(&root);
+        assert_eq!(state.files_visited, 5);
+        assert_eq!(
+            state.bytes_seen,
+            occupancy(&shared) + occupancy(&solo) + occupancy(&outside)
+        );
+        assert_eq!(
+            extra,
+            vec![
+                format!("{root_s}/sub/b.bin"),
+                format!("{root_s}/sub/deeper/c.bin"),
+            ]
+        );
+
+        let sub = &state.directory_totals[&format!("{root_s}/sub")];
+        assert_eq!(sub.size, 0, "a folder of extra links adds no bytes");
+        assert_eq!(sub.file_count, 2, "extra links still count as files");
+        assert_eq!(state.directory_totals[&root_s].size, state.bytes_seen);
+
+        let largest: Vec<&str> = state.largest_files.iter().map(|f| f.path.as_str()).collect();
+        assert!(largest.contains(&format!("{root_s}/a.bin").as_str()));
+        assert!(!largest.iter().any(|p| p.contains("/sub/")));
+        assert_eq!(state.largest_files.len(), 3);
+    }
+
+    #[test]
+    fn owner_is_the_first_link_in_walk_order_not_creation_order() {
+        let tree = TempTree::new("hardlink-owner");
+        let root = tree.path("root");
+        // Created first, but deeper: a file in the root is reached first.
+        let original = tree.write("root/aaa/original.bin", 8 * 1024);
+        tree.link(&original, "root/zzz.bin");
+        tree.link(&original, "root/bbb/copy.bin");
+        // Subdirectories go by name, not creation or readdir order.
+        let made_first = tree.write("root/zeta/made-first.bin", 4 * 1024);
+        tree.link(&made_first, "root/alpha/made-second.bin");
+        let root_s = normalize_path(&root);
+
+        for run in 0..2 {
+            let index = tree.path(&format!("index-{run}.ndjson.gz"));
+            let (state, extra) = scan(&root, &index);
+            assert_eq!(state.bytes_seen, occupancy(&original) + occupancy(&made_first));
+            assert_eq!(
+                extra,
+                vec![
+                    format!("{root_s}/aaa/original.bin"),
+                    format!("{root_s}/bbb/copy.bin"),
+                    format!("{root_s}/zeta/made-first.bin"),
+                ],
+                "scan {run} picked a different owner"
+            );
+        }
     }
 }
 

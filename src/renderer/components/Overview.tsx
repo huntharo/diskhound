@@ -784,8 +784,11 @@ function Metric({ value, label, accent, title }: { value: string; label: string;
 function LatestScanSummary({ diff, onViewDetails }: { diff: ScanDiffResult; onViewDetails?: () => void }) {
   const grew = diff.totalBytesDelta > 0;
   const bytesLabel = formatBytes(Math.abs(diff.totalBytesDelta));
+  const accountingChanged = diff.sizeSemanticsChanged || diff.hardlinkAccountingChanged;
   const title = diff.sizeSemanticsChanged
     ? "Size accounting changed to size on disk — run one more scan before comparing"
+    : diff.hardlinkAccountingChanged
+    ? "Hardlinked files are now counted once — run one more scan before comparing"
     : diff.totalBytesDelta === 0
     ? "No size change since the previous scan"
     : grew
@@ -801,7 +804,7 @@ function LatestScanSummary({ diff, onViewDetails }: { diff: ScanDiffResult; onVi
     .slice(0, 2);
 
   return (
-    <div className={`scan-summary-card ${diff.sizeSemanticsChanged ? "flat" : grew ? "grew" : diff.totalBytesDelta < 0 ? "freed" : "flat"}`}>
+    <div className={`scan-summary-card ${accountingChanged ? "flat" : grew ? "grew" : diff.totalBytesDelta < 0 ? "freed" : "flat"}`}>
       <div className="scan-summary-main">
         <div className="scan-summary-kicker">Latest scan summary</div>
         <div className="scan-summary-title">{title}</div>

@@ -54,6 +54,12 @@ describe("scanHistory", () => {
     expect(history[0].rootPath).toBe("C:\\test");
     expect(history[0].bytesSeen).toBe(5000);
     expect(history[0].sizeSemantics).toBe("allocated");
+    expect(history[0].hardlinkAccounting).toBeUndefined();
+  });
+
+  it("keeps the hardlink accounting marker for baseline selection", async () => {
+    await saveScanToHistory({ ...makeSnapshot("/home/me", 5000, Date.now()), hardlinkAccounting: "once" });
+    expect(getScanHistory("/home/me")[0].hardlinkAccounting).toBe("once");
   });
 
   it("returns history entries sorted newest-first", async () => {

@@ -266,4 +266,26 @@ describe("computeDiff", () => {
     const current = makeSnapshot({ bytesSeen: 50, sizeSemantics: "allocated" });
     expect(computeDiff(baseline, current, "b", "c").sizeSemanticsChanged).toBe(true);
   });
+
+  it("flags a Unix scan that counted every hardlink against one that counted them once", () => {
+    if (process.platform === "win32") return;
+    const baseline = makeSnapshot({ bytesSeen: 219 });
+    const current = makeSnapshot({ bytesSeen: 191, hardlinkAccounting: "once" });
+    const diff = computeDiff(baseline, current, "b", "c");
+    expect(diff.hardlinkAccountingChanged).toBe(true);
+    expect(diff.sizeSemanticsChanged).toBe(false);
+  });
+
+  it("treats two Unix scans that counted hardlinks once as comparable", () => {
+    const baseline = makeSnapshot({ bytesSeen: 191, hardlinkAccounting: "once" });
+    const current = makeSnapshot({ bytesSeen: 190, hardlinkAccounting: "once" });
+    expect(computeDiff(baseline, current, "b", "c").hardlinkAccountingChanged).toBe(false);
+  });
+
+  it("does not use the hardlink marker on Windows", () => {
+    if (process.platform !== "win32") return;
+    const baseline = makeSnapshot({ bytesSeen: 100 });
+    const current = makeSnapshot({ bytesSeen: 90, hardlinkAccounting: "once" });
+    expect(computeDiff(baseline, current, "b", "c").hardlinkAccountingChanged).toBe(false);
+  });
 });

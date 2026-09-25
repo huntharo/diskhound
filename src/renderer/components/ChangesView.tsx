@@ -598,6 +598,12 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
         </div>
       )}
 
+      {!diff.sizeSemanticsChanged && diff.hardlinkAccountingChanged && (
+        <div className="changes-semantics-note">
+          The older scan counted a hardlinked file once per link. Newer scans count its bytes once, like du, so part of this drop is accounting, not freed space. Run one more scan, then compare two scans from after that.
+        </div>
+      )}
+
       {/* ── Summary strip ── */}
       <div className="changes-summary">
         <div
