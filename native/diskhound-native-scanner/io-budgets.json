@@ -1,0 +1,38 @@
+{
+  "native-unix/rescan-with-baseline": {
+    "note": "same tree, --baseline-index and --expected-files given: the walk's cost and 0 baseline passes (was 1 full decompress and parse, only to read the root's file count)",
+    "readdir": 4,
+    "stat": 8,
+    "baselinePasses": 0
+  },
+  "native-unix/walk": {
+    "note": "4 dirs, 4 files (one a second hardlink), 2 symlinks: 1 read_dir per dir, 1 lstat per dir (its index mtime) and per file, nothing for symlinks",
+    "readdir": 4,
+    "stat": 8,
+    "baselinePasses": 0
+  },
+  "native-windows/parallel": {
+    "note": "4 dirs (2 under the root), 4 files: the parallel walker runs; 1 listing per dir, 1 stat (root mtime)",
+    "readdir": 4,
+    "stat": 1,
+    "baselinePasses": 0
+  },
+  "native-windows/root-with-one-subfolder": {
+    "note": "3 dirs in a chain, 1 file each: 1 listing per dir, 1 stat (root mtime; subfolders take theirs from the parent listing). Was 4 listings, root files twice",
+    "readdir": 3,
+    "stat": 1,
+    "baselinePasses": 0
+  },
+  "native-windows/root-without-subfolders": {
+    "note": "root with 3 files and no subfolders: 1 listing, 1 stat (root mtime). Was 2 listings, with every root file counted and indexed twice",
+    "readdir": 1,
+    "stat": 1,
+    "baselinePasses": 0
+  },
+  "native-windows/unchanged-root": {
+    "note": "rescan of the parallel tree with nothing changed: 1 stat (root mtime, handed to the sequential walker, which used to stat it again), no listings, 2 baseline passes (load, then copy the inherited files)",
+    "readdir": 0,
+    "stat": 1,
+    "baselinePasses": 2
+  }
+}

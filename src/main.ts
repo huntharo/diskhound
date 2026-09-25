@@ -1392,7 +1392,14 @@ void (async () => {
     // both atomically on scan-complete to match the final history ID.
     const tempFolderTreePath = folderTreeSidecarPath(pendingScanId);
     const tempDevArtifactsPath = devArtifactsSidecarPath(pendingScanId);
-    const baselineIndex = resolveBaselineIndexFor(rootPath);
+    // Only the Windows scanner inherits unchanged subtrees from the last
+    // index. The macOS/Linux walker never does, and parsing the index cost
+    // it a full decompress just to learn the previous file count, which
+    // history already has.
+    const baselineIndex = process.platform === "win32" ? resolveBaselineIndexFor(rootPath) : undefined;
+    const expectedTotalFiles = process.platform === "win32"
+      ? undefined
+      : getScanHistory(rootPath).find((entry) => entry.filesVisited > 0)?.filesVisited;
 
     // Buffer for messages that arrive before the session is fully wired
     const earlyMessages: WorkerToMainMessage[] = [];
@@ -1406,6 +1413,7 @@ void (async () => {
         options: scanOptions,
         indexOutput: tempIndexPath,
         baselineIndex,
+        expectedTotalFiles,
         folderTreeOutput: tempFolderTreePath,
         devArtifactsOutput: tempDevArtifactsPath,
       },

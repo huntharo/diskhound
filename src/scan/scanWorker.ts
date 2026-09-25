@@ -23,7 +23,7 @@ import {
   sidecarFromAcc,
   writeDevArtifactSidecar,
 } from "../shared/devArtifactSidecar";
-import { foreignMountPoints } from "../shared/linuxMounts";
+import { mountPathsToSkip } from "../shared/linuxMounts";
 
 /**
  * Parsed baseline state used by the Phase-1 smart-rescan optimization. For
@@ -88,10 +88,11 @@ export async function runScan(
   post: (message: WorkerToMainMessage) => void = (message) => parentPort?.postMessage(message),
 ): Promise<void> {
   const rootPath = Path.resolve(input.rootPath);
-  // Mounts on a different filesystem than rootPath. Same-pool btrfs
-  // subvolumes are not in this set. Checked before we descend so a
-  // scan of `/` does not walk `/mnt/windows` or tmpfs.
-  const foreignMounts = foreignMountPoints(rootPath);
+  // Mounts on a different filesystem than rootPath, and second paths to
+  // files another mount of this one already shows (bind mounts). Same-pool
+  // btrfs subvolumes are walked. Checked before we descend so a scan of
+  // `/` does not walk `/mnt/windows`, tmpfs, or a bind's source twice.
+  const skippedMounts = mountPathsToSkip(rootPath);
   const scanOptions = input.options;
   const TOP_FILE_LIMIT = input.limits?.topFileLimit ?? DEFAULT_TOP_FILE_LIMIT;
   const TOP_DIRECTORY_LIMIT = input.limits?.topDirectoryLimit ?? DEFAULT_TOP_DIRECTORY_LIMIT;
@@ -344,7 +345,7 @@ export async function runScan(
       }
 
       if (entry.isDirectory()) {
-        if (foreignMounts.has(fullPath)) {
+        if (skippedMounts.has(fullPath)) {
           continue;
         }
         if (!directoryTotals.has(fullPath)) {

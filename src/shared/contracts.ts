@@ -177,6 +177,12 @@ export interface ScanStartInput {
    */
   baselineIndex?: string;
   /**
+   * The previous scan's file count, for the files-based progress bar.
+   * The macOS/Linux native scanner never inherits subtrees, so it gets
+   * this instead of `baselineIndex` and reads no previous index at all.
+   */
+  expectedTotalFiles?: number;
+  /**
    * Optional sidecar output path. When set the scanner writes a
    * pre-built folder-tree JSON.gz alongside the NDJSON index. Node
    * loads this file directly on Folders-tab open instead of

@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 
 /**
- * Linux scans stay on the filesystem they started on.
+ * Linux scans stay on the filesystem they started on, and walk each part
+ * of it once.
  *
  * btrfs subvolumes of one pool share a major:minor in
  * /proc/self/mountinfo, so a scan of `/` still includes `/home` when
@@ -9,11 +10,16 @@ import { readFileSync } from "node:fs";
  * btrfs gives each subvolume its own st_dev even though `df` shows
  * one pool. NTFS at `/mnt/windows`, tmpfs, and FUSE mounts have a
  * different id and are left for their own drive pill.
+ *
+ * Mirrors the native scanner's `foreign_mount_points` and
+ * `duplicate_mount_paths`.
  */
 
 export interface LinuxMount {
   point: string;
   dev: string;
+  /** Path inside the filesystem the mount shows: `/`, `/@home`, a bind's source. */
+  root: string;
 }
 
 export function unescapeMountinfo(field: string): string {
@@ -59,7 +65,8 @@ export function parseMountinfo(text: string): LinuxMount[] {
     if (!dev.includes(":")) continue;
     const point = trimMountPoint(unescapeMountinfo(fields[4] ?? ""));
     if (!point) continue;
-    mounts.push({ point, dev });
+    const root = trimMountPoint(unescapeMountinfo(fields[3] ?? "/"));
+    mounts.push({ point, dev, root });
   }
   return mounts;
 }
@@ -90,11 +97,94 @@ export function foreignMountPointsFrom(root: string, mounts: LinuxMount[]): Set<
   return foreign;
 }
 
-export function foreignMountPoints(root: string): Set<string> {
+/** `path` relative to `base`: "" when equal, "/rest" when under, null otherwise. */
+function relativeMountPath(path: string, base: string): string | null {
+  if (path === base) return "";
+  if (base === "/") return path;
+  return pathIsUnder(base, path) ? path.slice(base.length) : null;
+}
+
+function joinMountPath(base: string, rel: string): string {
+  if (!rel) return base;
+  return base === "/" ? rel : base + rel;
+}
+
+/**
+ * Paths under `root` that would walk a second copy of files the scan
+ * already reaches through another mount of the same filesystem: a bind
+ * mount, a btrfs subvolume also visible inside a mounted top-level
+ * volume, or openSUSE's `/.snapshots/<n>/snapshot` for the running root.
+ *
+ * For two walked mounts A and B on one device, where B's mountinfo root
+ * is inside A's, B's files also appear inside A at A + (root(B) − root(A)).
+ * That second path is pruned and B's mount point is kept. If B is mounted
+ * inside that path, a bind of a folder into itself, B is pruned instead.
+ * Two mounts of the same subtree keep the one mounted first. Sibling
+ * subvolumes (`/` from `@`, `/home` from `@home`) are both walked.
+ */
+export function duplicateMountPathsFrom(root: string, mounts: LinuxMount[]): Set<string> {
+  const trimmed = trimMountPoint(root);
+  // A later mount on the same point hides the earlier one.
+  const lastAt = new Map(mounts.map((mount, index) => [mount.point, index]));
+  const visible = mounts
+    .map((mount, index) => ({ mount, index }))
+    .filter(({ mount, index }) => lastAt.get(mount.point) === index);
+  let home: { mount: LinuxMount; index: number } | null = null;
+  for (const entry of visible) {
+    const matches = trimmed === entry.mount.point || pathIsUnder(entry.mount.point, trimmed);
+    if (matches && (!home || entry.mount.point.length > home.mount.point.length)) home = entry;
+  }
+  if (!home) return new Set();
+  const homeIndex = home.index;
+  const homeDev = home.mount.dev;
+  // The walk never gets to a mount under another filesystem's mount, or to
+  // one a later mount above it covers. Pruning its source would leave
+  // those files counted nowhere.
+  const reachable = (index: number, mount: LinuxMount) =>
+    !visible.some((above) =>
+      pathIsUnder(above.mount.point, mount.point)
+      && (above.index > index || (above.mount.dev !== homeDev && pathIsUnder(trimmed, above.mount.point))));
+  // Each same-device mount the walk enters, where it enters, and the path
+  // inside the filesystem found there.
+  const walked = visible
+    .filter(({ mount, index }) =>
+      index === homeIndex
+      || (mount.dev === homeDev && pathIsUnder(trimmed, mount.point) && reachable(index, mount)))
+    .map(({ mount, index }) => {
+      const entry = index === homeIndex ? trimmed : mount.point;
+      return { index, entry, fs: joinMountPath(mount.root, relativeMountPath(entry, mount.point) ?? "") };
+    });
+
+  const duplicates = new Set<string>();
+  for (const a of walked) {
+    for (const b of walked) {
+      if (a.index === b.index) continue;
+      const rel = relativeMountPath(b.fs, a.fs);
+      if (rel === null) continue;
+      if (rel === "" && a.index < b.index) continue;
+      const copy = joinMountPath(a.entry, rel);
+      // Another mount inside A, at or above `copy`, covers A's files there.
+      const covered = visible.some(({ mount }) =>
+        pathIsUnder(a.entry, mount.point) && (mount.point === copy || pathIsUnder(mount.point, copy)));
+      if (covered) continue;
+      // `copy` itself is B's mount point only when B is bound onto itself,
+      // and the check above already skipped that.
+      duplicates.add(pathIsUnder(copy, b.entry) ? b.entry : copy);
+    }
+  }
+  // Paths under another pruned path are never reached anyway.
+  for (const path of [...duplicates]) {
+    if ([...duplicates].some((other) => pathIsUnder(other, path))) duplicates.delete(path);
+  }
+  return duplicates;
+}
+
+/** Directories a Linux walk of `root` skips: other filesystems and second copies. */
+export function mountPathsToSkip(root: string): Set<string> {
   if (process.platform !== "linux") return new Set();
   try {
-    const text = readFileSync("/proc/self/mountinfo", "utf8");
-    return foreignMountPointsFrom(root, parseMountinfo(text));
+    const mounts = parseMountinfo(readFileSync("/proc/self/mountinfo", "utf8"));
+    return new Set([...foreignMountPointsFrom(root, mounts), ...duplicateMountPathsFrom(root, mounts)]);
   } catch {
     return new Set();
   }
