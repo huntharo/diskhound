@@ -5825,6 +5825,16 @@ button, input, select, textarea { font: inherit; }
   gap: 6px;
 }
 
+.duplicates-show-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 8px 0 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
 /* Group card */
 .duplicate-group {
   border: 1px solid var(--border);
