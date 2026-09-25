@@ -345,5 +345,8 @@ export function expectNearLinear(
   if (maxTotal !== undefined && largeTotal > maxTotal) {
     over.push(`total ${largeTotal} is over the cap of ${maxTotal}`);
   }
+  if (process.env.SCALING_REPORT === "1") {
+    process.stdout.write(`${JSON.stringify({ label, small, large, growth: largeTotal / smallTotal, maxTotal })}\n`);
+  }
   expect(over, `${label} grew faster than linear\nsmall: ${JSON.stringify(small)}\nlarge: ${JSON.stringify(large)}`).toEqual([]);
 }
