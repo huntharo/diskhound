@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
@@ -60,6 +61,27 @@ const SNAPSHOT_INTERVAL_MS: u128 = 200;
 /// overflows the soft 2x bound.
 const FOLDER_TREE_FILES_PER_PARENT: usize = 200;
 const WINDOWS_TO_UNIX_EPOCH_TICKS: u64 = 116_444_736_000_000_000;
+
+/// Step counter for the scaling tests: one step per comparison or per
+/// entry a loop examines. Compiles to nothing outside `cargo test`.
+mod work {
+    #[cfg(test)]
+    thread_local! {
+        static STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    #[inline(always)]
+    pub(crate) fn step() {
+        #[cfg(test)]
+        STEPS.with(|steps| steps.set(steps.get() + 1));
+    }
+
+    /// Steps counted on this thread since the last call.
+    #[cfg(test)]
+    pub(crate) fn take() -> u64 {
+        STEPS.with(|steps| steps.replace(0))
+    }
+}
 
 #[derive(Debug, Clone)]
 struct ScanInput {
@@ -469,8 +491,14 @@ struct ScanState {
     directories_visited: u64,
     skipped_entries: u64,
     bytes_seen: u64,
-    largest_files: Vec<ScanFileRecord>,
+    largest_files: LargestFiles,
+    /// Ranked from `directory_totals` by `finalize_hottest_directories`
+    /// at the end of a scan and by `refresh_hottest_directories` for
+    /// progress snapshots. Rollups only update the tallies.
     hottest_directories: Vec<DirectoryHotspot>,
+    /// `files_visited` at which a progress snapshot may re-rank
+    /// `hottest_directories`. See `refresh_hottest_directories`.
+    hottest_directories_due_at: u64,
     directory_totals: HashMap<String, DirectoryHotspot>,
     extension_totals: HashMap<String, ExtensionBucket>,
     /// Per-parent top-N files for the folder-tree sidecar. Only populated
@@ -510,16 +538,6 @@ struct ScanState {
     /// Expected total file count (populated from MFT records_kept after
     /// MFT enumeration). None for walker path.
     expected_total_files: Option<u64>,
-    /// When true, `rollup_directory_size` updates only the
-    /// `directory_totals` HashMap and skips the `upsert_ranked_directory`
-    /// maintenance of `hottest_directories`. The MFT emit path enables
-    /// this because pre-sorting files by size means every file rolls up
-    /// into the same handful of ancestor directories, and the legacy
-    /// upsert does a full 10000-entry sort on every rollup — trillions
-    /// of ops. When this flag flips back to false, call
-    /// `finalize_hottest_directories()` to rebuild the top-N from the
-    /// HashMap in O(N_dirs log N_dirs) total, ~100× cheaper overall.
-    defer_hottest_dir_ranking: bool,
     /// Disk touches so far. Shared with walker threads.
     io: Arc<IoStats>,
 }
@@ -543,8 +561,9 @@ impl ScanState {
             },
         );
         ScanState {
-            largest_files: Vec::with_capacity(input.top_file_limit),
+            largest_files: LargestFiles::new(input.top_file_limit),
             hottest_directories: Vec::with_capacity(input.top_directory_limit),
+            hottest_directories_due_at: 0,
             input,
             root_path_string,
             started_at_ms: unix_timestamp_ms(SystemTime::now()),
@@ -565,7 +584,6 @@ impl ScanState {
             emit_lite_snapshots: false,
             scan_phase: ScanPhase::Starting,
             expected_total_files: None,
-            defer_hottest_dir_ranking: false,
             io,
         }
     }
@@ -594,9 +612,10 @@ struct Baseline {
     dir_file_counts: HashMap<String, u64>,
     /// Recursive total bytes under each directory.
     dir_total_sizes: HashMap<String, u64>,
-    /// Set of all dir paths present in the baseline — used for re-emitting
-    /// dir entries under inherited subtrees in the new index.
-    dirs: HashSet<String>,
+    /// Every dir path in the baseline, sorted, so the dirs under one
+    /// folder are a single run found by binary search. Used to re-emit dir
+    /// entries under inherited subtrees in the new index.
+    dirs: Vec<String>,
     /// Extra NTFS names (`h:1`) from the previous index. The walker cannot
     /// see link counts, so a re-walk of a touched directory keeps this flag
     /// when the same path is still present. Windows only: the Unix walker
@@ -742,6 +761,9 @@ impl Baseline {
             if dir_count > 0 { file_records as f64 / dir_count as f64 } else { 0.0 }
         );
 
+        let mut dirs: Vec<String> = dirs.into_iter().collect();
+        dirs.sort_unstable();
+
         Some(Baseline {
             baseline_path: path.to_path_buf(),
             dir_mtimes,
@@ -753,17 +775,27 @@ impl Baseline {
         })
     }
 
-    /// Return all directory paths at or under the given root. Used when we
-    /// inherit a subtree so we can re-emit dir entries in the new index.
+    /// Return all directory paths under the given dir, not the dir itself.
+    /// Used when we inherit a subtree so we can re-emit dir entries in the
+    /// new index. O(log dirs + subtree): it runs once per inherited folder,
+    /// and scanning every baseline dir each time was O(folders²).
     fn subtree_dirs(&self, dir_path: &str) -> Vec<String> {
         let prefix = if dir_path.ends_with(std::path::MAIN_SEPARATOR) {
             dir_path.to_string()
         } else {
             format!("{}{}", dir_path, std::path::MAIN_SEPARATOR)
         };
-        self.dirs
+        let start = self.dirs.partition_point(|d| {
+            work::step();
+            d.as_str() < prefix.as_str()
+        });
+        self.dirs[start..]
             .iter()
-            .filter(|d| d.as_str() != dir_path && d.starts_with(&prefix))
+            .take_while(|d| {
+                work::step();
+                d.starts_with(&prefix)
+            })
+            .filter(|d| d.as_str() != dir_path)
             .cloned()
             .collect()
     }
@@ -787,19 +819,7 @@ fn stream_inherited_files_into(
         return Ok(());
     }
 
-    // Pre-compute path-separator-suffixed prefixes so we don't mismatch
-    // `/foo/bar` against `/foo/barbaz/thing.txt`.
-    let normalized_prefixes: Vec<(String, String)> = inherited_prefixes
-        .iter()
-        .map(|p| {
-            let with_sep = if p.ends_with(std::path::MAIN_SEPARATOR) {
-                p.clone()
-            } else {
-                format!("{}{}", p, std::path::MAIN_SEPARATOR)
-            };
-            (p.clone(), with_sep)
-        })
-        .collect();
+    let inherited = InheritedPrefixes::new(inherited_prefixes);
 
     let reader = open_baseline(baseline_path, &state.io)?;
 
@@ -835,10 +855,7 @@ fn stream_inherited_files_into(
         let path_str = rec.path.as_str();
 
         let normalized = normalize_path(Path::new(path_str));
-        let under_inherit = normalized_prefixes
-            .iter()
-            .any(|(eq, prefix)| normalized == *eq || normalized.starts_with(prefix.as_str()));
-        if !under_inherit {
+        if !inherited.covers(&normalized) {
             continue;
         }
 
@@ -866,16 +883,17 @@ fn stream_inherited_files_into(
             .parent()
             .map(normalize_path)
             .unwrap_or_default();
-        let file_record = ScanFileRecord {
-            path: normalized,
-            name: name.clone(),
-            parent_path: parent.clone(),
-            extension: extension.clone(),
-            size,
-            modified_at: mtime,
-        };
         if !extra_hardlink {
-            upsert_ranked_file(&mut state.largest_files, file_record, state.input.top_file_limit);
+            if state.largest_files.would_keep(size, &normalized) {
+                state.largest_files.offer(ScanFileRecord {
+                    path: normalized,
+                    name: name.clone(),
+                    parent_path: parent.clone(),
+                    extension: extension.clone(),
+                    size,
+                    modified_at: mtime,
+                });
+            }
             rollup_extension(&mut state.extension_totals, &extension, size);
         }
 
@@ -913,6 +931,51 @@ fn stream_inherited_files_into(
     }
 
     Ok(())
+}
+
+/// The folders `stream_inherited_files_into` copies from the baseline.
+/// Kept sorted, each ending in a separator and none inside another, so a
+/// path is under one of them exactly when it starts with the last prefix
+/// that sorts at or before it: O(log folders) per baseline line instead
+/// of a scan of every folder.
+#[cfg_attr(not(windows), allow(dead_code))]
+struct InheritedPrefixes(Vec<String>);
+
+#[cfg_attr(not(windows), allow(dead_code))]
+impl InheritedPrefixes {
+    fn new(dirs: &[String]) -> Self {
+        let mut sorted: Vec<String> = dirs
+            .iter()
+            .map(|dir| {
+                if dir.ends_with(std::path::MAIN_SEPARATOR) {
+                    dir.clone()
+                } else {
+                    format!("{dir}{}", std::path::MAIN_SEPARATOR)
+                }
+            })
+            .collect();
+        sorted.sort_unstable();
+        // A folder inside another adds nothing, and leaving it in could
+        // hide its parent from the lookup. Anything that sorts between a
+        // prefix and a path under it is also under that prefix, so a
+        // nested prefix always follows its kept parent.
+        let mut prefixes: Vec<String> = Vec::with_capacity(sorted.len());
+        for prefix in sorted {
+            if prefixes.last().is_some_and(|kept| prefix.starts_with(kept.as_str())) {
+                continue;
+            }
+            prefixes.push(prefix);
+        }
+        Self(prefixes)
+    }
+
+    fn covers(&self, path: &str) -> bool {
+        let after = self.0.partition_point(|prefix| {
+            work::step();
+            prefix.as_str() <= path
+        });
+        after > 0 && path.starts_with(self.0[after - 1].as_str())
+    }
 }
 
 fn main() {
@@ -1609,10 +1672,6 @@ fn load_linux_mount_prunes(root: &Path) -> LinuxMountPrunes {
 #[cfg(not(windows))]
 fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
     state.scan_phase = ScanPhase::Indexing;
-    // Same tally-only directory rollup the Windows MFT path uses.
-    // The incremental top-N sort on every ancestor of every file was
-    // the CPU cost of a Linux walk once the filesystem was warm.
-    state.defer_hottest_dir_ranking = true;
     state.expected_total_files = state.input.expected_total_files;
 
     // Parallelism: jwalk's default is serial. We explicitly enable
@@ -1867,11 +1926,14 @@ fn scan_windows(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
         // walker doesn't overwrite these flags.
         state.scan_phase = ScanPhase::Starting;
         state.emit_lite_snapshots = false;
-        state.defer_hottest_dir_ranking = false;
         state.expected_total_files = None;
     }
 
-    walk_windows(root_path, state, std::env::var("DISKHOUND_NO_PARALLEL").is_err())
+    // The walkers only tally folder sizes. Progress snapshots re-rank as
+    // they go; this ranks the final list, cancelled or not.
+    let result = walk_windows(root_path, state, std::env::var("DISKHOUND_NO_PARALLEL").is_err());
+    finalize_hottest_directories(state);
+    result
 }
 
 /// The FindFirstFile walkers. The parallel one goes first when allowed; if
@@ -2008,12 +2070,6 @@ fn emit_mft_records_into_state(
     // anyway. The flag is reset to false below so the final Done snapshot
     // carries the full payload.
     state.emit_lite_snapshots = true;
-    // Defer the hottest-directories ranking — on a 7M-file drive, the
-    // incremental upsert was doing 10k-entry sorts on every file's
-    // every ancestor, turning emit into a 15-min slog. We tally into
-    // directory_totals only, then rebuild hottest_directories in one
-    // pass via finalize_hottest_directories below.
-    state.defer_hottest_dir_ranking = true;
 
     // Enter the indexing phase — populate expected_total_files so the
     // UI can render a files-based progress bar during this phase (the
@@ -2206,7 +2262,10 @@ fn emit_mft_records_into_state(
                 .ok()
                 .and_then(|mut slot| slot.take());
             if let Some(tiles) = tiles_available {
-                state.largest_files = tiles;
+                state.largest_files.clear();
+                for tile in tiles {
+                    state.largest_files.offer(tile);
+                }
                 let prior_lite = state.emit_lite_snapshots;
                 state.emit_lite_snapshots = false;
                 // Bypass the 200 ms throttle so tile flips always
@@ -2288,7 +2347,7 @@ fn emit_mft_records_into_state(
         // the global top-K, but we still have to merge to catch edge
         // cases where a boundary record would have displaced a shard's
         // smallest local-top-K member.
-        state.largest_files.extend(local.largest_files);
+        state.largest_files.absorb(local.largest_files);
 
         if want_folder_tree {
             for (k, list) in local.folder_tree_files {
@@ -2300,12 +2359,6 @@ fn emit_mft_records_into_state(
             }
         }
     }
-
-    // Finalize largest_files: sort+truncate the merged superset.
-    state
-        .largest_files
-        .sort_by(|a, b| b.size.cmp(&a.size));
-    state.largest_files.truncate(top_file_limit);
 
     // Folder-tree file lists may have grown past the cap during merge
     // (two shards each capped at 200 = up to 1600 entries per parent
@@ -2328,9 +2381,8 @@ fn emit_mft_records_into_state(
         merge_started.elapsed().as_millis(),
     );
     state.scan_phase = ScanPhase::Finalizing;
-    // Finalize the deferred top-N ranking in a single sort, then reset
-    // the lite/defer flags so the Done snapshot the caller emits later
-    // carries the fully-populated top-N payload.
+    // Rank the folder tallies once, then turn lite snapshots off so the
+    // Done snapshot the caller emits later carries the full top-N payload.
     let finalize_started = Instant::now();
     finalize_hottest_directories(state);
     eprintln!(
@@ -2338,7 +2390,6 @@ fn emit_mft_records_into_state(
         finalize_started.elapsed().as_millis(),
         state.directory_totals.len(),
     );
-    state.defer_hottest_dir_ranking = false;
     state.emit_lite_snapshots = false;
     eprintln!(
         "[diskhound-native-scanner] mft: emit done, state counters: files={} dirs={} bytes={}",
@@ -2361,7 +2412,7 @@ fn emit_mft_records_into_state(
 struct EmitLocal {
     dir_totals: HashMap<String, DirectoryHotspot>,
     ext_totals: HashMap<String, ExtensionBucket>,
-    largest_files: Vec<ScanFileRecord>,
+    largest_files: LargestFiles,
     folder_tree_files: HashMap<String, Vec<(String, u64, u64)>>,
     files: u64,
     dirs: u64,
@@ -2370,11 +2421,11 @@ struct EmitLocal {
 
 #[cfg(windows)]
 impl EmitLocal {
-    fn new() -> Self {
+    fn new(top_file_limit: usize) -> Self {
         Self {
             dir_totals: HashMap::new(),
             ext_totals: HashMap::new(),
-            largest_files: Vec::new(),
+            largest_files: LargestFiles::new(top_file_limit),
             folder_tree_files: HashMap::new(),
             files: 0,
             dirs: 0,
@@ -2406,7 +2457,7 @@ fn emit_shard(
 ) -> EmitLocal {
     use std::sync::atomic::Ordering;
 
-    let mut local = EmitLocal::new();
+    let mut local = EmitLocal::new(top_file_limit);
     // Batch atomic flushes so per-record work avoids cross-core cache
     // line ping-pong. 5000 records ≈ 50-100 ms at realistic emit rates
     // — plenty of granularity for the 200 ms progress pump.
@@ -2473,24 +2524,17 @@ fn emit_shard(
             let extension = file_extension(&path);
 
             if !rec.extra_hardlink {
-                upsert_ranked_file(
-                    &mut local.largest_files,
-                    ScanFileRecord {
+                if local.largest_files.would_keep(rec.size, &path) {
+                    local.largest_files.offer(ScanFileRecord {
                         path: path.clone(),
                         name: file_name.clone(),
                         parent_path: parent_path.clone(),
                         extension: extension.clone(),
                         size: rec.size,
                         modified_at: rec.mtime_ms,
-                    },
-                    top_file_limit,
-                );
-                rollup_directory_size_tallies_only(
-                    root_path,
-                    &parent_path,
-                    rec.size,
-                    &mut local.dir_totals,
-                );
+                    });
+                }
+                rollup_directory_bytes(root_path, &parent_path, rec.size, 1, &mut local.dir_totals);
                 rollup_extension(&mut local.ext_totals, &extension, rec.size);
             }
 
@@ -2543,15 +2587,7 @@ fn emit_shard(
                 records_since_last_tile_publish >= TILE_REPUBLISH_EVERY
             };
             if should_publish {
-                local
-                    .largest_files
-                    .sort_by(|a, b| b.size.cmp(&a.size));
-                let snap: Vec<ScanFileRecord> = local
-                    .largest_files
-                    .iter()
-                    .take(TILE_PUBLISH_CAP)
-                    .cloned()
-                    .collect();
+                let snap = local.largest_files.largest(TILE_PUBLISH_CAP);
                 if let Ok(mut guard) = slot.lock() {
                     *guard = Some(snap);
                 }
@@ -2570,15 +2606,7 @@ fn emit_shard(
     // recently. Ensures at least ONE tile snapshot always lands so the
     // UI never sees an all-empty running-status sequence.
     if let Some(slot) = tile_slot.as_ref() {
-        local
-            .largest_files
-            .sort_by(|a, b| b.size.cmp(&a.size));
-        let snap: Vec<ScanFileRecord> = local
-            .largest_files
-            .iter()
-            .take(TILE_PUBLISH_CAP)
-            .cloned()
-            .collect();
+        let snap = local.largest_files.largest(TILE_PUBLISH_CAP);
         if let Ok(mut guard) = slot.lock() {
             *guard = Some(snap);
         }
@@ -2730,8 +2758,6 @@ fn scan_windows_sequential(
                 inherited_bytes,
                 inherited_count,
                 &mut state.directory_totals,
-                &mut state.hottest_directories,
-                state.input.top_directory_limit,
             );
 
             // Re-emit dir entries from the subtree so the new index remains
@@ -2793,6 +2819,10 @@ fn scan_windows_sequential(
     // percentage (the walker's `filesVisited` counter is already
     // credited from the inheritance aggregates).
     state.scan_phase = ScanPhase::Finalizing;
+    // Rank the finished tallies now. The inherited stream below doesn't
+    // change them, and snapshots during it would otherwise show the
+    // last in-walk ranking.
+    finalize_hottest_directories(state);
     let _ = maybe_emit_progress(state);
 
     // Post-walk streaming pass: if any subtrees were inherited, stream the
@@ -3147,8 +3177,6 @@ fn try_scan_windows_parallel(root_path: &Path, state: &mut ScanState) -> Paralle
                 inherited_bytes,
                 inherited_count,
                 &mut state.directory_totals,
-                &mut state.hottest_directories,
-                state.input.top_directory_limit,
             );
             if let Some(writer) = state.index_writer.as_mut() {
                 let _ = writer.write_dir_entry(&child_path_str, current_mtime);
@@ -3311,6 +3339,9 @@ fn try_scan_windows_parallel(root_path: &Path, state: &mut ScanState) -> Paralle
     if let Err(err) = &result {
         eprintln!("[diskhound-native-scanner] parallel: walk error: {err}");
     }
+    // As in the sequential tail: rank before the stream, which doesn't
+    // change the tallies.
+    finalize_hottest_directories(state);
     if !state.inherited_prefixes.is_empty() {
         let baseline_path = state.baseline.as_ref().map(|b| b.baseline_path.clone());
         let inherited_prefixes = state.inherited_prefixes.clone();
@@ -3433,8 +3464,6 @@ fn handle_parallel_message(
                 inherited_bytes,
                 inherited_count,
                 &mut state.directory_totals,
-                &mut state.hottest_directories,
-                state.input.top_directory_limit,
             );
 
             if let Some(writer) = state.index_writer.as_mut() {
@@ -3626,51 +3655,52 @@ fn enumerate_windows_directory_parallel(
     Ok(())
 }
 
-/// Roll up already-summed file-count + byte-count onto a directory and
-/// all its ancestors. Used by the Phase-1 inherit path where we're
-/// crediting a whole subtree at once rather than one file at a time.
+/// Add `bytes` and `file_count` to a directory and each of its ancestors
+/// up to the root. Walkers call this once per file; the Phase-1 inherit
+/// path calls it once per inherited subtree with the subtree's sums.
+///
+/// Tallies only. `hottest_directories` is ranked from these totals when a
+/// snapshot needs it (`refresh_hottest_directories`) and at the end of the
+/// scan (`finalize_hottest_directories`). Re-sorting the 10k ranking at
+/// every ancestor of every file cost O(files × depth × limit).
 fn rollup_directory_bytes(
     root_path: &str,
     directory_path: &str,
     bytes: u64,
     file_count: u64,
     directory_totals: &mut HashMap<String, DirectoryHotspot>,
-    hottest_directories: &mut Vec<DirectoryHotspot>,
-    dir_limit: usize,
 ) {
     let mut current_path = directory_path.to_string();
-
     loop {
-        let next_record = {
-            let entry = directory_totals
-                .entry(current_path.clone())
-                .or_insert_with(|| DirectoryHotspot {
-                    path: current_path.clone(),
-                    size: 0,
-                    file_count: 0,
-                    depth: directory_depth(root_path, &current_path),
-                });
-
+        work::step();
+        // get_mut first: almost every folder already has a row, and this
+        // skips cloning the key for it.
+        if let Some(entry) = directory_totals.get_mut(&current_path) {
             entry.size += bytes;
             entry.file_count += file_count;
-            entry.clone()
-        };
-
-        upsert_ranked_directory(hottest_directories, next_record, dir_limit);
+        } else {
+            let depth = directory_depth(root_path, &current_path);
+            directory_totals.insert(
+                current_path.clone(),
+                DirectoryHotspot {
+                    path: current_path.clone(),
+                    size: bytes,
+                    file_count,
+                    depth,
+                },
+            );
+        }
 
         if current_path == root_path {
             return;
         }
-
         let parent = Path::new(&current_path)
             .parent()
             .map(normalize_path)
             .unwrap_or_else(|| root_path.to_string());
-
         if parent == current_path {
             return;
         }
-
         current_path = parent;
     }
 }
@@ -3792,30 +3822,16 @@ fn record_file_with_link_flag(
     let occupancy = if extra_hardlink { 0 } else { file_record.size };
     state.files_visited += 1;
     state.bytes_seen += occupancy;
-    let file_limit = state.input.top_file_limit;
-    let dir_limit = state.input.top_directory_limit;
-    if !extra_hardlink {
-        upsert_ranked_file(&mut state.largest_files, file_record.clone(), file_limit);
+    if !extra_hardlink && state.largest_files.would_keep(file_record.size, &file_record.path) {
+        state.largest_files.offer(file_record.clone());
     }
-    if state.defer_hottest_dir_ranking {
-        // Cheap path: just tally into the HashMap, skip the per-file
-        // top-N sort. Finalized once at end of emit.
-        rollup_directory_size_tallies_only(
-            &state.root_path_string,
-            &file_record.parent_path,
-            occupancy,
-            &mut state.directory_totals,
-        );
-    } else {
-        rollup_directory_size(
-            &state.root_path_string,
-            &file_record.parent_path,
-            occupancy,
-            &mut state.directory_totals,
-            &mut state.hottest_directories,
-            dir_limit,
-        );
-    }
+    rollup_directory_bytes(
+        &state.root_path_string,
+        &file_record.parent_path,
+        occupancy,
+        1,
+        &mut state.directory_totals,
+    );
     if !extra_hardlink {
         rollup_extension(
             &mut state.extension_totals,
@@ -3912,18 +3928,14 @@ impl ScanState {
         // within Node's readline drain rate.
         let largest_files = if matches!(status, ScanStatus::Running) {
             const RUNNING_LARGEST_FILES_CAP: usize = 500;
-            self.largest_files
-                .iter()
-                .take(RUNNING_LARGEST_FILES_CAP)
-                .cloned()
-                .collect()
+            self.largest_files.largest(RUNNING_LARGEST_FILES_CAP)
         } else {
-            self.largest_files.clone()
+            self.largest_files.to_vec()
         };
         let hottest_directories = if lite {
-            // hottest_directories: still gated by lite mode. Running
-            // snapshots emit [] to avoid the 10k-entry sort per tick.
-            // Folder-level stats show up once the Done snapshot lands.
+            // hottest_directories: still gated by lite mode. Lite
+            // snapshots emit [] and skip the re-rank; folder-level stats
+            // show up once the Done snapshot lands.
             Vec::new()
         } else {
             self.hottest_directories.clone()
@@ -3987,6 +3999,7 @@ fn maybe_emit_progress(state: &mut ScanState) -> Result<(), String> {
     }
 
     state.last_emit_elapsed_ms = elapsed_ms;
+    refresh_hottest_directories(state);
     emit_message(&Message::Progress {
         snapshot: state.snapshot(ScanStatus::Running, None),
     })
@@ -4135,139 +4148,156 @@ fn normalize_path(path: &Path) -> String {
     normalized
 }
 
-fn upsert_ranked_file(ranked: &mut Vec<ScanFileRecord>, next_record: ScanFileRecord, limit: usize) {
-    if let Some(index) = ranked.iter().position(|candidate| candidate.path == next_record.path) {
-        ranked.remove(index);
-    } else if ranked.len() >= limit && next_record.size <= ranked.last().map(|r| r.size).unwrap_or(0) {
-        return; // Too small to make the list
-    }
-
-    ranked.push(next_record);
-    ranked.sort_by(|left, right| right.size.cmp(&left.size));
-    ranked.truncate(limit);
-}
-
-fn upsert_ranked_directory(
-    ranked: &mut Vec<DirectoryHotspot>,
-    next_record: DirectoryHotspot,
+/// The `limit` largest files seen so far, ties broken by path so the list
+/// is the same whatever order a walk finds files in. A min-heap: the
+/// smallest kept file is on top, so a file that doesn't make the list
+/// costs one compare and one that does costs O(log limit). Every scan path
+/// offers each path once, so there's no duplicate check.
+struct LargestFiles {
     limit: usize,
-) {
-    if let Some(index) = ranked.iter().position(|candidate| candidate.path == next_record.path) {
-        ranked[index] = next_record;
-    } else if ranked.len() >= limit && next_record.size <= ranked.last().map(|r| r.size).unwrap_or(0) {
-        return; // Too small to make the list
-    } else {
-        ranked.push(next_record);
-    }
-
-    ranked.sort_by(|left, right| right.size.cmp(&left.size));
-    ranked.truncate(limit);
+    heap: BinaryHeap<Reverse<BySize>>,
 }
 
-fn rollup_directory_size(
-    root_path: &str,
-    directory_path: &str,
-    file_size: u64,
-    directory_totals: &mut HashMap<String, DirectoryHotspot>,
-    hottest_directories: &mut Vec<DirectoryHotspot>,
-    dir_limit: usize,
-) {
-    let mut current_path = directory_path.to_string();
+/// Orders files by size; of two the same size, the smaller path ranks
+/// higher.
+struct BySize(ScanFileRecord);
 
-    loop {
-        let next_record = {
-            let entry = directory_totals
-                .entry(current_path.clone())
-                .or_insert_with(|| DirectoryHotspot {
-                    path: current_path.clone(),
-                    size: 0,
-                    file_count: 0,
-                    depth: directory_depth(root_path, &current_path),
-                });
-
-            entry.size += file_size;
-            entry.file_count += 1;
-            entry.clone()
-        };
-
-        upsert_ranked_directory(hottest_directories, next_record, dir_limit);
-
-        if current_path == root_path {
-            return;
-        }
-
-        let parent = Path::new(&current_path)
-            .parent()
-            .map(normalize_path)
-            .unwrap_or_else(|| root_path.to_string());
-
-        if parent == current_path {
-            return;
-        }
-
-        current_path = parent;
+impl Ord for BySize {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        work::step();
+        self.0
+            .size
+            .cmp(&other.0.size)
+            .then_with(|| other.0.path.cmp(&self.0.path))
     }
 }
 
-/// Hot path used during MFT emit: walk ancestors updating the
-/// `directory_totals` HashMap only. Skips `upsert_ranked_directory`,
-/// which was doing a full O(dir_limit log dir_limit) sort on every
-/// file's every ancestor — trillions of ops on a 7M-file drive.
-/// Callers must run `finalize_hottest_directories` after the walk so
-/// `state.hottest_directories` is populated from the finished tallies.
-fn rollup_directory_size_tallies_only(
-    root_path: &str,
-    directory_path: &str,
-    file_size: u64,
-    directory_totals: &mut HashMap<String, DirectoryHotspot>,
-) {
-    let mut current_path = directory_path.to_string();
-    loop {
-        // Hot path: use get_mut to avoid the String clone for the key
-        // when the entry already exists (which is the 99% case on a
-        // 7M-file drive with ~1.2M unique dirs). Only the rare "vacant"
-        // branch pays the allocation cost.
-        if let Some(entry) = directory_totals.get_mut(&current_path) {
-            entry.size += file_size;
-            entry.file_count += 1;
-        } else {
-            let depth = directory_depth(root_path, &current_path);
-            directory_totals.insert(
-                current_path.clone(),
-                DirectoryHotspot {
-                    path: current_path.clone(),
-                    size: file_size,
-                    file_count: 1,
-                    depth,
-                },
-            );
-        }
-
-        if current_path == root_path {
-            return;
-        }
-        let parent = Path::new(&current_path)
-            .parent()
-            .map(normalize_path)
-            .unwrap_or_else(|| root_path.to_string());
-        if parent == current_path {
-            return;
-        }
-        current_path = parent;
+impl PartialOrd for BySize {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
-/// Rebuild `state.hottest_directories` from the full `directory_totals`
-/// HashMap via a single sort — O(N_dirs log N_dirs). Called once after
-/// the tally-only rollup finishes. Equivalent output to the incremental
-/// upsert path, ~100× less work in aggregate on large drives.
+impl PartialEq for BySize {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl Eq for BySize {}
+
+impl LargestFiles {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            heap: BinaryHeap::with_capacity(limit),
+        }
+    }
+
+    /// Whether this file would make the list, so callers can skip building
+    /// a record for one that won't.
+    fn would_keep(&self, size: u64, path: &str) -> bool {
+        if self.heap.len() < self.limit {
+            return true;
+        }
+        work::step();
+        self.heap.peek().is_some_and(|smallest| {
+            let smallest = &smallest.0.0;
+            size > smallest.size || (size == smallest.size && path < smallest.path.as_str())
+        })
+    }
+
+    fn offer(&mut self, record: ScanFileRecord) {
+        if !self.would_keep(record.size, &record.path) {
+            return;
+        }
+        if self.heap.len() < self.limit {
+            self.heap.push(Reverse(BySize(record)));
+        } else if let Some(mut smallest) = self.heap.peek_mut() {
+            // Dropping the PeekMut sifts the new entry down.
+            *smallest = Reverse(BySize(record));
+        }
+    }
+
+    /// Keep whatever another list kept that also makes this one: merges
+    /// the MFT emit shards.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn absorb(&mut self, other: LargestFiles) {
+        for Reverse(BySize(record)) in other.heap.into_vec() {
+            self.offer(record);
+        }
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn len(&self) -> usize {
+        self.heap.len()
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn clear(&mut self) {
+        self.heap.clear();
+    }
+
+    /// The `count` largest files, biggest first. O(len) to select plus
+    /// O(count log count) to order.
+    fn largest(&self, count: usize) -> Vec<ScanFileRecord> {
+        if count == 0 {
+            return Vec::new();
+        }
+        let biggest_first = |a: &&BySize, b: &&BySize| b.cmp(a);
+        let mut ranked: Vec<&BySize> = self.heap.iter().map(|entry| &entry.0).collect();
+        if ranked.len() > count {
+            ranked.select_nth_unstable_by(count - 1, biggest_first);
+            ranked.truncate(count);
+        }
+        ranked.sort_unstable_by(biggest_first);
+        ranked.into_iter().map(|entry| entry.0.clone()).collect()
+    }
+
+    fn to_vec(&self) -> Vec<ScanFileRecord> {
+        self.largest(self.heap.len())
+    }
+}
+
+/// The `limit` biggest folders in `totals`, biggest first, ties by path.
+/// O(folders) to select plus O(limit log limit) to order.
+fn top_directories(
+    totals: &HashMap<String, DirectoryHotspot>,
+    limit: usize,
+) -> Vec<DirectoryHotspot> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let biggest_first = |a: &&DirectoryHotspot, b: &&DirectoryHotspot| {
+        work::step();
+        b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path))
+    };
+    let mut ranked: Vec<&DirectoryHotspot> = totals.values().inspect(|_| work::step()).collect();
+    if ranked.len() > limit {
+        ranked.select_nth_unstable_by(limit - 1, biggest_first);
+        ranked.truncate(limit);
+    }
+    ranked.sort_unstable_by(biggest_first);
+    ranked.into_iter().cloned().collect()
+}
+
+/// Rank `state.hottest_directories` from the folder tallies. Every scan
+/// path calls this once when its walk or emit ends.
 fn finalize_hottest_directories(state: &mut ScanState) {
-    let dir_limit = state.input.top_directory_limit;
-    let mut all: Vec<DirectoryHotspot> =
-        state.directory_totals.values().cloned().collect();
-    all.sort_by(|left, right| right.size.cmp(&left.size));
-    all.truncate(dir_limit);
-    state.hottest_directories = all;
+    state.hottest_directories =
+        top_directories(&state.directory_totals, state.input.top_directory_limit);
+    state.hottest_directories_due_at =
+        state.files_visited + state.directory_totals.len() as u64;
+}
+
+/// Re-rank the hottest folders for a progress snapshot. A ranking costs
+/// O(folders), so it waits until as many files as there are folders have
+/// been recorded since the last one: the total stays linear in files
+/// however often snapshots fire. Lite snapshots carry no folders.
+fn refresh_hottest_directories(state: &mut ScanState) {
+    if !state.emit_lite_snapshots && state.files_visited >= state.hottest_directories_due_at {
+        finalize_hottest_directories(state);
+    }
 }
 
 /// One NDJSON line in the folder-tree sidecar. Matches the format
@@ -4937,6 +4967,313 @@ mod index_line_parse_tests {
     }
 }
 
+/// Scaling tests: they count `work::step()`s (comparisons and entries
+/// examined), not time, at N and 8N. Where a cost also grows with a list
+/// limit L or a folder count K, that grows 8× too: with it fixed, an
+/// O(N·L) loop looks linear from N to 8N.
+#[cfg(test)]
+mod scaling_tests {
+    use super::*;
+    use std::path::MAIN_SEPARATOR as SEP;
+
+    /// From N to 8N (and L or K to 8L or 8K), linear work grows 8×. Allow
+    /// 2× that for the log factors; the quadratic loops these replace grew
+    /// 60-64×.
+    const MAX_GROWTH: f64 = 16.0;
+
+    fn root() -> String {
+        format!("{SEP}scan")
+    }
+
+    /// Ten files per leaf folder, ten leaves per group: root/gG/dD/fI.bin.
+    fn leaf(d: usize) -> String {
+        format!("{}{SEP}g{}{SEP}d{d}", root(), d / 10)
+    }
+
+    fn group(g: usize) -> String {
+        format!("{}{SEP}g{g}", root())
+    }
+
+    /// Sizes ascend, so every file makes the top-N list: the worst case
+    /// for ranking.
+    fn file(i: usize) -> ScanFileRecord {
+        let parent = leaf(i / 10);
+        ScanFileRecord {
+            path: format!("{parent}{SEP}f{i}.bin"),
+            name: format!("f{i}.bin"),
+            parent_path: parent,
+            extension: ".bin".into(),
+            size: i as u64 + 1,
+            modified_at: 0,
+        }
+    }
+
+    fn state(limit: usize) -> ScanState {
+        let root = root();
+        let input = ScanInput {
+            root_path: PathBuf::from(&root),
+            top_file_limit: limit,
+            top_directory_limit: limit,
+            index_output: None,
+            baseline_index: None,
+            folder_tree_output: None,
+            dev_artifacts_output: None,
+            expected_total_files: None,
+        };
+        let mut state = ScanState::new(input, root, None, None, Arc::new(IoStats::default()));
+        // Never emit: tests call refresh_hottest_directories directly.
+        state.last_emit_elapsed_ms = u128::MAX;
+        state.scan_phase = ScanPhase::Indexing;
+        state
+    }
+
+    fn assert_scales(label: &str, small: u64, large: u64, cap: u64) {
+        let growth = large as f64 / small as f64;
+        eprintln!("{label}: {small} -> {large} steps ({growth:.1}x), cap {cap}");
+        assert!(growth <= MAX_GROWTH, "{label} grew {growth:.1}x from N to 8N");
+        assert!(large <= cap, "{label} took {large} steps at 8N, over {cap}");
+    }
+
+    /// The per-file path every walker shares (FindFirstFile, jwalk,
+    /// inherited streams), with a progress snapshot after every file.
+    fn walk(files: usize, limit: usize) -> (u64, ScanState) {
+        let mut state = state(limit);
+        work::take();
+        for i in 0..files {
+            record_file_with_link_flag(&mut state, file(i), false).unwrap();
+            refresh_hottest_directories(&mut state);
+        }
+        finalize_hottest_directories(&mut state);
+        (work::take(), state)
+    }
+
+    #[test]
+    fn walker_ranking_is_n_log_l() {
+        // Before: 324,747 steps -> 20,015,138 (61.6x). Every ancestor of
+        // every file searched and re-sorted the folder ranking, and every
+        // file searched the file ranking for its own path.
+        let (small, _) = walk(1_000, 50);
+        let (large, state) = walk(8_000, 400);
+        // Per file: 3 ancestors, a heap sift, and its share of re-ranks.
+        assert_scales("walker ranking", small, large, 8_000 * 40);
+
+        let sizes: Vec<u64> = state.largest_files.to_vec().iter().map(|f| f.size).collect();
+        assert_eq!(sizes, (7_601..=8_000).rev().collect::<Vec<u64>>());
+        let mut every_folder: Vec<DirectoryHotspot> =
+            state.directory_totals.values().cloned().collect();
+        every_folder.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
+        every_folder.truncate(400);
+        let paths = |dirs: &[DirectoryHotspot]| dirs.iter().map(|d| d.path.clone()).collect::<Vec<_>>();
+        assert_eq!(paths(&state.hottest_directories), paths(&every_folder));
+        assert_eq!(state.hottest_directories[0].path, root());
+        assert_eq!(state.hottest_directories[0].file_count, 8_000);
+    }
+
+    #[test]
+    fn progress_snapshots_rank_folders_during_the_walk() {
+        let mut state = state(10);
+        record_file_with_link_flag(&mut state, file(0), false).unwrap();
+        refresh_hottest_directories(&mut state);
+        let first: Vec<String> = state.hottest_directories.iter().map(|d| d.path.clone()).collect();
+        assert_eq!(first, vec![root(), group(0), leaf(0)]);
+
+        // Not due again until 3 more files (one per folder ranked) are in.
+        for i in [10, 20] {
+            record_file_with_link_flag(&mut state, file(i), false).unwrap();
+            refresh_hottest_directories(&mut state);
+            assert_eq!(state.hottest_directories.len(), 3);
+        }
+        record_file_with_link_flag(&mut state, file(30), false).unwrap();
+        refresh_hottest_directories(&mut state);
+        assert_eq!(state.hottest_directories.len(), 6);
+
+        // Lite snapshots carry no folders, so they don't re-rank.
+        state.emit_lite_snapshots = true;
+        for i in 4..20 {
+            record_file_with_link_flag(&mut state, file(10 * i), false).unwrap();
+        }
+        refresh_hottest_directories(&mut state);
+        assert_eq!(state.hottest_directories.len(), 6);
+        state.emit_lite_snapshots = false;
+        refresh_hottest_directories(&mut state);
+        assert_eq!(state.hottest_directories.len(), 10);
+    }
+
+    fn offer_all(order: &[usize], limit: usize) -> (u64, LargestFiles) {
+        let mut list = LargestFiles::new(limit);
+        work::take();
+        for &i in order {
+            list.offer(file(i));
+        }
+        (work::take(), list)
+    }
+
+    #[test]
+    fn largest_files_cost_is_n_log_l_in_any_order() {
+        // Before, ascending: 146,156 steps -> 9,359,381 (64.0x).
+        for (label, reverse) in [("ascending", false), ("descending (MFT)", true)] {
+            let order = |n: usize| -> Vec<usize> {
+                let mut order: Vec<usize> = (0..n).collect();
+                if reverse {
+                    order.reverse();
+                }
+                order
+            };
+            let (small, _) = offer_all(&order(1_000), 50);
+            let (large, list) = offer_all(&order(8_000), 400);
+            assert_scales(label, small, large, 8_000 * 20);
+            let sizes: Vec<u64> = list.to_vec().iter().map(|f| f.size).collect();
+            assert_eq!(sizes, (7_601..=8_000).rev().collect::<Vec<u64>>());
+        }
+    }
+
+    #[test]
+    fn largest_files_breaks_size_ties_by_path_in_any_order_and_merges_shards() {
+        let sized = |name: &str, size: u64| ScanFileRecord {
+            path: format!("{SEP}{name}"),
+            name: name.into(),
+            parent_path: SEP.to_string(),
+            extension: "(no ext)".into(),
+            size,
+            modified_at: 0,
+        };
+        let names = |list: &LargestFiles| list.to_vec().into_iter().map(|f| f.name).collect::<Vec<_>>();
+        let mut list = LargestFiles::new(2);
+        for order in [["c", "b", "a"], ["a", "b", "c"], ["b", "c", "a"]] {
+            list.clear();
+            for name in order {
+                list.offer(sized(name, 5));
+            }
+            assert_eq!(names(&list), vec!["a", "b"], "offered {order:?}");
+        }
+        assert!(!list.would_keep(5, &format!("{SEP}c")));
+        assert!(list.would_keep(5, &format!("{SEP}0")));
+        assert!(list.would_keep(6, &format!("{SEP}z")));
+
+        let mut other = LargestFiles::new(2);
+        other.offer(sized("d", 9));
+        other.offer(sized("e", 1));
+        list.absorb(other);
+        assert_eq!(names(&list), vec!["d", "a"]);
+        assert_eq!(list.largest(1).len(), 1);
+        assert!(LargestFiles::new(0).to_vec().is_empty());
+    }
+
+    fn baseline_with_groups(groups: usize) -> Baseline {
+        let mut dirs = vec![root()];
+        for g in 0..groups {
+            dirs.push(group(g));
+            dirs.extend((g * 10..g * 10 + 10).map(leaf));
+        }
+        dirs.sort();
+        Baseline {
+            baseline_path: PathBuf::new(),
+            dir_mtimes: HashMap::new(),
+            dir_file_counts: HashMap::new(),
+            dir_total_sizes: HashMap::new(),
+            dirs,
+            #[cfg(windows)]
+            extra_hardlink_paths: HashSet::new(),
+        }
+    }
+
+    fn subtrees(groups: usize) -> u64 {
+        let baseline = baseline_with_groups(groups);
+        work::take();
+        for g in 0..groups {
+            assert_eq!(baseline.subtree_dirs(&group(g)).len(), 10);
+        }
+        work::take()
+    }
+
+    #[test]
+    fn subtree_dirs_is_log_d_plus_subtree_per_folder() {
+        // Before: 110,100 steps -> 7,040,800 (63.9x): every inherited
+        // folder scanned every baseline folder.
+        let small = subtrees(100);
+        let large = subtrees(800);
+        assert_scales("subtree_dirs", small, large, 800 * 40);
+    }
+
+    #[test]
+    fn subtree_dirs_matches_whole_names_only() {
+        let mut baseline = baseline_with_groups(0);
+        let a = format!("{}{SEP}a", root());
+        baseline.dirs = vec![
+            root(),
+            a.clone(),
+            format!("{a}{SEP}x"),
+            format!("{a}{SEP}x{SEP}y"),
+            format!("{a} b"),
+            format!("{a}-b{SEP}z"),
+            format!("{a}b"),
+        ];
+        baseline.dirs.sort();
+        assert_eq!(baseline.subtree_dirs(&a), vec![format!("{a}{SEP}x"), format!("{a}{SEP}x{SEP}y")]);
+        assert_eq!(baseline.subtree_dirs(&root()).len(), 6);
+        assert_eq!(baseline.subtree_dirs(&format!("{a}{SEP}x{SEP}y")), Vec::<String>::new());
+    }
+
+    /// Baseline of `files` files with half the leaf folders inherited:
+    /// K = files / 20 prefixes.
+    fn stream(files: usize) -> u64 {
+        let dir = std::env::temp_dir().join(format!(
+            "diskhound-scaling-{}-{files}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("baseline.ndjson.gz");
+        let mut gz = GzEncoder::new(File::create(&path).unwrap(), Compression::fast());
+        for i in 0..files {
+            let f = file(i);
+            writeln!(gz, "{{\"p\":{},\"s\":{},\"m\":0}}", serde_json::to_string(&f.path).unwrap(), f.size)
+                .unwrap();
+        }
+        gz.finish().unwrap();
+        let prefixes: Vec<String> = (0..files / 10).filter(|d| d % 2 == 0).map(leaf).collect();
+        let mut state = state(files / 20);
+        work::take();
+        stream_inherited_files_into(&path, &prefixes, &mut state).unwrap();
+        let steps = work::take();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(state.largest_files.len(), files / 20);
+        assert_eq!(state.extension_totals[".bin"].count as usize, files / 2);
+        steps
+    }
+
+    #[test]
+    fn inherited_stream_is_n_log_k() {
+        // Before: 108,906 steps -> 6,961,381 (63.9x): every baseline line
+        // was checked against every inherited folder.
+        let small = stream(1_000);
+        let large = stream(8_000);
+        assert_scales("inherited stream", small, large, 8_000 * 30);
+    }
+
+    #[test]
+    fn inherited_prefixes_match_whole_folder_names() {
+        let a = format!("{}{SEP}a", root());
+        let inherited = InheritedPrefixes::new(&[
+            a.clone(),
+            format!("{a}{SEP}nested"),
+            format!("{a} b"),
+            format!("{}{SEP}c", root()),
+        ]);
+        assert_eq!(inherited.0.len(), 3, "the nested prefix is dropped");
+        assert!(inherited.covers(&format!("{a}{SEP}f.txt")));
+        assert!(inherited.covers(&format!("{a}{SEP}nested{SEP}f.txt")));
+        assert!(inherited.covers(&format!("{a} b{SEP}f.txt")));
+        assert!(!inherited.covers(&format!("{a}bc{SEP}f.txt")));
+        assert!(!inherited.covers(&format!("{}{SEP}b{SEP}f.txt", root())));
+        assert!(!inherited.covers(&format!("{}{SEP}f.txt", root())));
+
+        let everything = InheritedPrefixes::new(&[SEP.to_string()]);
+        assert!(everything.covers(&format!("{a}{SEP}f.txt")));
+        assert!(!InheritedPrefixes::new(&[]).covers(&a));
+    }
+}
+
 #[cfg(all(test, unix))]
 mod unix_hardlink_scan_tests {
     use super::*;
@@ -5001,7 +5338,8 @@ mod unix_hardlink_scan_tests {
         assert_eq!(sub.file_count, 2, "extra links still count as files");
         assert_eq!(state.directory_totals[&root_s].size, state.bytes_seen);
 
-        let largest: Vec<&str> = state.largest_files.iter().map(|f| f.path.as_str()).collect();
+        let largest_files = state.largest_files.to_vec();
+        let largest: Vec<&str> = largest_files.iter().map(|f| f.path.as_str()).collect();
         assert!(largest.contains(&format!("{root_s}/a.bin").as_str()));
         assert!(!largest.iter().any(|p| p.contains("/sub/")));
         assert_eq!(state.largest_files.len(), 3);
