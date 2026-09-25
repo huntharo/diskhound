@@ -163,6 +163,30 @@ describe.skipIf(process.platform === "win32")("duplicates read sharing from the 
     expect(result.totalWastedBytes).toBe(0);
   });
 
+  it("spends a reduced hash depth on real copies, not on clones that free nothing", async () => {
+    // Two buckets. The clone pair is bigger, so size × (count − 1) ranked
+    // it first; at 50% depth only one bucket is hashed.
+    const big = 2 * SIZE;
+    const cloneA = at("root/clone-a.bin");
+    const cloneB = at("root/clone-b.bin");
+    FS.mkdirSync(Path.dirname(cloneA), { recursive: true });
+    FS.writeFileSync(cloneA, Buffer.alloc(big, 3));
+    FS.writeFileSync(cloneB, Buffer.alloc(big, 3));
+    const copyA = write("root/copy-a.bin");
+    const copyB = write("root/copy-b.bin");
+    const indexPath = writeIndex([
+      { p: cloneA, s: big, v: 0, k: 1 },
+      { p: cloneB, s: big, v: 0, k: 1 },
+      { p: copyA },
+      { p: copyB },
+    ]);
+
+    const result = await findDuplicates("root", { indexPath, hashDepthPercent: 50 });
+
+    expect(groupPaths(result)).toEqual([[Path.join("root", "copy-a.bin"), Path.join("root", "copy-b.bin")]]);
+    expect(result.totalWastedBytes).toBe(SIZE);
+  });
+
   it("treats k without v as fully private (the writer omits v when nothing is shared)", async () => {
     const a = write("root/a.bin");
     const b = write("root/b.bin");

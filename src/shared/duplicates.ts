@@ -29,6 +29,7 @@ import {
   setCachedHash,
 } from "./duplicateHashCache";
 import { fileReclaim, groupReclaim } from "./duplicateReclaim";
+import { parseIndexLine, type ParsedIndexLine } from "./indexLineParse";
 import { normPath } from "./pathUtils";
 
 const PROGRESS_INTERVAL_MS = 200;
@@ -614,14 +615,20 @@ export function runDuplicateScan(
 
     // ── Phase 2: Hash candidates ──
     const candidateEntries: [number, FileCandidate[]][] = [];
+    // Potential waste per bucket: what keeping one copy and deleting the
+    // rest could free, with hardlinks and clones already counted at what
+    // they free (the index says so before any hashing). Plain copies give
+    // size × (count − 1). Without this, pnpm clone buckets that free
+    // nothing would use up a reduced hash depth.
+    const potential = new Map<FileCandidate[], number>();
     for (const [size, files] of sizeMap) {
-      if (files.length >= 2) candidateEntries.push([size, files]);
+      if (files.length < 2) continue;
+      candidateEntries.push([size, files]);
+      potential.set(files, groupReclaim(files.map((file) => ({ reclaimableBytes: fileReclaim(file).bytes })), size));
     }
     // Largest-potential-waste-first so early cancellation still yields
-    // the most useful results. potential-waste = size × (count − 1).
-    // count − 1 because keeping ONE copy of each group is the floor —
-    // we can only reclaim the extra copies.
-    candidateEntries.sort((a, b) => b[0] * (b[1].length - 1) - a[0] * (a[1].length - 1));
+    // the most useful results.
+    candidateEntries.sort((a, b) => potential.get(b[1])! - potential.get(a[1])!);
 
     // v0.5.38: optional depth-clamp. User-facing setting: "Hash depth"
     // 1–100% in Storage settings. Default 100 (full scan, unchanged
@@ -641,7 +648,7 @@ export function runDuplicateScan(
           const entry = candidateEntries[i]!;
           droppedBuckets++;
           droppedFiles += entry[1].length;
-          droppedPotentialBytes += entry[0] * (entry[1].length - 1);
+          droppedPotentialBytes += potential.get(entry[1])!;
         }
         candidateEntries.length = keep;
       }
@@ -1071,9 +1078,9 @@ async function collectFromIndex(
     const candidate: FileCandidate = {
       path: rec.p,
       size,
-      mtime: typeof rec.m === "number" ? rec.m : 0,
+      mtime: rec.m,
       // Sharing as of the scan that wrote the index (see duplicateReclaim.ts).
-      ...(typeof rec.i === "string" && rec.i ? { linkId: rec.i } : {}),
+      ...(rec.i ? { linkId: rec.i } : {}),
       ...(typeof rec.v === "number" ? { privateBytes: rec.v } : {}),
     };
     if (bucket) bucket.push(candidate);
@@ -1087,18 +1094,6 @@ async function collectFromIndex(
   return sizeMap;
 }
 
-/** Index fields Duplicates reads (see indexLineParse.ts for the format). */
-interface IndexRec {
-  p: string;
-  s?: number;
-  m?: number;
-  t?: string;
-  /** `dev:ino` on every name of a file with more than one name. */
-  i?: string;
-  /** APFS clone private bytes. */
-  v?: number;
-}
-
 /** Stream a gzipped NDJSON line by line, calling `onRec` for each parsed
  *  record. Return false from `onRec` to stop early. Honors `isCancelled`
  *  on every line so cancel propagates within one record-read instead of
@@ -1106,7 +1101,7 @@ interface IndexRec {
 async function streamIndex(
   indexPath: string,
   isCancelled: () => boolean,
-  onRec: (rec: IndexRec) => boolean,
+  onRec: (rec: ParsedIndexLine) => boolean,
 ): Promise<void> {
   const gunzip = createGunzip();
   const source = createReadStream(indexPath);
@@ -1124,10 +1119,9 @@ async function streamIndex(
     for await (const line of rl) {
       if (isCancelled()) break;
       if (!line) continue;
-      let rec: Partial<IndexRec>;
-      try { rec = JSON.parse(line); } catch { continue; }
-      if (!rec || typeof rec.p !== "string") continue;
-      const cont = onRec(rec as IndexRec);
+      const rec = parseIndexLine(line);
+      if (!rec) continue;
+      const cont = onRec(rec);
       if (!cont) break;
     }
   } catch {
@@ -1796,7 +1790,7 @@ function makeGroup(hash: string, size: number, bucket: FileCandidate[]): Duplica
  * Runs on the candidate map before hashing, so extra names are never
  * hashed. Buckets that fold down to one file drop out as non-candidates.
  */
-export function foldHardlinks<T extends { linkId?: string }>(sizeMap: Map<number, T[]>): number {
+function foldHardlinks<T extends { linkId?: string }>(sizeMap: Map<number, T[]>): number {
   let folded = 0;
   for (const [size, bucket] of sizeMap) {
     if (!bucket.some((file) => file.linkId)) continue;

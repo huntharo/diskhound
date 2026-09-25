@@ -25,10 +25,23 @@ const INDEX_FILE_LINE_RE =
   /^\{"p":"((?:\\.|[^"\\])*)","s":(\d+),"m":(\d+)(,"h":1)?(?:,"i":"(\d+:\d+)")?(?:,"v":(\d+))?(,"k":1)?\}$/;
 const INDEX_DIR_LINE_RE = /^\{"p":"((?:\\.|[^"\\])*)","t":"d","m":(\d+)\}$/;
 
+/**
+ * Single pass over `\\` and `\"`, the only escapes on ordinary paths
+ * (every Windows separator is one). The native writer also emits `\n`,
+ * `\r`, `\t` and `\u00XX` for control characters in names; any of those
+ * sends the whole string through JSON.parse.
+ */
 function unescapeIndexPath(escaped: string): string {
-  return escaped.indexOf("\\") === -1
-    ? escaped
-    : escaped.replace(/\\\\/g, "\\").replace(/\\"/g, '"');
+  if (escaped.indexOf("\\") === -1) return escaped;
+  let out = "";
+  let start = 0;
+  for (let i = escaped.indexOf("\\"); i !== -1; i = escaped.indexOf("\\", start)) {
+    const next = escaped[i + 1];
+    if (next !== "\\" && next !== '"') return JSON.parse(`"${escaped}"`) as string;
+    out += escaped.slice(start, i) + next;
+    start = i + 2;
+  }
+  return out + escaped.slice(start);
 }
 
 export function parseIndexLine(line: string): ParsedIndexLine | null {

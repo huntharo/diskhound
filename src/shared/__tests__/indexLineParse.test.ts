@@ -49,6 +49,15 @@ describe("parseIndexLine", () => {
     });
   });
 
+  it("decodes every escape the native writer emits on the fast path", () => {
+    // append_json_escaped: \" \\ \n \r \t, other control chars as \u00XX.
+    const path = 'C:\\odd "dir"\\a\tb\nc\rd\u0001e.bin';
+    const line = JSON.stringify({ p: path, s: 1, m: 2 });
+    expect(line).toContain("\\u0001");
+    expect(parseIndexLine(line)).toEqual({ t: "f", p: path, s: 1, m: 2 });
+    expect(parseIndexLine(JSON.stringify({ p: "/x\\\\y\"", s: 1, m: 2 }))).toMatchObject({ p: "/x\\\\y\"" });
+  });
+
   it("reads the hardlink id between h and the clone suffix", () => {
     expect(parseIndexLine('{"p":"/s/a.js","s":4096,"m":1,"i":"16777232:4815"}')).toEqual({
       t: "f", p: "/s/a.js", s: 4096, m: 1, i: "16777232:4815",
