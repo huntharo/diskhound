@@ -27,6 +27,7 @@ import { nativeApi } from "./nativeApi";
 
 import { ChangesView } from "./components/ChangesView";
 import { DiskPicker } from "./components/DiskPicker";
+import { DevBranchChip } from "./components/DevBranchChip";
 import { DevView } from "./components/DevView";
 import { DuplicatesView } from "./components/DuplicatesView";
 import { DiskIoView } from "./components/DiskIoView";
@@ -1139,6 +1140,9 @@ export function App() {
               );
             })}
           </div>
+
+          {/* Development builds only: the branch this checkout is on. */}
+          <DevBranchChip />
 
           {/* Utility buttons grouped behind a visual divider so they
            *  read as a separate region from the drive pills. The
