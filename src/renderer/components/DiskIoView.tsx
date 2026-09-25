@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 
 import type { DiskIoProcessInfo, DiskIoSnapshot } from "../../shared/contracts";
 import { formatBytes, relativeTime } from "../lib/format";
+import { saveLocalPreference } from "../lib/localPreference";
 import { processMetadataParts, processSearchText } from "../lib/processMetadata";
 import { nativeApi } from "../nativeApi";
 import { ProcessIcon } from "./ProcessIcon";
@@ -28,9 +29,7 @@ export function DiskIoView() {
   const [showMetadata, setShowMetadata] = useState<boolean>(getInitialShowDiskIoMetadata);
 
   useEffect(() => {
-    try {
-      window.localStorage.setItem(DISK_IO_METADATA_KEY, showMetadata ? "1" : "0");
-    } catch { /* ignore */ }
+    saveLocalPreference(DISK_IO_METADATA_KEY, showMetadata ? "1" : "0");
   }, [showMetadata]);
 
   const refresh = useCallback(async () => {

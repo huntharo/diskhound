@@ -13,6 +13,7 @@ import type {
   SystemMemorySnapshot,
 } from "../../shared/contracts";
 import { formatBytes, formatCount, relativeTime } from "../lib/format";
+import { saveLocalPreference } from "../lib/localPreference";
 import { nativeApi } from "../nativeApi";
 
 /**
@@ -71,9 +72,7 @@ function loadStoredMode(): WidgetMode {
 }
 
 function saveMode(mode: WidgetMode): void {
-  try {
-    window.localStorage.setItem(STORAGE_MODE_KEY, mode);
-  } catch { /* non-fatal */ }
+  saveLocalPreference(STORAGE_MODE_KEY, mode);
 }
 
 /**
@@ -121,11 +120,7 @@ function loadStoredLayout(): WidgetLayout {
 }
 
 function saveLayout(next: WidgetLayout): void {
-  try {
-    window.localStorage.setItem(STORAGE_LAYOUT_KEY, JSON.stringify(next));
-  } catch {
-    // Quota / private mode — non-fatal, layout just resets next launch.
-  }
+  saveLocalPreference(STORAGE_LAYOUT_KEY, JSON.stringify(next));
 }
 
 function loadStoredDetail(): DetailType | null {
@@ -142,9 +137,7 @@ function loadStoredDetail(): DetailType | null {
 }
 
 function saveDetail(value: DetailType | null): void {
-  try {
-    window.localStorage.setItem(STORAGE_DETAIL_KEY, value === null ? "null" : value);
-  } catch { /* non-fatal */ }
+  saveLocalPreference(STORAGE_DETAIL_KEY, value === null ? "null" : value);
 }
 
 function resolveThemePreference(theme: GeneralSettings["theme"]): "dark" | "light" {
@@ -311,10 +304,10 @@ export function SystemWidget() {
   }, []);
 
   // Persist layout + active-detail to localStorage on any
-  // change. Cheap (small JSON, throttled by render rate) and
-  // means the user's last layout is restored next time the
-  // widget opens — they don't have to re-toggle the same
-  // sections every session.
+  // change (and on mount, where saveLocalPreference skips the
+  // unchanged value). Means the user's last layout is restored
+  // next time the widget opens — they don't have to re-toggle
+  // the same sections every session.
   useEffect(() => {
     saveLayout(layout);
   }, [layout]);

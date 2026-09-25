@@ -10,6 +10,7 @@ import {
 } from "../lib/deletedPaths";
 import { basename, formatBytes, formatCount, formatElapsed, humanAge, relativeTime } from "../lib/format";
 import { useConfirmPermanentDelete, useExcludedFolderProtection, usePathActions } from "../lib/hooks";
+import { saveLocalPreference } from "../lib/localPreference";
 import {
   buildTreemapComposition,
   colorForExtension,
@@ -263,32 +264,32 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
       return;
     }
 
-    window.localStorage.setItem(TREEMAP_MODE_STORAGE_KEY, treemapMode);
+    saveLocalPreference(TREEMAP_MODE_STORAGE_KEY, treemapMode);
   }, [treemapMode]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    window.localStorage.setItem(TREEMAP_LAYOUT_STORAGE_KEY, treemapLayout);
+    saveLocalPreference(TREEMAP_LAYOUT_STORAGE_KEY, treemapLayout);
   }, [treemapLayout]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    window.localStorage.setItem(EXT_SIDEBAR_COLLAPSED_KEY, extSidebarCollapsed ? "1" : "0");
+    saveLocalPreference(EXT_SIDEBAR_COLLAPSED_KEY, extSidebarCollapsed ? "1" : "0");
   }, [extSidebarCollapsed]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    window.localStorage.setItem(TREEMAP_RECENT_ON_KEY, recentOn ? "1" : "0");
+    saveLocalPreference(TREEMAP_RECENT_ON_KEY, recentOn ? "1" : "0");
   }, [recentOn]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    window.localStorage.setItem(TREEMAP_RECENT_WINDOW_KEY, recentWindow);
+    saveLocalPreference(TREEMAP_RECENT_WINDOW_KEY, recentWindow);
   }, [recentWindow]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    window.localStorage.setItem(TREEMAP_FOLDERS_STORAGE_KEY, showFolders ? "1" : "0");
+    saveLocalPreference(TREEMAP_FOLDERS_STORAGE_KEY, showFolders ? "1" : "0");
   }, [showFolders]);
 
 

@@ -20,6 +20,7 @@ import {
 } from "../lib/deletedPaths";
 import { basename, formatBytes, relativeTime } from "../lib/format";
 import { useExcludedFolderProtection, usePathActions } from "../lib/hooks";
+import { saveLocalPreference } from "../lib/localPreference";
 import { nativeApi } from "../nativeApi";
 import { toast } from "./Toasts";
 import { FileIcon } from "./FileIcon";
@@ -229,7 +230,7 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
     return v === "per-scan" ? "per-scan" : "cumulative";
   });
   useEffect(() => {
-    try { window.localStorage.setItem(DIFF_MODE_KEY, diffMode); } catch { /* ok */ }
+    saveLocalPreference(DIFF_MODE_KEY, diffMode);
     // When the user flips the mode, every cached diff becomes stale
     // because the meaning of (baseline, current) pair changes. Drop
     // the cache so subsequent selectBaseline calls re-fetch with
