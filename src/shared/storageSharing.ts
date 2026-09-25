@@ -67,7 +67,6 @@ export function cloneHintForPath(path: string): CloneHint | null {
     || hasSequence(parts, ["library", "pnpm", "store"])
     || hasSequence(parts, [".local", "share", "pnpm", "store"])
     || hasSequence(parts, ["appdata", "local", "pnpm", "store"])
-    || hasSequence(parts, [".cache", "pnpm"])
   ) {
     return {
       kind: "pnpm-store",
@@ -245,8 +244,11 @@ export interface FreedSpaceCheck {
   /** Fetched after the delete (fresh). */
   report: StorageAccountingReport | null;
   /**
-   * Clone-shared bytes among the deleted items when the scanner measured
-   * them (Dev rows). Undefined = unknown, e.g. a single file delete.
+   * Bytes among the deleted items the scanner measured as not freeing
+   * (Dev rows: size minus "frees ≈", i.e. clone blocks shared outside
+   * the tree plus extra copies inside it). The check judges only
+   * `expectedBytes - sharedBytes`. Undefined = unknown, e.g. a single
+   * file delete.
    */
   sharedBytes?: number;
   now?: number;
@@ -275,8 +277,12 @@ export function explainFreedShortfall(
   if (freeBefore === null || freeAfter === null) return null;
   if (!Number.isFinite(expectedBytes) || expectedBytes < FREED_CHECK_MIN_BYTES) return null;
   const freed = freeAfter - freeBefore;
-  if (freed >= expectedBytes * 0.5) return null;
-  if (expectedBytes - Math.max(0, freed) < FREED_CHECK_MIN_BYTES) return null;
+  // Clone bytes the caller already measured as not coming back (the Dev
+  // confirm said "Frees ≈ X") are not a surprise; judge only the rest.
+  const shared = clamp(check.sharedBytes ?? 0, 0, expectedBytes);
+  const expectedFree = expectedBytes - shared;
+  if (freed >= expectedFree * 0.5) return null;
+  if (expectedFree - Math.max(0, freed) < FREED_CHECK_MIN_BYTES) return null;
 
   const now = check.now ?? Date.now();
   const title = freed <= 0
@@ -298,10 +304,9 @@ export function explainFreedShortfall(
       `${what}${when} may still reference the deleted files. macOS frees that space when the snapshot expires — Time Machine keeps local snapshots about 24 hours — or sooner if the disk runs low. Overview shows how to thin them now.`,
     );
   }
-  const shared = Math.max(0, check.sharedBytes ?? 0);
   if (shared >= FREED_CHECK_MIN_BYTES / 2) {
     reasons.push(
-      `${fmt(shared)} of it was APFS clones sharing blocks with files you kept, so those blocks stay in use.`,
+      `${fmt(shared)} of it was APFS clone copies whose blocks other copies still use, so that part was never going to come back.`,
     );
   } else if (check.sharedBytes === undefined && reasons.length > 0) {
     // Nothing measured about clones for these paths — name it as the

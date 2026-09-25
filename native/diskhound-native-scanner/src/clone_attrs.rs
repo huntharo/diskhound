@@ -360,6 +360,13 @@ mod reader {
             match read_with_mask(dir, mask) {
                 Ok(map) => return map,
                 Err(libc::EINVAL) => {
+                    // A nested non-APFS mount (exFAT stick, HFS+ DMG
+                    // under /Volumes) rejects the extended attrs too.
+                    // That says nothing about APFS, so skip just this
+                    // directory instead of lowering the global mask.
+                    if !is_apfs(dir) {
+                        return None;
+                    }
                     // Kernel rejected an attribute bit; step down once.
                     let next = if mask == FULL_MASK { BASIC_MASK } else { 0 };
                     let _ = FORK_MASK.compare_exchange(mask, next, Ordering::Relaxed, Ordering::Relaxed);

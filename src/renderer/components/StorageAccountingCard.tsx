@@ -61,15 +61,20 @@ export function StorageAccountingCard({ snapshot, onViewDev }: {
       }).catch(() => { /* keep the last report */ });
     };
     load();
-    const id = window.setInterval(() => load(), REFRESH_MS);
+    // Each collection runs five subprocesses: skip ticks while the window
+    // is hidden, and let focus use the main-process cache (not `fresh`).
+    const id = window.setInterval(() => {
+      if (!document.hidden) load();
+    }, REFRESH_MS);
     const onStale = () => load(true);
+    const onFocus = () => load();
     window.addEventListener(STORAGE_ACCOUNTING_STALE_EVENT, onStale);
-    window.addEventListener("focus", onStale);
+    window.addEventListener("focus", onFocus);
     return () => {
       cancelled = true;
       window.clearInterval(id);
       window.removeEventListener(STORAGE_ACCOUNTING_STALE_EVENT, onStale);
-      window.removeEventListener("focus", onStale);
+      window.removeEventListener("focus", onFocus);
     };
   }, [isMac, rootPath, snapshot.finishedAt]);
 

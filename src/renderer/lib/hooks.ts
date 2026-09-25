@@ -107,15 +107,14 @@ export function usePathActions() {
     },
   ) => {
     markBusy(path);
-    const checkFreed = opts?.deletedAction === "delete"
-      && typeof opts.expectedBytes === "number"
-      && freedSpaceCheckEnabled(opts.expectedBytes);
+    const expectedBytes = opts?.deletedAction === "delete" ? opts.expectedBytes ?? 0 : 0;
+    const checkFreed = freedSpaceCheckEnabled(expectedBytes);
     const freeBefore = checkFreed ? await captureFreeBytes(path) : null;
     const r = await action();
     clearBusy(path);
     if (r.ok) {
       if (checkFreed) {
-        void checkFreedSpace({ path, expectedBytes: opts!.expectedBytes!, freeBefore });
+        void checkFreedSpace({ path, expectedBytes, freeBefore });
       }
       if (opts?.deletedAction) markDeletedPath(path, opts.deletedAction);
       if (opts?.onSuccess) opts.onSuccess();

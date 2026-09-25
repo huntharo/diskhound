@@ -109,9 +109,11 @@ function yieldToUi(): Promise<void> {
 
 function permanentDeleteConfirm(label: string, trees: number, bytes: number, freesBytes: number | null): string {
   // APFS clone accounting: say up front when most of the selection is
-  // shared with trees that stay, instead of promising the full size.
+  // clone copies, instead of promising the full size. Conservative when
+  // the selection holds both sides of a clone (see summarizeDevSharing),
+  // so the wording doesn't claim the other copy stays.
   const frees = freesBytes !== null && freesBytes < bytes * 0.9
-    ? `\nFrees ≈ ${formatBytes(freesBytes)} — the rest is APFS clones shared with files that stay.\n`
+    ? `\nFrees ≈ ${formatBytes(freesBytes)} — the rest is APFS clone copies; their blocks come back only when every copy is gone.\n`
     : "";
   return (
     `${label}\n\n` +
@@ -540,8 +542,12 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
           }
           succeeded += 1;
           deletedBytes += artifact.size;
+          // Everything the row said would not come back: clone blocks
+          // shared outside the tree plus extra copies inside it.
           const deletedSharing = devArtifactSharing(artifact);
-          deletedSharedBytes += deletedSharing.sharedBytes;
+          if (deletedSharing.freesBytes !== null) {
+            deletedSharedBytes += Math.max(0, artifact.size - deletedSharing.freesBytes);
+          }
           deletedMeasured ||= deletedSharing.measured;
           noteForgotten(scanKey, [artifact.path]);
           live = overlayForgotten(dropArtifactsFromReport(live ?? emptyDevReport(root), [artifact.path]), scanKey);

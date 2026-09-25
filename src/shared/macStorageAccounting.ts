@@ -435,12 +435,19 @@ export async function collectStorageAccounting(
 }
 
 const CACHE_TTL_MS = 15_000;
+/**
+ * One delete fans out into several `fresh` requests (the check itself,
+ * plus every mounted view reacting to the stale event). A collection
+ * that started this recently already began after the delete, so share it.
+ */
+const FRESH_REUSE_MS = 1_000;
 const cache = new Map<string, { at: number; report: Promise<StorageAccountingReport> }>();
 
 /**
  * Cached entry point for IPC. Concurrent callers for the same volume
- * share one in-flight collection; `fresh` bypasses the cache (used right
- * after a delete, when the snapshot list and free space just changed).
+ * share one in-flight collection; `fresh` only accepts a collection that
+ * started within the last second (used right after a delete, when the
+ * snapshot list and free space just changed).
  */
 export function getStorageAccounting(
   targetPath: string,
@@ -448,7 +455,8 @@ export function getStorageAccounting(
 ): Promise<StorageAccountingReport> {
   const key = process.platform === "darwin" ? macVolumeForPath(targetPath) : targetPath;
   const hit = cache.get(key);
-  if (!opts.fresh && hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.report;
+  const maxAge = opts.fresh ? FRESH_REUSE_MS : CACHE_TTL_MS;
+  if (hit && Date.now() - hit.at < maxAge) return hit.report;
   const report = collectStorageAccounting(targetPath).catch(() =>
     unsupportedStorageAccountingReport(normalizePlatform(process.platform), key),
   );

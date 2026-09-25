@@ -61,6 +61,8 @@ describe("cloneHintForPath", () => {
   it("does not guess for plain node_modules or build output", () => {
     expect(cloneHintForPath("/Users/me/app/node_modules")).toBeNull();
     expect(cloneHintForPath("/Users/me/app/target/debug")).toBeNull();
+    // pnpm's metadata cache, not its content store: nothing links to it.
+    expect(cloneHintForPath("/home/me/.cache/pnpm")).toBeNull();
   });
 });
 
@@ -242,17 +244,38 @@ describe("explainFreedShortfall", () => {
   });
 
   it("names clone sharing alongside snapshots and reports partial frees", () => {
+    // 1 GiB should have come back; only 100 MiB did.
     const out = explainFreedShortfall({
       expectedBytes: 4 * GiB,
       freeBefore: 10 * GiB,
-      freeAfter: 10 * GiB + 512 * MiB,
+      freeAfter: 10 * GiB + 100 * MiB,
       report: report(["com.bombich.ccc.1", "com.apple.TimeMachine.2026-09-24-003521.local"]),
       sharedBytes: 3 * GiB,
       now: NOW,
     }, fmt)!;
-    expect(out.title).toBe("Only 512M of 4096M came back as free space");
+    expect(out.title).toBe("Only 100M of 4096M came back as free space");
     expect(out.body).toMatch(/^2 local snapshots/);
-    expect(out.body).toMatch(/3072M of it was APFS clones/);
+    expect(out.body).toMatch(/3072M of it was APFS clone copies/);
+  });
+
+  it("stays quiet when measured clone sharing already predicted the shortfall", () => {
+    // Dev confirm said "Frees ≈ 248 KB" for a 466 MB pnpm node_modules.
+    expect(explainFreedShortfall({
+      expectedBytes: 466 * MiB,
+      freeBefore: 10 * GiB,
+      freeAfter: 10 * GiB + 248 * 1024,
+      report: report(["com.apple.TimeMachine.2026-09-24-003521.local"]),
+      sharedBytes: 466 * MiB - 248 * 1024,
+      now: NOW,
+    })).toBeNull();
+    // Half of what should have come back did: also quiet.
+    expect(explainFreedShortfall({
+      expectedBytes: 4 * GiB,
+      freeBefore: 10 * GiB,
+      freeAfter: 10 * GiB + 512 * MiB,
+      report: null,
+      sharedBytes: 3 * GiB,
+    })).toBeNull();
   });
 
   it("falls back to a generic reason with nothing to point at", () => {
