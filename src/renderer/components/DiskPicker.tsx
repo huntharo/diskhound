@@ -159,9 +159,9 @@ function RecentRow({ recent, onRescan }: { recent: RecentScan; onRescan: () => v
   const age = relativeTime(recent.scannedAt);
 
   return (
-    <button className="recent-row" onClick={onRescan}>
+    <button className="recent-row" onClick={onRescan} title={recent.path}>
       <div>
-        <div className="recent-path">{recent.path}</div>
+        <MiddleEllipsis className="recent-path" text={recent.path} maxTail={24} />
         <div className="recent-meta">
           <span>{formatBytes(recent.bytesFound)}</span>
           <span>&middot;</span>
