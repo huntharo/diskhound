@@ -22,7 +22,9 @@ export function changelogEditAllowed({ files, title = "", branch = "" }) {
 }
 
 function changedFiles(baseSha) {
-  const out = execFileSync("git", ["diff", "--name-only", `${baseSha}...HEAD`], { encoding: "utf8" });
+  // Two-dot, not three-dot. CI fetches the base commit with depth 1,
+  // so the merge base for a three-dot diff is not in the clone.
+  const out = execFileSync("git", ["diff", "--name-only", baseSha, "HEAD"], { encoding: "utf8" });
   return out.split("\n").map((line) => line.trim()).filter(Boolean);
 }
 
