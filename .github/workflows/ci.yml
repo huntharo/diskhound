@@ -54,6 +54,30 @@ jobs:
       - name: Build (renderer + electron)
         run: bun run build
 
+  # typecheck-and-test runs vitest on Linux. Some tests only do real
+  # work on Windows (paths, delete errors) or depend on the local df.
+  vitest-cross-os:
+    if: github.event.action != 'edited' || github.event.changes.title
+    strategy:
+      fail-fast: false
+      matrix:
+        # windows-latest is VS 18 (2026), which blake2's node-gyp 11 does
+        # not recognize, so `bun install` fails. Same pin as release.yml.
+        os: [windows-2022, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Test
+        run: bun run test
+
   rust-check:
     if: github.event.action != 'edited' || github.event.changes.title
     strategy:
