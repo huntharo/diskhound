@@ -4,36 +4,16 @@ on:
   push:
     branches: [main, master]
   pull_request:
-    # Default types are opened, synchronize, and reopened. Without
-    # edited, renaming a "Cut DiskHound" pull request keeps the old
-    # green changelog check on the same commit.
-    types: [opened, synchronize, reopened, edited]
+    # Not edited. A run for a description edit would skip these jobs,
+    # and the skipped checks would replace their last results on the
+    # pull request. The changelog guard reads the title, so it runs on
+    # edits from its own workflow, changelog-guard.yml. A base change is
+    # an edit too: push or reopen to test against the new base.
+    types: [opened, synchronize, reopened]
     branches: [main, master]
 
 jobs:
-  # Its own job, and it runs on every pull_request event, including a
-  # body-only edit. Skipping it would post a successful skipped check
-  # on the same commit and cover a failed title edit.
-  changelog-guard:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Reject feature-branch changelog edits
-        env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          git fetch --depth=1 origin "$BASE_SHA"
-          # Run main's copy. The pull request checkout can replace this
-          # script with one that always exits 0 and edit CHANGELOG.md.
-          git show "$BASE_SHA:scripts/changelog-guard.mjs" > /tmp/changelog-guard.mjs
-          node /tmp/changelog-guard.mjs
-
   typecheck-and-test:
-    # A body-only edit does not change the build. A title edit does.
-    if: github.event.action != 'edited' || github.event.changes.title
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,7 +37,6 @@ jobs:
   # typecheck-and-test runs vitest on Linux. Some tests only do real
   # work on Windows (paths, delete errors) or depend on the local df.
   vitest-cross-os:
-    if: github.event.action != 'edited' || github.event.changes.title
     strategy:
       fail-fast: false
       matrix:
@@ -79,7 +58,6 @@ jobs:
         run: bun run test
 
   rust-check:
-    if: github.event.action != 'edited' || github.event.changes.title
     strategy:
       fail-fast: false
       matrix:
