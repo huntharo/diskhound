@@ -282,6 +282,28 @@ describe("computeDiff", () => {
     expect(computeDiff(baseline, current, "b", "c").hardlinkAccountingChanged).toBe(false);
   });
 
+  it("flags a macOS scan that walked the Data volume twice against one that stayed on its disk", () => {
+    if (process.platform !== "darwin") return;
+    const baseline = makeSnapshot({ bytesSeen: 1_800, hardlinkAccounting: "once" });
+    const current = makeSnapshot({ bytesSeen: 900, hardlinkAccounting: "once", volumeAccounting: "own-disk" });
+    const diff = computeDiff(baseline, current, "b", "c");
+    expect(diff.volumeAccountingChanged).toBe(true);
+    expect(diff.hardlinkAccountingChanged).toBe(false);
+  });
+
+  it("treats two macOS scans that stayed on their disk as comparable", () => {
+    const baseline = makeSnapshot({ bytesSeen: 900, volumeAccounting: "own-disk" });
+    const current = makeSnapshot({ bytesSeen: 901, volumeAccounting: "own-disk" });
+    expect(computeDiff(baseline, current, "b", "c").volumeAccountingChanged).toBe(false);
+  });
+
+  it("uses the volume marker on macOS only", () => {
+    if (process.platform === "darwin") return;
+    const baseline = makeSnapshot({ bytesSeen: 100 });
+    const current = makeSnapshot({ bytesSeen: 90, volumeAccounting: "own-disk" });
+    expect(computeDiff(baseline, current, "b", "c").volumeAccountingChanged).toBe(false);
+  });
+
   it("does not use the hardlink marker on Windows", () => {
     if (process.platform !== "win32") return;
     const baseline = makeSnapshot({ bytesSeen: 100 });

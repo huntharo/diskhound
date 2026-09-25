@@ -1,6 +1,7 @@
 import {
   hardlinkAccountingCompatible,
   sizeSemanticsCompatible,
+  volumeAccountingCompatible,
   type DirectoryDelta,
   type ExtensionDelta,
   type FileDelta,
@@ -73,6 +74,7 @@ export function computeDiff(
 
     sizeSemanticsChanged: !sizeSemanticsCompatible(baseline, current),
     hardlinkAccountingChanged: !hardlinkAccountingCompatible(baseline, current),
+    volumeAccountingChanged: !volumeAccountingCompatible(baseline, current),
   };
 }
 

@@ -42,6 +42,8 @@ import {
   indexUsesAllocatedSize,
   sizeSemanticsCompatible,
   UNIX_HARDLINK_ACCOUNTING,
+  MAC_VOLUME_ACCOUNTING,
+  volumeAccountingCompatible,
   type SystemMemorySnapshot,
   type ToastMessage,
   type UpdateChannel,
@@ -1066,6 +1068,9 @@ void (async () => {
       if (process.platform !== "win32") {
         message.snapshot.hardlinkAccounting = UNIX_HARDLINK_ACCOUNTING;
       }
+      if (process.platform === "darwin") {
+        message.snapshot.volumeAccounting = MAC_VOLUME_ACCOUNTING;
+      }
       if (message.type === "done") {
         // Persist history before notifying the renderer so immediate diff
         // lookups can see the just-finished scan.
@@ -1226,6 +1231,7 @@ void (async () => {
             latestPair
             && sizeSemanticsCompatible(latestPair.baseline, latestPair.current)
             && hardlinkAccountingCompatible(latestPair.baseline, latestPair.current)
+            && volumeAccountingCompatible(latestPair.baseline, latestPair.current)
           ) {
             const [baseline, current] = await Promise.all([
               loadHistoricalSnapshot(latestPair.baseline.id),
@@ -1319,6 +1325,9 @@ void (async () => {
       // A Unix index that counted every hardlink would let the JS worker
       // inherit the double count.
       if (!hardlinkAccountingCompatible(entry, { hardlinkAccounting: UNIX_HARDLINK_ACCOUNTING })) continue;
+      // A macOS index that walked the Data volume twice would let the JS
+      // worker inherit the second copy.
+      if (!volumeAccountingCompatible(entry, { volumeAccounting: MAC_VOLUME_ACCOUNTING })) continue;
       const candidate = indexFilePath(entry.id);
       try {
         if (FS_SYNC.existsSync(candidate)) return candidate;
