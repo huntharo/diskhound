@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(target_os = "linux")]
 use std::sync::atomic::AtomicUsize;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -33,6 +33,8 @@ mod dev_artifacts;
 mod index_line;
 #[cfg(not(windows))]
 mod hardlinks;
+#[cfg(test)]
+mod test_support;
 
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{GetLastError, ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE};
@@ -79,6 +81,78 @@ struct ScanInput {
     folder_tree_output: Option<PathBuf>,
     /// Compact Dev Artifacts sidecar written from the index-writer thread.
     dev_artifacts_output: Option<PathBuf>,
+    /// The previous scan's file count, for the files-based progress bar.
+    /// The Unix walker takes this instead of reading the baseline index,
+    /// which it has no other use for.
+    #[cfg_attr(windows, allow(dead_code))]
+    expected_total_files: Option<u64>,
+}
+
+/// Disk touches one scan makes. The visit-once tests check these against
+/// `io-budgets.json`, and `run()` logs them after the walk.
+///
+/// - `readdir_calls`: directory listings (jwalk's `read_dir`, `FindFirstFileExW`).
+/// - `stat_calls`: per-path metadata reads (`symlink_metadata`, `metadata`,
+///   `GetCompressedFileSizeW`).
+/// - `baseline_bytes_read`: compressed bytes read from `--baseline-index`.
+///   Divided by the file's size, it is the number of passes over it.
+///
+/// Not counted: `canonicalize` of the root, jwalk's own `symlink_metadata`
+/// of the root, and the MFT read.
+#[derive(Default)]
+struct IoStats {
+    readdir_calls: AtomicU64,
+    stat_calls: AtomicU64,
+    baseline_bytes_read: AtomicU64,
+}
+
+impl IoStats {
+    fn count_readdir(&self) {
+        self.readdir_calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn count_stat(&self) {
+        self.stat_calls.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn readdir_calls(&self) -> u64 {
+        self.readdir_calls.load(Ordering::Relaxed)
+    }
+
+    fn stat_calls(&self) -> u64 {
+        self.stat_calls.load(Ordering::Relaxed)
+    }
+
+    fn baseline_bytes_read(&self) -> u64 {
+        self.baseline_bytes_read.load(Ordering::Relaxed)
+    }
+}
+
+/// Counts the bytes read from the baseline index into `IoStats`.
+#[cfg_attr(not(windows), allow(dead_code))]
+struct BaselineReader {
+    file: File,
+    io: Arc<IoStats>,
+}
+
+impl io::Read for BaselineReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read = self.file.read(buf)?;
+        self.io
+            .baseline_bytes_read
+            .fetch_add(read as u64, Ordering::Relaxed);
+        Ok(read)
+    }
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn open_baseline(path: &Path, io: &Arc<IoStats>) -> io::Result<BufReader<GzDecoder<BufReader<BaselineReader>>>> {
+    let file = File::open(path)?;
+    let reader = BaselineReader {
+        file,
+        io: Arc::clone(io),
+    };
+    Ok(BufReader::new(GzDecoder::new(BufReader::new(reader))))
 }
 
 /// Empty options struct — kept for IPC contract stability with the JS side.
@@ -409,6 +483,7 @@ struct ScanState {
     index_writer: Option<IndexWriter>,
     /// Baseline used by the Phase-1 mtime-skip optimization. None when the
     /// caller didn't pass --baseline-index or when parsing it failed.
+    #[cfg_attr(not(windows), allow(dead_code))]
     baseline: Option<Baseline>,
     /// Directory paths (normalized) whose subtrees were inherited from the
     /// baseline during the walk. After the walk completes we do one more
@@ -445,6 +520,55 @@ struct ScanState {
     /// `finalize_hottest_directories()` to rebuild the top-N from the
     /// HashMap in O(N_dirs log N_dirs) total, ~100× cheaper overall.
     defer_hottest_dir_ranking: bool,
+    /// Disk touches so far. Shared with walker threads.
+    io: Arc<IoStats>,
+}
+
+impl ScanState {
+    fn new(
+        input: ScanInput,
+        root_path_string: String,
+        index_writer: Option<IndexWriter>,
+        baseline: Option<Baseline>,
+        io: Arc<IoStats>,
+    ) -> Self {
+        let mut directory_totals = HashMap::new();
+        directory_totals.insert(
+            root_path_string.clone(),
+            DirectoryHotspot {
+                path: root_path_string.clone(),
+                size: 0,
+                file_count: 0,
+                depth: 0,
+            },
+        );
+        ScanState {
+            largest_files: Vec::with_capacity(input.top_file_limit),
+            hottest_directories: Vec::with_capacity(input.top_directory_limit),
+            input,
+            root_path_string,
+            started_at_ms: unix_timestamp_ms(SystemTime::now()),
+            started_at_instant: Instant::now(),
+            files_visited: 0,
+            directories_visited: 0,
+            skipped_entries: 0,
+            bytes_seen: 0,
+            directory_totals,
+            extension_totals: HashMap::new(),
+            folder_tree_files: HashMap::new(),
+            last_emit_elapsed_ms: 0,
+            index_writer,
+            baseline,
+            inherited_prefixes: Vec::new(),
+            inherited_dirs: 0,
+            inherited_files: 0,
+            emit_lite_snapshots: false,
+            scan_phase: ScanPhase::Starting,
+            expected_total_files: None,
+            defer_hottest_dir_ranking: false,
+            io,
+        }
+    }
 }
 
 /// Preloaded baseline from a previous scan's NDJSON index — streaming
@@ -458,6 +582,10 @@ struct ScanState {
 /// progress counters stay accurate. After the walk we stream the full
 /// baseline index a second time to copy actual file records into the new
 /// index file for the subtrees we inherited.
+///
+/// Windows only in practice: the Unix walker never inherits, so it never
+/// loads one (see `load_baseline`).
+#[cfg_attr(not(windows), allow(dead_code))]
 struct Baseline {
     baseline_path: PathBuf,
     dir_mtimes: HashMap<String, u64>,
@@ -478,6 +606,7 @@ struct Baseline {
     extra_hardlink_paths: HashSet<String>,
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 impl Baseline {
     /// First pass over the baseline NDJSON: collect per-directory metadata
     /// (mtimes + cumulative file counts + cumulative bytes) without
@@ -489,10 +618,13 @@ impl Baseline {
     /// millions of prior-scan records this phase used to take 20-40s of
     /// stdout silence, long enough for the renderer's "0 files" display
     /// to look dead.
-    fn load_metadata<F: FnMut(u64)>(path: &Path, mut on_heartbeat: F) -> Option<Baseline> {
+    fn load_metadata<F: FnMut(u64)>(
+        path: &Path,
+        io: &Arc<IoStats>,
+        mut on_heartbeat: F,
+    ) -> Option<Baseline> {
         const HEARTBEAT_LINES: u64 = 100_000;
-        let file = File::open(path).ok()?;
-        let reader = BufReader::new(GzDecoder::new(BufReader::new(file)));
+        let reader = open_baseline(path, io).ok()?;
 
         let mut dir_mtimes: HashMap<String, u64> = HashMap::new();
         let mut dirs: HashSet<String> = HashSet::new();
@@ -645,6 +777,7 @@ impl Baseline {
 /// Extracted as a free function instead of an impl method so it can
 /// borrow state mutably without fighting the borrow checker against a
 /// live &self.baseline borrow.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn stream_inherited_files_into(
     baseline_path: &Path,
     inherited_prefixes: &[String],
@@ -668,8 +801,7 @@ fn stream_inherited_files_into(
         })
         .collect();
 
-    let file = File::open(baseline_path)?;
-    let reader = BufReader::new(GzDecoder::new(BufReader::new(file)));
+    let reader = open_baseline(baseline_path, &state.io)?;
 
     // Emit a progress snapshot every N file records processed. The
     // inherited stream can be 7 M+ file records on a rescan of a
@@ -1004,93 +1136,44 @@ fn run() -> Result<(), String> {
         snapshot: early_running_snapshot(&root_path_string, scan_started_ms, 0),
     });
 
-    // Load baseline if provided. Silent fallback to None on any failure
-    // (missing file, corrupt gzip, malformed NDJSON) — the scanner just
-    // does a full walk as before. We pass a heartbeat closure so each
-    // ~100k-line chunk fires a snapshot carrying the current elapsed
-    // time; keeps the UI alive during long baseline parses.
+    let io = Arc::new(IoStats::default());
     let baseline_load_started = Instant::now();
-    let baseline = input.baseline_index.as_deref().and_then(|path| {
-        if !path.exists() {
-            return None;
-        }
-        let root_for_heartbeat = root_path_string.clone();
-        Baseline::load_metadata(path, |_lines_read| {
-            // Stderr line lands in the scanner's log buffer so we can
-            // confirm the fast path in production without noise on stdout
-            // (stdout is reserved for Progress/Done messages).
-            eprintln!(
-                "[diskhound-native-scanner] baseline load heartbeat: {} lines",
-                _lines_read
-            );
-            let elapsed = scan_started_instant.elapsed().as_millis() as u64;
-            let _ = emit_message(&Message::Progress {
-                snapshot: early_running_snapshot(&root_for_heartbeat, scan_started_ms, elapsed),
-            });
-        })
-    });
+    let baseline = load_baseline(&input, &io, &root_path_string, scan_started_ms, scan_started_instant);
     if input.baseline_index.is_some() {
         eprintln!(
-            "[diskhound-native-scanner] phase: baseline load took {} ms (loaded={}, dirs={})",
+            "[diskhound-native-scanner] phase: baseline load took {} ms (loaded={}, dirs={}, bytes_read={})",
             baseline_load_started.elapsed().as_millis(),
             baseline.is_some(),
             baseline.as_ref().map(|b| b.dirs.len()).unwrap_or(0),
+            io.baseline_bytes_read(),
         );
     }
 
-    let mut state = ScanState {
-        input: ScanInput {
+    let mut state = ScanState::new(
+        ScanInput {
             root_path: root_path.clone(),
-            top_file_limit: input.top_file_limit,
-            top_directory_limit: input.top_directory_limit,
-            index_output: input.index_output.clone(),
-            baseline_index: input.baseline_index.clone(),
-            folder_tree_output: input.folder_tree_output.clone(),
-            dev_artifacts_output: input.dev_artifacts_output.clone(),
+            ..input
         },
-        root_path_string: root_path_string.clone(),
-        started_at_ms: scan_started_ms,
-        started_at_instant: scan_started_instant,
-        files_visited: 0,
-        directories_visited: 0,
-        skipped_entries: 0,
-        bytes_seen: 0,
-        largest_files: Vec::with_capacity(input.top_file_limit),
-        hottest_directories: Vec::with_capacity(input.top_directory_limit),
-        directory_totals: HashMap::new(),
-        extension_totals: HashMap::new(),
-        folder_tree_files: HashMap::new(),
-        last_emit_elapsed_ms: 0,
+        root_path_string,
         index_writer,
         baseline,
-        inherited_prefixes: Vec::new(),
-        inherited_dirs: 0,
-        inherited_files: 0,
-        emit_lite_snapshots: false,
-        scan_phase: ScanPhase::Starting,
-        expected_total_files: None,
-        defer_hottest_dir_ranking: false,
-    };
-
-    state.directory_totals.insert(
-        root_path_string.clone(),
-        DirectoryHotspot {
-            path: root_path_string,
-            size: 0,
-            file_count: 0,
-            depth: 0,
-        },
+        io,
     );
+    state.started_at_ms = scan_started_ms;
+    state.started_at_instant = scan_started_instant;
 
     let walk_started = Instant::now();
     scan_root(&root_path, &mut state)?;
     eprintln!(
-        "[diskhound-native-scanner] phase: walk took {} ms (files={}, dirs={}, inherited_dirs={}, inherited_files={})",
+        "[diskhound-native-scanner] phase: walk took {} ms (files={}, dirs={}, inherited_dirs={}, inherited_files={}, readdir_calls={}, stat_calls={}, baseline_bytes_read={})",
         walk_started.elapsed().as_millis(),
         state.files_visited,
         state.directories_visited,
         state.inherited_dirs,
         state.inherited_files,
+        state.io.readdir_calls(),
+        state.io.stat_calls(),
+        state.io.baseline_bytes_read(),
     );
 
     let final_status = if is_cancelled() {
@@ -1131,6 +1214,58 @@ fn run() -> Result<(), String> {
     .map_err(|error| error.to_string())
 }
 
+/// Loads `--baseline-index` for Phase-1 inheritance. Silent fallback to
+/// None on any failure (missing file, corrupt gzip, malformed NDJSON): the
+/// scanner just walks everything. Each ~100k-line chunk fires a snapshot
+/// carrying the elapsed time, so the UI stays alive during long parses.
+#[cfg(windows)]
+fn load_baseline(
+    input: &ScanInput,
+    io: &Arc<IoStats>,
+    root_path_string: &str,
+    scan_started_ms: u64,
+    scan_started_instant: Instant,
+) -> Option<Baseline> {
+    let path = input.baseline_index.as_deref()?;
+    if !path.exists() {
+        return None;
+    }
+    Baseline::load_metadata(path, io, |lines_read| {
+        // Stderr line lands in the scanner's log buffer so we can
+        // confirm the fast path in production without noise on stdout
+        // (stdout is reserved for Progress/Done messages).
+        eprintln!(
+            "[diskhound-native-scanner] baseline load heartbeat: {} lines",
+            lines_read
+        );
+        let elapsed = scan_started_instant.elapsed().as_millis() as u64;
+        let _ = emit_message(&Message::Progress {
+            snapshot: early_running_snapshot(root_path_string, scan_started_ms, elapsed),
+        });
+    })
+}
+
+/// The Unix walker never inherits subtrees, so it has no use for the
+/// baseline. Parsing it cost a full decompress of the previous index, with
+/// a string clone per ancestor of every file (20-40 s on a big drive), only
+/// to read the root's file count. That count now comes from
+/// `--expected-files`.
+#[cfg(not(windows))]
+fn load_baseline(
+    input: &ScanInput,
+    _io: &Arc<IoStats>,
+    _root_path_string: &str,
+    _scan_started_ms: u64,
+    _scan_started_instant: Instant,
+) -> Option<Baseline> {
+    if input.baseline_index.is_some() {
+        eprintln!(
+            "[diskhound-native-scanner] baseline ignored: the Unix walker does not inherit subtrees"
+        );
+    }
+    None
+}
+
 #[cfg(windows)]
 fn scan_root(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
     scan_windows(root_path, state)
@@ -1163,6 +1298,8 @@ fn scan_root(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
 /// mount, tmpfs, or AppImage FUSE mount does not, and is left for
 /// its own drive pill. `st_dev` is the wrong key here: btrfs gives
 /// each subvolume a distinct `st_dev` even when `df` shows one pool.
+/// `duplicate_mount_paths` drops second copies on the same filesystem:
+/// bind mounts, and subvolumes also reachable through another mount.
 #[cfg(not(windows))]
 const LINUX_SKIP_PREFIXES: &[&str] = &[
     "/proc",
@@ -1198,13 +1335,16 @@ fn should_skip_linux_path(path: &Path) -> bool {
     false
 }
 
-/// One line of `/proc/self/mountinfo`: mount point plus the
-/// major:minor of the filesystem. btrfs subvolumes of one pool
-/// share that id; `stat.st_dev` does not.
+/// One line of `/proc/self/mountinfo`: mount point, the major:minor of
+/// the filesystem, and the path inside that filesystem the mount shows
+/// (`/` for a whole filesystem, `/@home` for a btrfs subvolume, the
+/// source directory for a bind mount). btrfs subvolumes of one pool
+/// share the major:minor; `stat.st_dev` does not.
 #[cfg(target_os = "linux")]
 struct LinuxMount {
     point: String,
     dev: String,
+    root: String,
 }
 
 #[cfg(target_os = "linux")]
@@ -1260,9 +1400,11 @@ fn parse_mountinfo(text: &str) -> Vec<LinuxMount> {
         if point.is_empty() {
             continue;
         }
+        let root = unescape_mountinfo(fields[3]);
         mounts.push(LinuxMount {
             point,
             dev: dev.to_string(),
+            root: trim_mount_point(&root).to_string(),
         });
     }
     mounts
@@ -1297,18 +1439,171 @@ fn foreign_mount_points(mounts: &[LinuxMount], root: &str) -> HashSet<String> {
         .collect()
 }
 
+/// `path` relative to `base`: `Some("")` when they are equal,
+/// `Some("/rest")` when `path` is under `base`, `None` otherwise.
 #[cfg(target_os = "linux")]
-fn load_foreign_mount_points(root: &Path) -> HashSet<String> {
+fn relative_mount_path<'a>(path: &'a str, base: &str) -> Option<&'a str> {
+    if path == base {
+        Some("")
+    } else if base == "/" {
+        Some(path)
+    } else if path_is_under(base, path) {
+        Some(&path[base.len()..])
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn join_mount_path(base: &str, rel: &str) -> String {
+    if rel.is_empty() {
+        base.to_string()
+    } else if base == "/" {
+        rel.to_string()
+    } else {
+        format!("{base}{rel}")
+    }
+}
+
+/// Paths under `root` that would walk a second copy of files the scan
+/// already reaches through another mount of the same filesystem. That
+/// happens with a bind mount, a btrfs subvolume that is also visible
+/// inside a mounted top-level volume, or openSUSE's
+/// `/.snapshots/<n>/snapshot` when `<n>` is the running root.
+///
+/// For two walked mounts A and B on one device, where B's mountinfo root
+/// is inside A's, B's files also appear inside A at A + (root(B) − root(A)).
+/// That second path is pruned and B's mount point is kept, so `/home`
+/// wins over `/@home` and a bind's mount point wins over its source. If
+/// B is mounted inside that second path, a bind of a folder into itself,
+/// B's mount point is pruned instead. Two mounts of the same subtree keep
+/// the one mounted first. Sibling subvolumes, such as `/` from `@` and
+/// `/home` from `@home`, never overlap and are both walked.
+#[cfg(target_os = "linux")]
+fn duplicate_mount_paths(mounts: &[LinuxMount], root: &str) -> HashSet<String> {
+    let root = trim_mount_point(root);
+    // A later mount on the same point hides the earlier one.
+    let last_at: HashMap<&str, usize> = mounts
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (m.point.as_str(), i))
+        .collect();
+    let visible: Vec<(usize, &LinuxMount)> = mounts
+        .iter()
+        .enumerate()
+        .filter(|(i, m)| last_at[m.point.as_str()] == *i)
+        .collect();
+    let Some(&(home_index, home)) = visible
+        .iter()
+        .filter(|(_, m)| root == m.point || path_is_under(&m.point, root))
+        .max_by_key(|(_, m)| m.point.len())
+    else {
+        return HashSet::new();
+    };
+    // The walk never gets to a mount under another filesystem's mount or
+    // a skipped prefix, or to one a later mount above it covers. Pruning
+    // its source would leave those files counted nowhere.
+    let reachable = |i: usize, m: &LinuxMount| {
+        !should_skip_linux_path(Path::new(&m.point))
+            && !visible.iter().any(|(j, above)| {
+                path_is_under(&above.point, &m.point)
+                    && (*j > i || (above.dev != home.dev && path_is_under(root, &above.point)))
+            })
+    };
+    // Each same-device mount the walk enters: mountinfo order, where the
+    // walk enters it, and the path inside the filesystem found there.
+    let walked: Vec<(usize, String, String)> = visible
+        .iter()
+        .filter(|(i, m)| {
+            *i == home_index
+                || (m.dev == home.dev && path_is_under(root, &m.point) && reachable(*i, m))
+        })
+        .map(|(i, m)| {
+            let entry = if *i == home_index { root.to_string() } else { m.point.clone() };
+            let inside = relative_mount_path(&entry, &m.point).unwrap_or("");
+            (*i, entry.clone(), join_mount_path(&m.root, inside))
+        })
+        .collect();
+
+    let mut duplicates = HashSet::new();
+    for (a_index, a_entry, a_fs) in &walked {
+        for (b_index, b_entry, b_fs) in &walked {
+            if a_index == b_index {
+                continue;
+            }
+            let Some(rel) = relative_mount_path(b_fs, a_fs) else {
+                continue;
+            };
+            if rel.is_empty() && a_index < b_index {
+                continue;
+            }
+            let copy = join_mount_path(a_entry, rel);
+            // Another mount inside A, at or above `copy`, covers it: A's
+            // own files there are never reached.
+            let covered = visible.iter().any(|(_, m)| {
+                path_is_under(a_entry, &m.point)
+                    && (m.point == copy || path_is_under(&m.point, &copy))
+            });
+            if covered {
+                continue;
+            }
+            // `copy` itself is B's mount point only when B is bound onto
+            // itself, and the check above already skipped that.
+            if path_is_under(&copy, b_entry) {
+                duplicates.insert(b_entry.clone());
+            } else {
+                duplicates.insert(copy);
+            }
+        }
+    }
+    // Paths under another pruned path are never reached anyway.
+    let nested: Vec<String> = duplicates
+        .iter()
+        .filter(|path| duplicates.iter().any(|other| path_is_under(other, path)))
+        .cloned()
+        .collect();
+    for path in nested {
+        duplicates.remove(&path);
+    }
+    duplicates
+}
+
+/// Mount paths a Linux walk skips: other filesystems, and second copies
+/// of this one.
+#[cfg(target_os = "linux")]
+struct LinuxMountPrunes {
+    foreign: HashSet<String>,
+    duplicates: HashSet<String>,
+}
+
+#[cfg(target_os = "linux")]
+fn load_linux_mount_prunes(root: &Path) -> LinuxMountPrunes {
     let text = match std::fs::read_to_string("/proc/self/mountinfo") {
         Ok(text) => text,
         Err(err) => {
             eprintln!(
                 "[diskhound-native-scanner] linux: could not read mountinfo ({err}) — scan may cross into other disks"
             );
-            return HashSet::new();
+            return LinuxMountPrunes {
+                foreign: HashSet::new(),
+                duplicates: HashSet::new(),
+            };
         }
     };
-    foreign_mount_points(&parse_mountinfo(&text), &normalize_path(root))
+    let mounts = parse_mountinfo(&text);
+    let root = normalize_path(root);
+    let duplicates = duplicate_mount_paths(&mounts, &root);
+    if !duplicates.is_empty() {
+        let mut listed: Vec<&String> = duplicates.iter().collect();
+        listed.sort();
+        eprintln!(
+            "[diskhound-native-scanner] linux: skipping second copies reached through another mount: {listed:?}"
+        );
+    }
+    LinuxMountPrunes {
+        foreign: foreign_mount_points(&mounts, &root),
+        duplicates,
+    }
 }
 
 #[cfg(not(windows))]
@@ -1318,11 +1613,7 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
     // The incremental top-N sort on every ancestor of every file was
     // the CPU cost of a Linux walk once the filesystem was warm.
     state.defer_hottest_dir_ranking = true;
-    if let Some(baseline) = state.baseline.as_ref() {
-        if let Some(total) = baseline.dir_file_counts.get(&state.root_path_string) {
-            state.expected_total_files = Some(*total);
-        }
-    }
+    state.expected_total_files = state.input.expected_total_files;
 
     // Parallelism: jwalk's default is serial. We explicitly enable
     // parallelism via rayon's thread pool (default 4-16 threads,
@@ -1350,11 +1641,16 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
     // macOS keeps the old walk: firmlinks make st_dev / mount ids lie
     // about where user files live, and this bug is the Linux one.
     #[cfg(target_os = "linux")]
-    let foreign_mounts = load_foreign_mount_points(root_path);
+    let mount_prunes = load_linux_mount_prunes(root_path);
     #[cfg(target_os = "linux")]
     let pruned_mounts = Arc::new(AtomicUsize::new(0));
     #[cfg(target_os = "linux")]
     let pruned_mounts_for_walk = Arc::clone(&pruned_mounts);
+    #[cfg(target_os = "linux")]
+    let pruned_duplicates = Arc::new(AtomicUsize::new(0));
+    #[cfg(target_os = "linux")]
+    let pruned_duplicates_for_walk = Arc::clone(&pruned_duplicates);
+    let io_for_walk = Arc::clone(&state.io);
 
     let walker = WalkDir::new(root_path)
         .sort(false)
@@ -1368,8 +1664,16 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
         //
         // Also drop mount points that are a different filesystem than
         // the scan root (NTFS at /mnt/windows, tmpfs, FUSE). Same-pool
-        // btrfs subvolumes stay. See foreign_mount_points.
-        .process_read_dir(move |_depth, _path, _state, children| {
+        // btrfs subvolumes stay. See foreign_mount_points. And drop the
+        // second path to files another mount of this filesystem already
+        // shows. See duplicate_mount_paths.
+        .process_read_dir(move |depth, _path, _state, children| {
+            // jwalk calls this once per read_dir, with the depth of the
+            // directory read, and once more up front for the root entry
+            // itself, with no depth and no read.
+            if depth.is_some() {
+                io_for_walk.count_readdir();
+            }
             children.retain(|child_result| {
                 let Ok(child) = child_result else {
                     return true; // Let the outer loop handle read errors.
@@ -1380,8 +1684,12 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
                 #[cfg(target_os = "linux")]
                 if child.file_type().is_dir() {
                     let point = trim_mount_point(&normalize_path(&child.path())).to_string();
-                    if foreign_mounts.contains(&point) {
+                    if mount_prunes.foreign.contains(&point) {
                         pruned_mounts_for_walk.fetch_add(1, Ordering::Relaxed);
+                        return false;
+                    }
+                    if mount_prunes.duplicates.contains(&point) {
+                        pruned_duplicates_for_walk.fetch_add(1, Ordering::Relaxed);
                         return false;
                     }
                 }
@@ -1428,6 +1736,9 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
         };
 
         if entry.read_children_error.is_some() {
+            // jwalk skips process_read_dir for a failed read_dir, but it
+            // was still a listing attempt, as a failed FindFirstFileExW is.
+            state.io.count_readdir();
             state.skipped_entries += 1;
         }
 
@@ -1439,8 +1750,9 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
             // always walks — but we at least keep the output format
             // consistent so the JS worker (which does implement Phase 1)
             // can read it back.
-            if let (Some(writer), Ok(meta)) = (state.index_writer.as_mut(), entry.metadata()) {
-                if let Ok(modified) = meta.modified() {
+            if let Some(writer) = state.index_writer.as_mut() {
+                state.io.count_stat();
+                if let Ok(Ok(modified)) = entry.metadata().map(|meta| meta.modified()) {
                     let dir_path = normalize_path(entry.path().as_path());
                     let _ = writer.write_dir_entry(&dir_path, unix_timestamp_ms(modified));
                 }
@@ -1454,6 +1766,7 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
             continue;
         }
 
+        state.io.count_stat();
         let metadata = match entry.metadata() {
             Ok(metadata) => metadata,
             Err(_) => {
@@ -1488,16 +1801,22 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
     }
 
     #[cfg(target_os = "linux")]
-    let pruned = pruned_mounts.load(Ordering::Relaxed);
+    let (pruned, duplicates) = (
+        pruned_mounts.load(Ordering::Relaxed),
+        pruned_duplicates.load(Ordering::Relaxed),
+    );
     #[cfg(not(target_os = "linux"))]
-    let pruned = 0usize;
+    let (pruned, duplicates) = (0usize, 0usize);
     eprintln!(
-        "[diskhound-native-scanner] linux: walk done in {} ms (files={}, dirs={}, skipped={}, foreign_mounts_pruned={})",
+        "[diskhound-native-scanner] linux: walk done in {} ms (files={}, dirs={}, skipped={}, foreign_mounts_pruned={}, duplicate_mounts_pruned={}, readdir_calls={}, stat_calls={})",
         walk_started.elapsed().as_millis(),
         state.files_visited,
         state.directories_visited,
         state.skipped_entries,
         pruned,
+        duplicates,
+        state.io.readdir_calls(),
+        state.io.stat_calls(),
     );
     eprintln!(
         "[diskhound-native-scanner] hardlinks: {} extra links counted once ({} bytes), {} inodes with links outside the scan",
@@ -1552,18 +1871,23 @@ fn scan_windows(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
         state.expected_total_files = None;
     }
 
-    if std::env::var("DISKHOUND_NO_PARALLEL").is_err() {
+    walk_windows(root_path, state, std::env::var("DISKHOUND_NO_PARALLEL").is_err())
+}
+
+/// The FindFirstFile walkers. The parallel one goes first when allowed; if
+/// it decides threads won't help, the sequential one carries on from where
+/// it stopped. Either way the root is statted, listed and recorded once.
+#[cfg(windows)]
+fn walk_windows(root_path: &Path, state: &mut ScanState, parallel: bool) -> Result<(), String> {
+    let stack = if parallel {
         match try_scan_windows_parallel(root_path, state) {
             ParallelDispatch::Ran(result) => return result,
-            ParallelDispatch::FellThrough => {
-                // Fall through to the sequential path. This is the
-                // early-out case where the parallel wrapper decided
-                // threading wasn't worth it (e.g. single subdir under
-                // root) — carry on without it.
-            }
+            ParallelDispatch::FellThrough { stack } => stack,
         }
-    }
-    scan_windows_sequential(root_path, state)
+    } else {
+        vec![(root_path.to_path_buf(), None)]
+    };
+    scan_windows_sequential(state, stack)
 }
 
 /// Attempt an MFT-based scan. Returns Ok(true) on success, Ok(false) on
@@ -1635,7 +1959,7 @@ fn emit_mft_records_into_state(
     // Count the root itself the same way the walker does — consumers
     // expect `directories_visited >= 1` on any successful scan.
     state.directories_visited += 1;
-    let root_mtime = directory_mtime(state.input.root_path.as_path()).unwrap_or(0);
+    let root_mtime = directory_mtime(state.input.root_path.as_path(), &state.io).unwrap_or(0);
     if let Some(writer) = state.index_writer.as_mut() {
         let _ = writer.write_dir_entry(&state.root_path_string, root_mtime);
     }
@@ -2275,8 +2599,13 @@ fn split_parent_and_name(full_path: &str) -> (String, String) {
     }
 }
 
+/// Walks `stack` depth-first. A fresh scan passes just the root; the
+/// parallel walker's fall-through passes what it left undone.
 #[cfg(windows)]
-fn scan_windows_sequential(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
+fn scan_windows_sequential(
+    state: &mut ScanState,
+    mut stack: Vec<(PathBuf, Option<u64>)>,
+) -> Result<(), String> {
     // The walker's own "indexing" phase starts here. UI uses
     // scan_phase to decide copy and which progress bar to show.
     // Pre-0.5.3 the walker left scan_phase at Starting, which made
@@ -2305,7 +2634,6 @@ fn scan_windows_sequential(root_path: &Path, state: &mut ScanState) -> Result<()
     // during enumeration so we don't need to `metadata()` them again at
     // pop time. Only the initial root has no hint — we pay one syscall
     // for it, not 1.2 million.
-    let mut stack: Vec<(PathBuf, Option<u64>)> = vec![(root_path.to_path_buf(), None)];
     // Decide up front whether any directory has a chance of being
     // inheritance-matched. When the baseline is absent or carries no
     // dir_mtimes (the case when the prior scan was a USN-journal
@@ -2340,7 +2668,7 @@ fn scan_windows_sequential(root_path: &Path, state: &mut ScanState) -> Result<()
                 m
             }
             None if !baseline_can_inherit => 0, // nothing to compare against
-            None => directory_mtime(&directory_path).unwrap_or(0),
+            None => directory_mtime(&directory_path, &state.io).unwrap_or(0),
         };
 
         // Streaming-baseline inheritance path: if this dir's mtime matches
@@ -2537,9 +2865,11 @@ enum ParallelDispatch {
     /// Parallel walker ran to completion (or cancellation). Use this result.
     Ran(Result<(), String>),
     /// Parallel walker decided threading wasn't worth it for this scan
-    /// (root has too few direct subdirs). Caller should fall back to
-    /// the sequential path.
-    FellThrough,
+    /// (root unchanged since the baseline, or too few direct subdirs).
+    /// The sequential walker carries on from `stack`: the root itself
+    /// with its mtime, or the root's subdirectories once the root has
+    /// been recorded. Nothing in `stack` has been recorded yet.
+    FellThrough { stack: Vec<(PathBuf, Option<u64>)> },
 }
 
 #[cfg(windows)]
@@ -2670,6 +3000,7 @@ struct ParallelSharedCtx {
     // post-walk; progress emissions use state.files_visited which is
     // maintained synchronously by main as it processes messages.
     mtime_syscalls_saved: std::sync::atomic::AtomicU64,
+    io: Arc<IoStats>,
 }
 
 /// Top-level entry for the parallel Windows scanner. Returns
@@ -2677,56 +3008,41 @@ struct ParallelSharedCtx {
 /// has ≤ 1 direct subdir); the caller then runs the sequential path.
 #[cfg(windows)]
 fn try_scan_windows_parallel(root_path: &Path, state: &mut ScanState) -> ParallelDispatch {
-    // Step 1 — enumerate the root synchronously. We need its direct
-    // subdirs to seed the work queue, and we want root's direct
-    // *files* bookkept on main before any workers start (keeps the
-    // "root is the first thing recorded" property the sequential path
-    // already has). Any failure here bails to the sequential fallback
-    // so we don't lose the scan.
-    state.directories_visited += 1;
-    if let Err(err) = maybe_emit_progress(state) {
-        eprintln!("[diskhound-native-scanner] parallel: progress emit failed pre-walk: {err}");
-    }
-
+    // Step 1 — the root, on main. We need its direct subdirs to seed
+    // the work queue, and root's direct *files* are bookkept on main
+    // before any workers start (keeps the "root is the first thing
+    // recorded" property the sequential path already has).
+    //
+    // Nothing is recorded until the root is known to need a walk, and
+    // a fall-through hands the sequential walker only what is left, so
+    // the root is statted, listed and counted once whichever walker
+    // finishes the scan.
     let root_path_str = normalize_path(root_path);
     // Root's own mtime: cheap (one syscall), always needed for the
     // index's {t:"d"} entry so the next scan can inheritance-match.
-    let root_mtime = directory_mtime(root_path).unwrap_or(0);
+    let root_mtime = directory_mtime(root_path, &state.io).unwrap_or(0);
 
-    // Check root inheritance inline — same logic as the sequential
-    // path's top-of-loop block.
-    let root_inheritance = state.baseline.as_ref().and_then(|baseline| {
-        let baseline_mtime = *baseline.dir_mtimes.get(&root_path_str)?;
-        if root_mtime.abs_diff(baseline_mtime) >= 2 {
-            return None;
-        }
-        let inherited_file_count = baseline
-            .dir_file_counts
+    // Same mtime test as the sequential path's top-of-loop block. An
+    // unchanged root inherits the whole drive: no walk, no threads. The
+    // sequential path handles that and takes the mtime with it.
+    let root_unchanged = state.baseline.as_ref().is_some_and(|baseline| {
+        baseline
+            .dir_mtimes
             .get(&root_path_str)
-            .copied()
-            .unwrap_or(0);
-        let inherited_bytes = baseline
-            .dir_total_sizes
-            .get(&root_path_str)
-            .copied()
-            .unwrap_or(0);
-        let subtree_dir_entries: Vec<(String, u64)> = baseline
-            .subtree_dirs(&root_path_str)
-            .into_iter()
-            .filter_map(|sub| baseline.dir_mtimes.get(&sub).map(|m| (sub, *m)))
-            .collect();
-        Some((inherited_file_count, inherited_bytes, subtree_dir_entries))
+            .is_some_and(|baseline_mtime| root_mtime.abs_diff(*baseline_mtime) < 2)
     });
-
-    if let Some((inherited_count, inherited_bytes, subtree_dir_entries)) = root_inheritance {
-        // Whole drive unchanged — no walk at all, no need for threads.
-        // Run the sequential path which already handles this cleanly.
+    if root_unchanged {
         eprintln!(
-            "[diskhound-native-scanner] parallel: root inheritance hit ({} files inherited) — deferring to sequential path",
-            inherited_count
+            "[diskhound-native-scanner] parallel: root unchanged since the baseline — inheriting it on the sequential path"
         );
-        let _ = (inherited_bytes, subtree_dir_entries);
-        return ParallelDispatch::FellThrough;
+        return ParallelDispatch::FellThrough {
+            stack: vec![(root_path.to_path_buf(), Some(root_mtime))],
+        };
+    }
+
+    state.directories_visited += 1;
+    if let Err(err) = maybe_emit_progress(state) {
+        eprintln!("[diskhound-native-scanner] parallel: progress emit failed pre-walk: {err}");
     }
 
     // Write root's own dir entry so the new index covers the root
@@ -2736,21 +3052,21 @@ fn try_scan_windows_parallel(root_path: &Path, state: &mut ScanState) -> Paralle
     }
 
     // Enumerate root, bookkeep direct files on main, collect subdirs.
+    // Only a failed stdout write gets an Err here, and the sequential
+    // walker would hit the same one.
     let mut root_children: Vec<(PathBuf, Option<u64>)> = Vec::new();
     if let Err(err) = enumerate_windows_directory(root_path, state, &mut root_children) {
-        eprintln!(
-            "[diskhound-native-scanner] parallel: root enumerate failed: {err} — falling back to sequential"
-        );
-        return ParallelDispatch::FellThrough;
+        return ParallelDispatch::Ran(Err(err));
     }
 
-    // Not worth threading overhead for tiny trees.
+    // Not worth threading overhead for tiny trees. The root is done;
+    // the sequential walker takes its subdirectories from here.
     if root_children.len() < 2 {
         eprintln!(
-            "[diskhound-native-scanner] parallel: root has {} subdir(s); falling back to sequential",
+            "[diskhound-native-scanner] parallel: root has {} subdir(s); the sequential walker takes it from here",
             root_children.len()
         );
-        return ParallelDispatch::FellThrough;
+        return ParallelDispatch::FellThrough { stack: root_children };
     }
 
     // Step 2 — set up parallel walk.
@@ -2788,7 +3104,7 @@ fn try_scan_windows_parallel(root_path: &Path, state: &mut ScanState) -> Paralle
     for (child_path, child_mtime_hint) in root_children.drain(..) {
         let child_path_str = normalize_path(&child_path);
         let current_mtime =
-            child_mtime_hint.unwrap_or_else(|| directory_mtime(&child_path).unwrap_or(0));
+            child_mtime_hint.unwrap_or_else(|| directory_mtime(&child_path, &state.io).unwrap_or(0));
 
         // Inheritance check on main (mirrors the per-worker logic).
         let inheritance = if baseline_can_inherit {
@@ -2921,6 +3237,7 @@ fn try_scan_windows_parallel(root_path: &Path, state: &mut ScanState) -> Paralle
         baseline: baseline_arc.clone(),
         baseline_can_inherit,
         mtime_syscalls_saved: std::sync::atomic::AtomicU64::new(0),
+        io: Arc::clone(&state.io),
     });
 
     // Bounded channel so workers throttle to main's processing rate
@@ -3155,7 +3472,7 @@ fn parallel_worker_loop(
                 m
             }
             None if !shared.baseline_can_inherit => 0,
-            None => directory_mtime(&directory_path).unwrap_or(0),
+            None => directory_mtime(&directory_path, &shared.io).unwrap_or(0),
         };
 
         // Phase-1 inheritance check — same shape as the sequential
@@ -3206,7 +3523,9 @@ fn parallel_worker_loop(
         // reported once via a Skipped message (same semantics as the
         // sequential scanner).
         let mut children: Vec<(PathBuf, Option<u64>)> = Vec::new();
-        if let Err(err) = enumerate_windows_directory_parallel(&directory_path, &tx, &mut children) {
+        if let Err(err) =
+            enumerate_windows_directory_parallel(&directory_path, &tx, &mut children, &shared.io)
+        {
             eprintln!(
                 "[diskhound-native-scanner] parallel: enumerate {} failed: {err}",
                 directory_path.display()
@@ -3229,11 +3548,13 @@ fn enumerate_windows_directory_parallel(
     directory_path: &Path,
     tx: &crossbeam_channel::Sender<ParallelWorkerMessage>,
     children: &mut Vec<(PathBuf, Option<u64>)>,
+    io: &IoStats,
 ) -> Result<(), String> {
     let search_pattern = windows_search_pattern(directory_path);
     let wide_search_pattern = windows_wide_string(&search_pattern);
     let mut find_data = unsafe { std::mem::zeroed::<WIN32_FIND_DATAW>() };
 
+    io.count_readdir();
     let handle = unsafe {
         FindFirstFileExW(
             wide_search_pattern.as_ptr(),
@@ -3267,7 +3588,7 @@ fn enumerate_windows_directory_parallel(
                 );
                 children.push((directory_path.join(&file_name), Some(child_mtime)));
             } else {
-                let file_size = windows_find_data_occupancy(directory_path, &file_name, &find_data);
+                let file_size = windows_find_data_occupancy(directory_path, &file_name, &find_data, io);
                 let file_record = ScanFileRecord {
                     path: normalize_path(&directory_path.join(&file_name)),
                     name: file_name.clone(),
@@ -3356,14 +3677,8 @@ fn rollup_directory_bytes(
 
 /// Return a directory's last-write time in Unix ms, or None on failure.
 #[cfg(windows)]
-fn directory_mtime(dir: &Path) -> Option<u64> {
-    let metadata = std::fs::metadata(dir).ok()?;
-    let modified = metadata.modified().ok()?;
-    Some(unix_timestamp_ms(modified))
-}
-
-#[cfg(not(windows))]
-fn directory_mtime(dir: &Path) -> Option<u64> {
+fn directory_mtime(dir: &Path, io: &IoStats) -> Option<u64> {
+    io.count_stat();
     let metadata = std::fs::metadata(dir).ok()?;
     let modified = metadata.modified().ok()?;
     Some(unix_timestamp_ms(modified))
@@ -3375,10 +3690,12 @@ fn enumerate_windows_directory(
     state: &mut ScanState,
     stack: &mut Vec<(PathBuf, Option<u64>)>,
 ) -> Result<(), String> {
+    let io = Arc::clone(&state.io);
     let search_pattern = windows_search_pattern(directory_path);
     let wide_search_pattern = windows_wide_string(&search_pattern);
     let mut find_data = unsafe { std::mem::zeroed::<WIN32_FIND_DATAW>() };
 
+    io.count_readdir();
     let handle = unsafe {
         FindFirstFileExW(
             wide_search_pattern.as_ptr(),
@@ -3419,7 +3736,7 @@ fn enumerate_windows_directory(
               );
               stack.push((directory_path.join(&file_name), Some(child_mtime)));
           } else {
-              let file_size = windows_find_data_occupancy(directory_path, &file_name, &find_data);
+              let file_size = windows_find_data_occupancy(directory_path, &file_name, &find_data, &io);
               let file_record = ScanFileRecord {
                   path: normalize_path(&directory_path.join(&file_name)),
                   name: file_name.clone(),
@@ -3692,6 +4009,7 @@ fn parse_args() -> Result<ScanInput, String> {
     let mut baseline_index: Option<PathBuf> = None;
     let mut folder_tree_output: Option<PathBuf> = None;
     let mut dev_artifacts_output: Option<PathBuf> = None;
+    let mut expected_total_files: Option<u64> = None;
     let mut args = std::env::args().skip(1);
 
     while let Some(argument) = args.next() {
@@ -3742,6 +4060,14 @@ fn parse_args() -> Result<ScanInput, String> {
                     .ok_or_else(|| String::from("Expected a path after --dev-artifacts-output"))?;
                 dev_artifacts_output = Some(PathBuf::from(value));
             }
+            "--expected-files" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| String::from("Expected a number after --expected-files"))?;
+                expected_total_files = Some(
+                    value.parse::<u64>().map_err(|_| format!("Invalid --expected-files: {value}"))?,
+                );
+            }
             unknown => {
                 return Err(format!("Unknown argument: {unknown}"));
             }
@@ -3761,6 +4087,7 @@ fn parse_args() -> Result<ScanInput, String> {
         baseline_index,
         folder_tree_output,
         dev_artifacts_output,
+        expected_total_files,
     })
 }
 
@@ -4475,6 +4802,7 @@ fn windows_find_data_occupancy(
     directory_path: &Path,
     file_name: &str,
     find_data: &WIN32_FIND_DATAW,
+    io: &IoStats,
 ) -> u64 {
     let logical = ((find_data.nFileSizeHigh as u64) << 32) | (find_data.nFileSizeLow as u64);
     let attributes = find_data.dwFileAttributes;
@@ -4485,6 +4813,7 @@ fn windows_find_data_occupancy(
     if attributes & NEED_ALLOCATED == 0 {
         return logical;
     }
+    io.count_stat();
     windows_allocated_size(&directory_path.join(file_name)).unwrap_or(logical)
 }
 
@@ -4611,98 +4940,9 @@ mod index_line_parse_tests {
 #[cfg(all(test, unix))]
 mod unix_hardlink_scan_tests {
     use super::*;
+    use crate::test_support::{test_state, TempTree};
     use std::fs;
     use std::os::unix::fs::MetadataExt;
-
-    struct TempTree(PathBuf);
-
-    impl TempTree {
-        fn new(label: &str) -> Self {
-            let nanos = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            let dir = std::env::temp_dir().join(format!(
-                "diskhound-{label}-{}-{nanos}",
-                std::process::id()
-            ));
-            fs::create_dir_all(&dir).unwrap();
-            // /var → /private/var on macOS; run() scans the canonical root.
-            TempTree(dir.canonicalize().unwrap())
-        }
-
-        fn path(&self, rel: &str) -> PathBuf {
-            self.0.join(rel)
-        }
-
-        fn write(&self, rel: &str, bytes: usize) -> PathBuf {
-            let path = self.path(rel);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(&path, vec![7u8; bytes]).unwrap();
-            path
-        }
-
-        fn link(&self, target: &Path, rel: &str) {
-            let path = self.path(rel);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::hard_link(target, path).unwrap();
-        }
-    }
-
-    impl Drop for TempTree {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn test_state(root: &Path, index_output: &Path) -> ScanState {
-        let root_path_string = normalize_path(root);
-        let index_writer =
-            IndexWriter::create(index_output, None, root_path_string.clone()).unwrap();
-        let mut directory_totals = HashMap::new();
-        directory_totals.insert(
-            root_path_string.clone(),
-            DirectoryHotspot {
-                path: root_path_string.clone(),
-                size: 0,
-                file_count: 0,
-                depth: 0,
-            },
-        );
-        ScanState {
-            input: ScanInput {
-                root_path: root.to_path_buf(),
-                top_file_limit: 100,
-                top_directory_limit: 100,
-                index_output: Some(index_output.to_path_buf()),
-                baseline_index: None,
-                folder_tree_output: None,
-                dev_artifacts_output: None,
-            },
-            root_path_string,
-            started_at_ms: 0,
-            started_at_instant: Instant::now(),
-            files_visited: 0,
-            directories_visited: 0,
-            skipped_entries: 0,
-            bytes_seen: 0,
-            largest_files: Vec::new(),
-            hottest_directories: Vec::new(),
-            directory_totals,
-            extension_totals: HashMap::new(),
-            folder_tree_files: HashMap::new(),
-            last_emit_elapsed_ms: 0,
-            index_writer: Some(index_writer),
-            baseline: None,
-            inherited_prefixes: Vec::new(),
-            inherited_dirs: 0,
-            inherited_files: 0,
-            emit_lite_snapshots: false,
-            scan_phase: ScanPhase::Starting,
-            expected_total_files: None,
-            defer_hottest_dir_ranking: false,
-        }
-    }
 
     /// Scan `root` and return the state plus every file path the index
     /// flagged `h:1`, sorted.
@@ -4797,9 +5037,260 @@ mod unix_hardlink_scan_tests {
     }
 }
 
+/// Each directory is read once, each entry statted once, and each path
+/// lands in the index once. Budgets live in io-budgets.json.
+#[cfg(all(test, unix))]
+mod unix_visit_once_tests {
+    use super::*;
+    use crate::index_line::IndexLineRec;
+    use crate::test_support::*;
+    use std::os::unix::fs::symlink;
+
+    const DIRS: u64 = 4;
+    const FILES: u64 = 4;
+
+    /// Directories root, b, b/d and g (empty). Files a.txt, b/c.txt,
+    /// b/d/e.txt, and b/d/f.txt, a second link to a.txt. Two symlinks the
+    /// walker must neither follow nor stat.
+    fn fixture(tree: &TempTree) -> PathBuf {
+        let a = tree.write("root/a.txt", 1024);
+        tree.write("root/b/c.txt", 2048);
+        tree.write("root/b/d/e.txt", 4096);
+        tree.link(&a, "root/b/d/f.txt");
+        tree.mkdir("root/g");
+        symlink(tree.path("root/b"), tree.path("root/link-dir")).unwrap();
+        symlink(&a, tree.path("root/link-file")).unwrap();
+        tree.path("root")
+    }
+
+    fn assert_walked_once(state: &ScanState, index: &[IndexLineRec]) {
+        assert_eq!(state.directories_visited, DIRS);
+        assert_eq!(state.files_visited, FILES);
+        assert_eq!(state.io.readdir_calls(), DIRS, "one read_dir per directory");
+        assert_eq!(
+            state.io.stat_calls(),
+            FILES + DIRS,
+            "one lstat per file, and one per directory for its index mtime"
+        );
+        let (dirs, files) = assert_listed_once(index);
+        assert_eq!(dirs.len() as u64, DIRS);
+        assert_eq!(files.len() as u64, FILES);
+        assert_each_inode_owned_once(index);
+    }
+
+    #[test]
+    fn walk_reads_each_directory_once_and_stats_each_entry_once() {
+        let tree = TempTree::new("visit-once");
+        let root = fixture(&tree);
+        let index_path = tree.path("index.ndjson.gz");
+
+        let mut state = test_state(&root, &index_path);
+        scan_generic(&root, &mut state).unwrap();
+        let index = finish_index(&mut state, &index_path);
+
+        assert_walked_once(&state, &index);
+        expect_io_budget(
+            "native-unix/walk",
+            measured(
+                "4 dirs, 4 files (one a second hardlink), 2 symlinks: 1 read_dir per dir, \
+                 1 lstat per dir (its index mtime) and per file, nothing for symlinks",
+                &state.io,
+                None,
+            ),
+        );
+    }
+
+    #[test]
+    fn rescan_takes_the_file_count_without_reading_the_baseline() {
+        let tree = TempTree::new("visit-once-rescan");
+        let root = fixture(&tree);
+        let first_index = tree.path("first.ndjson.gz");
+        let mut first = test_state(&root, &first_index);
+        scan_generic(&root, &mut first).unwrap();
+        finish_index(&mut first, &first_index);
+
+        let index_path = tree.path("rescan.ndjson.gz");
+        let input = ScanInput {
+            baseline_index: Some(first_index.clone()),
+            expected_total_files: Some(FILES),
+            ..scan_input(&root, &index_path)
+        };
+        let io = Arc::new(IoStats::default());
+        let baseline = load_baseline(&input, &io, &normalize_path(&root), 0, Instant::now());
+        assert!(baseline.is_none(), "the Unix walker never inherits, so it never loads one");
+        let mut state = state_for(input, baseline, io);
+        scan_generic(&root, &mut state).unwrap();
+        let index = finish_index(&mut state, &index_path);
+
+        assert_eq!(state.expected_total_files, Some(FILES));
+        assert_walked_once(&state, &index);
+        expect_io_budget(
+            "native-unix/rescan-with-baseline",
+            measured(
+                "same tree, --baseline-index and --expected-files given: the walk's cost and \
+                 0 baseline passes (was 1 full decompress and parse, only to read the root's \
+                 file count)",
+                &state.io,
+                Some(&first_index),
+            ),
+        );
+    }
+}
+
+/// The FindFirstFile walkers: each directory listed once, the root
+/// statted once, and each path in the index once, whichever walker
+/// finishes the scan.
+#[cfg(all(test, windows))]
+mod windows_visit_once_tests {
+    use super::*;
+    use crate::index_line::IndexLineRec;
+    use crate::test_support::*;
+
+    fn walk(state: &mut ScanState, root: &Path, index_path: &Path) -> Vec<IndexLineRec> {
+        walk_windows(root, state, true).unwrap();
+        finish_index(state, index_path)
+    }
+
+    fn assert_walked_once(state: &ScanState, index: &[IndexLineRec], dirs: u64, files: u64) {
+        assert_eq!(state.directories_visited, dirs);
+        assert_eq!(state.files_visited, files);
+        let (listed_dirs, listed_files) = assert_listed_once(index);
+        assert_eq!(listed_dirs.len() as u64, dirs);
+        assert_eq!(listed_files.len() as u64, files);
+    }
+
+    #[test]
+    fn root_without_subfolders_is_listed_and_recorded_once() {
+        let tree = TempTree::new("win-flat-root");
+        tree.write("root/a.txt", 1024);
+        tree.write("root/b.txt", 2048);
+        tree.write("root/c.txt", 4096);
+        let root = tree.path("root");
+        let index_path = tree.path("index.ndjson.gz");
+
+        let mut state = test_state(&root, &index_path);
+        let index = walk(&mut state, &root, &index_path);
+
+        assert_walked_once(&state, &index, 1, 3);
+        assert_eq!(state.bytes_seen, 1024 + 2048 + 4096);
+        let txt = state.extension_totals.get(".txt").map(|b| b.count);
+        assert_eq!(txt, Some(3));
+        assert_eq!(state.io.readdir_calls(), 1);
+        expect_io_budget(
+            "native-windows/root-without-subfolders",
+            measured(
+                "root with 3 files and no subfolders: 1 listing, 1 stat (root mtime). \
+                 Was 2 listings, with every root file counted and indexed twice",
+                &state.io,
+                None,
+            ),
+        );
+    }
+
+    #[test]
+    fn root_with_one_subfolder_is_listed_and_recorded_once() {
+        let tree = TempTree::new("win-one-subfolder");
+        tree.write("root/a.txt", 1024);
+        tree.write("root/sub/b.txt", 2048);
+        tree.write("root/sub/deeper/c.txt", 4096);
+        let root = tree.path("root");
+        let index_path = tree.path("index.ndjson.gz");
+
+        let mut state = test_state(&root, &index_path);
+        let index = walk(&mut state, &root, &index_path);
+
+        assert_walked_once(&state, &index, 3, 3);
+        assert_eq!(state.bytes_seen, 1024 + 2048 + 4096);
+        assert_eq!(state.io.readdir_calls(), 3);
+        expect_io_budget(
+            "native-windows/root-with-one-subfolder",
+            measured(
+                "3 dirs in a chain, 1 file each: 1 listing per dir, 1 stat (root mtime; \
+                 subfolders take theirs from the parent listing). Was 4 listings, root files twice",
+                &state.io,
+                None,
+            ),
+        );
+    }
+
+    fn parallel_fixture(tree: &TempTree) -> PathBuf {
+        tree.write("root/a.txt", 1024);
+        tree.write("root/x/one.txt", 2048);
+        tree.write("root/y/two.txt", 4096);
+        tree.write("root/y/z/three.txt", 8192);
+        tree.path("root")
+    }
+
+    #[test]
+    fn parallel_walk_lists_each_directory_once() {
+        let tree = TempTree::new("win-parallel");
+        let root = parallel_fixture(&tree);
+        let index_path = tree.path("index.ndjson.gz");
+
+        let mut state = test_state(&root, &index_path);
+        let index = walk(&mut state, &root, &index_path);
+
+        assert_walked_once(&state, &index, 4, 4);
+        assert_eq!(state.io.readdir_calls(), 4);
+        expect_io_budget(
+            "native-windows/parallel",
+            measured(
+                "4 dirs (2 under the root), 4 files: the parallel walker runs; 1 listing per \
+                 dir, 1 stat (root mtime)",
+                &state.io,
+                None,
+            ),
+        );
+    }
+
+    #[test]
+    fn unchanged_root_is_inherited_with_one_stat() {
+        let tree = TempTree::new("win-unchanged-root");
+        let root = parallel_fixture(&tree);
+        let first_index = tree.path("first.ndjson.gz");
+        let mut first = test_state(&root, &first_index);
+        let first_lines = walk(&mut first, &root, &first_index);
+        let (_, first_files) = assert_listed_once(&first_lines);
+
+        let index_path = tree.path("rescan.ndjson.gz");
+        let input = ScanInput {
+            baseline_index: Some(first_index.clone()),
+            ..scan_input(&root, &index_path)
+        };
+        let io = Arc::new(IoStats::default());
+        let baseline = Baseline::load_metadata(&first_index, &io, |_| {});
+        assert!(baseline.is_some());
+        let mut state = state_for(input, baseline, io);
+        let index = walk(&mut state, &root, &index_path);
+
+        assert_eq!(state.inherited_dirs, 1, "the root is inherited whole");
+        assert_walked_once(&state, &index, 4, 4);
+        assert_eq!(assert_listed_once(&index).1, first_files);
+        assert_eq!(state.io.readdir_calls(), 0);
+        expect_io_budget(
+            "native-windows/unchanged-root",
+            measured(
+                "rescan of the parallel tree with nothing changed: 1 stat (root mtime, handed \
+                 to the sequential walker, which used to stat it again), no listings, 2 baseline \
+                 passes (load, then copy the inherited files)",
+                &state.io,
+                Some(&first_index),
+            ),
+        );
+    }
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod linux_mount_tests {
-    use super::{foreign_mount_points, parse_mountinfo, unescape_mountinfo};
+    use super::{duplicate_mount_paths, foreign_mount_points, parse_mountinfo, unescape_mountinfo};
+    use std::collections::HashSet;
+
+    fn duplicates(mountinfo: &str, root: &str) -> Vec<String> {
+        let mut paths: Vec<String> =
+            duplicate_mount_paths(&parse_mountinfo(mountinfo), root).into_iter().collect();
+        paths.sort();
+        paths
+    }
 
     const FIXTURE: &str = "\
 36 35 0:29 / / rw,relatime - btrfs /dev/mapper/root rw\n\
@@ -4839,6 +5330,99 @@ mod linux_mount_tests {
         let mounts = parse_mountinfo(FIXTURE);
         let foreign = foreign_mount_points(&mounts, "/home");
         assert!(foreign.is_empty());
+    }
+
+    #[test]
+    fn a_bind_mount_is_walked_once_through_its_mount_point() {
+        let mountinfo = "\
+125 196 0:66 / /scan rw - tmpfs tmpfs rw\n\
+126 125 0:66 /proj /scan/view rw - tmpfs tmpfs rw\n";
+        assert_eq!(duplicates(mountinfo, "/scan"), vec!["/scan/proj"]);
+        // Scans that reach only one copy prune nothing.
+        assert!(duplicates(mountinfo, "/scan/proj").is_empty());
+        assert!(duplicates(mountinfo, "/scan/view").is_empty());
+    }
+
+    #[test]
+    fn sibling_subvolumes_are_both_walked() {
+        // Fedora and Ubuntu: / is subvolume root (or @), /home is home (or @home).
+        let mountinfo = "\
+30 1 0:29 /root / rw - btrfs /dev/nvme0n1p3 rw\n\
+31 30 0:29 /home /home rw - btrfs /dev/nvme0n1p3 rw\n\
+32 30 0:29 /var /var rw - btrfs /dev/nvme0n1p3 rw\n";
+        assert!(duplicates(mountinfo, "/").is_empty());
+    }
+
+    #[test]
+    fn subvolumes_inside_a_mounted_top_level_volume_are_walked_at_their_mount_points() {
+        let found = duplicates(FIXTURE, "/");
+        assert_eq!(found, vec!["/@home", "/@log"]);
+        assert!(duplicates(FIXTURE, "/home").is_empty());
+        // Other disks are foreign_mount_points' job, not duplicates.
+        assert!(!found.iter().any(|p| p.starts_with("/mnt")));
+    }
+
+    #[test]
+    fn opensuse_root_snapshot_is_not_walked_again_under_snapshots() {
+        let mountinfo = "\
+60 1 0:40 /@/.snapshots/1/snapshot / rw - btrfs /dev/vda2 rw\n\
+61 60 0:40 /@/.snapshots /.snapshots rw - btrfs /dev/vda2 rw\n\
+62 60 0:40 /@/home /home rw - btrfs /dev/vda2 rw\n";
+        assert_eq!(duplicates(mountinfo, "/"), vec!["/.snapshots/1/snapshot"]);
+    }
+
+    #[test]
+    fn a_folder_bound_inside_itself_is_skipped_at_the_inner_mount() {
+        let mountinfo = "\
+20 1 8:1 / / rw - ext4 /dev/sda1 rw\n\
+21 20 8:1 /data /data/sub/loop rw - ext4 /dev/sda1 rw\n";
+        assert_eq!(duplicates(mountinfo, "/"), vec!["/data/sub/loop"]);
+        assert_eq!(duplicates(mountinfo, "/data"), vec!["/data/sub/loop"]);
+    }
+
+    #[test]
+    fn the_same_folder_bound_twice_keeps_the_first_mount() {
+        let mountinfo = "\
+20 1 8:1 / / rw - ext4 /dev/sda1 rw\n\
+21 20 8:1 /data/x /mnt/a rw - ext4 /dev/sda1 rw\n\
+22 20 8:1 /data/x /mnt/b rw - ext4 /dev/sda1 rw\n\
+23 20 8:1 / /mnt/whole rw - ext4 /dev/sda1 rw\n";
+        assert_eq!(duplicates(mountinfo, "/"), vec!["/data/x", "/mnt/b", "/mnt/whole"]);
+    }
+
+    #[test]
+    fn a_folder_bound_onto_itself_is_walked_once_without_pruning() {
+        let mountinfo = "\
+20 1 8:1 / / rw - ext4 /dev/sda1 rw\n\
+21 20 8:1 /srv /srv rw - ext4 /dev/sda1 rw\n";
+        assert!(duplicates(mountinfo, "/").is_empty());
+    }
+
+    #[test]
+    fn a_mount_the_walk_never_reaches_prunes_nothing() {
+        // /tmp/x sits under a tmpfs, and /mnt/y is covered by the tmpfs
+        // mounted on /mnt after it. Neither is walked, so /data/x and
+        // /data/y are the only way to those files.
+        let mountinfo = "\
+20 1 8:1 / / rw - ext4 /dev/sda1 rw\n\
+21 20 0:50 / /tmp rw - tmpfs tmpfs rw\n\
+22 21 8:1 /data/x /tmp/x rw - ext4 /dev/sda1 rw\n\
+23 20 8:1 /data/y /mnt/y rw - ext4 /dev/sda1 rw\n\
+24 20 0:51 / /mnt rw - tmpfs tmpfs rw\n";
+        let found: HashSet<String> = duplicate_mount_paths(&parse_mountinfo(mountinfo), "/");
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn a_copy_under_a_foreign_mount_is_already_out_of_the_walk() {
+        let mountinfo = "\
+20 1 8:1 / / rw - ext4 /dev/sda1 rw\n\
+21 20 0:50 / /data rw - tmpfs tmpfs rw\n\
+22 20 8:1 /data/x /mnt/x rw - ext4 /dev/sda1 rw\n";
+        // /data on the root disk is hidden under the tmpfs, so /mnt/x is
+        // the only way to its files.
+        let found: HashSet<String> = duplicate_mount_paths(&parse_mountinfo(mountinfo), "/");
+        assert!(found.is_empty(), "{found:?}");
     }
 
     #[test]
