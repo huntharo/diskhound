@@ -14,6 +14,7 @@ import type {
   FullDiffWorkerRequest,
   FullDiffWorkerResponse,
 } from "./fullDiffWorkerProtocol";
+import { BinaryHeap, TopK } from "./topK";
 
 interface FileIndexRecord {
   p: string;
@@ -84,13 +85,13 @@ async function streamFileIndexRecords(
 
 const SORT_CHUNK = 120_000;
 
-interface SortedRec {
+export interface SortedRec {
   key: string;
   p: string;
   s: number;
 }
 
-async function writeSortedChunk(records: SortedRec[], dest: string): Promise<void> {
+export async function writeSortedChunk(records: SortedRec[], dest: string): Promise<void> {
   records.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   await FSP.mkdir(Path.dirname(dest), { recursive: true });
   const lines = records.map((rec) => JSON.stringify(rec)).join("\n") + "\n";
@@ -111,21 +112,26 @@ async function* readSortedChunk(filePath: string): AsyncGenerator<SortedRec> {
   }
 }
 
-async function* mergeSortedChunks(chunkPaths: string[]): AsyncGenerator<SortedRec> {
+/**
+ * K-way merge of sorted chunk files. The chunk heads sit in a heap, so
+ * each record costs O(log K) key comparisons rather than a scan of every
+ * head. Equal keys come out in chunk order.
+ */
+export async function* mergeSortedChunks(chunkPaths: string[]): AsyncGenerator<SortedRec> {
   const iters = chunkPaths.map((p) => readSortedChunk(p));
-  const heads: Array<IteratorResult<SortedRec> | null> = await Promise.all(
-    iters.map((it) => it.next()),
-  );
-  while (true) {
-    let best = -1;
-    for (let i = 0; i < heads.length; i++) {
-      const head = heads[i];
-      if (!head || head.done) continue;
-      if (best < 0 || head.value.key < heads[best]!.value.key) best = i;
-    }
-    if (best < 0) break;
-    yield heads[best]!.value;
-    heads[best] = await iters[best]!.next();
+  const heads = await Promise.all(iters.map((it) => it.next()));
+  const heap = new BinaryHeap<{ rec: SortedRec; chunk: number }>((a, b) => (
+    a.rec.key < b.rec.key || (a.rec.key === b.rec.key && a.chunk < b.chunk)
+  ));
+  heads.forEach((head, chunk) => {
+    if (!head.done) heap.push({ rec: head.value, chunk });
+  });
+  while (heap.size > 0) {
+    const { rec, chunk } = heap.peek()!;
+    yield rec;
+    const next = await iters[chunk]!.next();
+    if (next.done) heap.pop();
+    else heap.replaceTop({ rec: next.value, chunk });
   }
 }
 
@@ -173,59 +179,22 @@ async function safeFileSize(filePath: string): Promise<number | null> {
   }
 }
 
-function createTopChangeAccumulator(limit: number): {
+/**
+ * The `limit` changes with the largest |deltaBytes|. Equal deltas keep
+ * the order they were added (merge order, i.e. by path), like the stable
+ * sort in `diffIndexes`.
+ */
+export function createTopChangeAccumulator(limit: number): {
   add: (change: FullFileChange) => void;
   toSortedArray: () => FullFileChange[];
 } {
-  const cappedLimit = Math.max(0, Math.floor(limit));
-  // Kept sorted ASCENDING by |deltaBytes| — index 0 is the smallest,
-  // so dropping the loser after overflow is O(1) at the head via shift
-  // (Array shift is O(n) in theory but V8 tiny-array shifts stay cheap).
-  //
-  // Using a sorted-insertion strategy instead of Array.sort() on every
-  // add: a full sort is O(n log n) and was the dominant cost on diffs
-  // with millions of changes; a binary insert is O(log n) compare +
-  // O(n) splice, so asymptotically the same per-insert in the worst
-  // case but with far lower constants and no wasted comparisons over
-  // the already-sorted prefix.
-  const changes: FullFileChange[] = [];
-
-  const absDelta = (c: FullFileChange) => Math.abs(c.deltaBytes);
-
+  const top = new TopK<FullFileChange>(limit, (a, b) => Math.abs(b.deltaBytes) - Math.abs(a.deltaBytes));
   return {
     add(change) {
-      if (cappedLimit === 0) {
-        return;
-      }
-
-      const target = absDelta(change);
-
-      // Fast reject: once we're at capacity, anything smaller than the
-      // current smallest top-K entry can be dropped without any work.
-      if (changes.length === cappedLimit && target <= absDelta(changes[0]!)) {
-        return;
-      }
-
-      // Binary search for insertion point (ascending by |delta|).
-      let lo = 0;
-      let hi = changes.length;
-      while (lo < hi) {
-        const mid = (lo + hi) >>> 1;
-        if (absDelta(changes[mid]!) <= target) lo = mid + 1;
-        else hi = mid;
-      }
-      changes.splice(lo, 0, change);
-      if (changes.length > cappedLimit) {
-        changes.shift();
-      }
+      top.offer(change);
     },
     toSortedArray() {
-      // Caller wants descending by |delta|. Clone + reverse beats
-      // re-sorting because the internal array is already sorted
-      // ascending.
-      const out = changes.slice();
-      out.reverse();
-      return out;
+      return top.sorted();
     },
   };
 }
