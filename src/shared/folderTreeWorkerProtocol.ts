@@ -7,7 +7,15 @@
  * scan (7M+ files) doesn't block the main thread's event loop —
  * specifically so setInterval heartbeats ([memory] logs) and IPC
  * handlers keep running while the tree builds.
+ *
+ * It also answers paged "query" requests: one folder read straight from
+ * the sidecar, for scans too big to hold as a tree.
  */
+
+import type {
+  FolderTreeSidecarQueryInput,
+  FolderTreeSidecarQueryResult,
+} from "./folderTreeSidecarQuery";
 
 export type CompactFolderFileRecord = {
   name: string;
@@ -29,17 +37,29 @@ export interface FolderTreeWorkerInput {
   indexPath: string;
 }
 
-export interface FolderTreeWorkerRequest {
-  type: "build";
-  requestId: string;
-  input: FolderTreeWorkerInput;
-}
+export type FolderTreeWorkerRequest =
+  | {
+      type: "build";
+      requestId: string;
+      input: FolderTreeWorkerInput;
+    }
+  | {
+      /** One folder and part of its subtree from the sidecar (paged mode). */
+      type: "query";
+      requestId: string;
+      input: FolderTreeSidecarQueryInput;
+    };
 
 export type FolderTreeWorkerResponse =
   | {
       type: "result";
       requestId: string;
       tree: SerializedFolderTree;
+    }
+  | {
+      type: "query-result";
+      requestId: string;
+      result: FolderTreeSidecarQueryResult;
     }
   | {
       type: "error";

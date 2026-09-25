@@ -78,6 +78,9 @@ export type HardlinkAccounting = "once";
 
 export const UNIX_HARDLINK_ACCOUNTING: HardlinkAccounting = "once";
 
+/** Most child folders one getFolderChildren reply carries (and the Folders tab draws). */
+export const FOLDER_CHILDREN_MAX_DIRS = 200;
+
 export function hardlinkAccountingCompatible(
   a: { hardlinkAccounting?: HardlinkAccounting } | null | undefined,
   b: { hardlinkAccounting?: HardlinkAccounting } | null | undefined,
@@ -1275,6 +1278,18 @@ export interface DiskhoundNativeApi {
     hiddenExcludedCount: number;
     /** Bytes hidden from the rows/files but still counted in totalSize. */
     hiddenExcludedBytes: number;
+    /**
+     * Visible child folders before `dirs` was cut to the largest
+     * FOLDER_CHILDREN_MAX_DIRS.
+     */
+    visibleDirCount?: number;
+    /**
+     * "paged" when the scan is too big to hold in memory and each new
+     * folder is read from disk, which takes a few seconds.
+     */
+    loadMode?: "memory" | "paged";
+    /** Set when Folders can't open this scan at all; shown instead of rows. */
+    unavailableMessage?: string;
   }>;
 
   // Theme

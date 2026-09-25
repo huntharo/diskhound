@@ -15,10 +15,25 @@ export type FolderTreeSidecarEntry = {
   files: { name: string; size: number; modifiedAt: number }[];
 };
 
+const JSON_ESCAPE_RE = /\\(?:u([0-9a-fA-F]{4})|(["\\/bfnrt]))/g;
+const SIMPLE_ESCAPES: Record<string, string> = {
+  '"': '"', "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t",
+};
+/** An odd run of backslashes followed by anything but `\` or `"`. */
+const OTHER_ESCAPE_RE = /(?:^|[^\\])(?:\\\\)*\\[^\\"]/;
+
 function unescapeJsonPath(escaped: string): string {
-  return escaped.indexOf("\\") === -1
-    ? escaped
-    : escaped.replace(/\\\\/g, "\\").replace(/\\"/g, '"');
+  if (escaped.indexOf("\\") === -1) return escaped;
+  // Windows paths only carry `\\`, and two plain replaces are about
+  // twice as fast as the general decoder. Paged folder lookups compare
+  // these keys against the raw sidecar bytes, so `\n`, `\t` and `\u00xx`
+  // must decode too.
+  if (!OTHER_ESCAPE_RE.test(escaped)) {
+    return escaped.replace(/\\\\/g, "\\").replace(/\\"/g, '"');
+  }
+  return escaped.replace(JSON_ESCAPE_RE, (_match, hex: string | undefined, ch: string | undefined) =>
+    hex !== undefined ? String.fromCharCode(parseInt(hex, 16)) : SIMPLE_ESCAPES[ch as string],
+  );
 }
 
 function readJsonString(line: string, quoteIndex: number): { value: string; end: number } | null {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 
-import type { ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
+import { FOLDER_CHILDREN_MAX_DIRS, type ScanFileRecord, type ScanSnapshot } from "../../shared/contracts";
 import { protectedFolderDisplayName } from "../../shared/pathProtection";
 import type { ExcludedFolderActionBlocker } from "../../shared/pathProtection";
 import { formatScanRoot } from "../../shared/pathUtils";
@@ -36,13 +36,17 @@ interface FolderChildrenState {
   totalItemCount: number;
   hiddenExcludedCount: number;
   hiddenExcludedBytes: number;
+  /** Visible child folders, including any main didn't send. */
+  visibleDirCount?: number;
+  loadMode?: "memory" | "paged";
+  unavailableMessage?: string;
 }
 
 // Render caps — the persisted index can yield thousands of direct
 // children on a huge folder, and Preact keeled over at ~4 GB RAM in
 // the wild when rendering them all at once. We surface the top-N
 // and show a footer explaining how many were trimmed.
-const MAX_DIRS_RENDERED = 200;
+const MAX_DIRS_RENDERED = FOLDER_CHILDREN_MAX_DIRS;
 const MAX_FILES_RENDERED = 200;
 
 // ── Path helpers ────────────────────────────────────────────
@@ -190,6 +194,9 @@ export function FolderList({ snapshot, onStartScan, otherScannedRoots = [] }: Pr
         totalItemCount: res?.totalItemCount ?? ((res?.dirs?.length ?? 0) + (res?.files?.length ?? 0)),
         hiddenExcludedCount: res?.hiddenExcludedCount ?? 0,
         hiddenExcludedBytes: res?.hiddenExcludedBytes ?? 0,
+        visibleDirCount: res?.visibleDirCount,
+        loadMode: res?.loadMode,
+        unavailableMessage: res?.unavailableMessage,
       });
       setLoading(false);
       setLoadingStartedAt(null);
@@ -229,12 +236,14 @@ export function FolderList({ snapshot, onStartScan, otherScannedRoots = [] }: Pr
   const folderItemCount = folderMeta.totalItemCount || children.length + looseFiles.length;
 
   // Cap dirs rendered so we never ship thousands of rows into Preact.
-  // Files are already returned top-N from the IPC.
-  const dirsTruncated = children.length > MAX_DIRS_RENDERED;
+  // Main already sends only the largest MAX_DIRS_RENDERED plus the full
+  // count; files are already returned top-N from the IPC.
+  const dirCount = Math.max(folderMeta.visibleDirCount ?? 0, children.length);
   const dirsToRender = useMemo(
-    () => dirsTruncated ? children.slice(0, MAX_DIRS_RENDERED) : children,
-    [children, dirsTruncated],
+    () => children.length > MAX_DIRS_RENDERED ? children.slice(0, MAX_DIRS_RENDERED) : children,
+    [children],
   );
+  const dirsTruncated = dirCount > dirsToRender.length;
 
   const filesTruncated = looseFiles.length > MAX_FILES_RENDERED;
   const filesToRender = useMemo(
@@ -371,12 +380,26 @@ export function FolderList({ snapshot, onStartScan, otherScannedRoots = [] }: Pr
             stages={FOLDER_LOADING_STAGES}
             elapsedSec={loadingElapsedSec}
           />
+        ) : folderMeta.unavailableMessage ? (
+          <div className="empty-view" style={{ paddingTop: 48 }}>
+            <span>{folderMeta.unavailableMessage}</span>
+            {onStartScan && (
+              <button className="action-btn primary" onClick={onStartScan}>
+                Rescan {formatScanRoot(rootPath)}
+              </button>
+            )}
+          </div>
         ) : children.length === 0 && looseFiles.length === 0 && folderMeta.hiddenExcludedCount === 0 ? (
           <div className="empty-view" style={{ paddingTop: 48 }}>
             <span>This folder appears empty in the scan index</span>
           </div>
         ) : (
           <>
+            {folderMeta.loadMode === "paged" && (
+              <div className="folder-paged-note">
+                Large scan: folders are read from disk as you open them, so a new area can take a few seconds.
+              </div>
+            )}
             {folderMeta.hiddenExcludedCount > 0 && (
               <div className="folder-protected-note">
                 {formatCount(folderMeta.hiddenExcludedCount)} protected item{folderMeta.hiddenExcludedCount === 1 ? "" : "s"} hidden, {formatBytes(folderMeta.hiddenExcludedBytes)} still counted here.
@@ -400,7 +423,7 @@ export function FolderList({ snapshot, onStartScan, otherScannedRoots = [] }: Pr
             ))}
             {dirsTruncated && (
               <div className="folder-row folder-row-note">
-                +{formatCount(children.length - MAX_DIRS_RENDERED)} more folders (showing top {MAX_DIRS_RENDERED} by size)
+                +{formatCount(dirCount - dirsToRender.length)} more folders (showing top {dirsToRender.length} by size)
               </div>
             )}
             {looseFiles.length > 0 && (
