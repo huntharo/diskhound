@@ -896,7 +896,9 @@ button, input, select, textarea { font: inherit; }
 
 :root.platform-macos .header {
   /* Hidden title bar leaves the traffic lights over the web content.
-   * 78px clears the three buttons (12px inset, 12px each, 8px gaps). */
+   * They sit at trafficLightPosition (main.ts): 9px inset, 14px buttons
+   * on a 23px pitch, so the group ends at 69px. 78px leaves a 9px gap,
+   * the same as the gap between the buttons. */
   padding-left: 78px;
 }
 

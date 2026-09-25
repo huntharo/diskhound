@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### macOS
+
+- The traffic lights are now vertically centred in the header, in line
+  with the DiskHound name. They used to sit about 3.5pt high.
+
 ### Drive picker and header
 
 - Long mount paths no longer run out of the drive picker cards or crowd
