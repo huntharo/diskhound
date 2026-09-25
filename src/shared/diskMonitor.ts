@@ -31,6 +31,12 @@ let lastDrives: DiskSpaceInfo[] = [];
 let lastDeltas: DiskDelta[] = [];
 let lastCheckedAt = 0;
 let deltaHistory: DiskDelta[] = [];
+/**
+ * The drives df last reported, returned when a df run gives no
+ * table. Seeded from the last check saved before the app quit, so a
+ * mount that is already hung at launch does not empty the list.
+ */
+let lastDfDrives: DiskSpaceInfo[] = [];
 
 // ── Initialization (call once at startup) ───────────────────
 
@@ -42,6 +48,7 @@ export async function initDiskMonitor(dataDir: string): Promise<void> {
     previousDriveMap = new Map(Object.entries(state.previousDrives ?? {}));
     lastFullScanAt = state.lastFullScanAt ?? null;
     lastDrives = Array.isArray(state.lastDrives) ? state.lastDrives : [];
+    lastDfDrives = lastDrives;
     lastDeltas = Array.isArray(state.lastDeltas) ? state.lastDeltas : [];
     lastCheckedAt =
       typeof state.lastCheckedAt === "number" && Number.isFinite(state.lastCheckedAt)
@@ -83,10 +90,14 @@ export async function getDiskSpace(): Promise<DiskSpaceInfo[]> {
   if (process.platform === "win32") {
     return getWindowsDiskSpace();
   }
-  if (process.platform === "darwin") {
-    return getMacDiskSpace();
-  }
-  return getLinuxDiskSpace();
+  const drives = process.platform === "darwin"
+    ? await getMacDiskSpace()
+    : await getLinuxDiskSpace();
+  // df hung on a mount, was killed, or could not start. Until it
+  // recovers, show the drives it last reported instead of none.
+  if (drives === null) return lastDfDrives;
+  lastDfDrives = drives;
+  return drives;
 }
 
 export async function checkDiskDeltas(): Promise<MonitoringSnapshot> {
@@ -278,14 +289,14 @@ const REAL_FILESYSTEM_TYPES = new Set([
   "fuseblk",             // fuse-mounted block devices (exfat-fuse, etc.)
 ]);
 
-async function getLinuxDiskSpace(): Promise<DiskSpaceInfo[]> {
+async function getLinuxDiskSpace(): Promise<DiskSpaceInfo[] | null> {
   // GNU `df -P -k -T` includes the filesystem type
   // as an extra column. Adding -T upfront means we never need to
   // cross-reference /proc/mounts — one subprocess, one parse pass.
   // Column layout with -T:
   //   Filesystem  Type  1024-blocks  Used  Available  Capacity  Mounted on
   const stdout = await runDf(["-P", "-k", "-T"]);
-  return parseLinuxDfOutput(stdout, Date.now());
+  return stdout === null ? null : parseLinuxDfOutput(stdout, Date.now());
 }
 
 export function parseLinuxDfOutput(stdout: string, timestamp = Date.now()): DiskSpaceInfo[] {
@@ -317,49 +328,84 @@ export function parseLinuxDfOutput(stdout: string, timestamp = Date.now()): Disk
   return drives;
 }
 
-async function getMacDiskSpace(): Promise<DiskSpaceInfo[]> {
+async function getMacDiskSpace(): Promise<DiskSpaceInfo[] | null> {
   // macOS/BSD `df` does not support GNU `-T`, so keep this path
   // separate from Linux. `-P -k` gives stable POSIX columns:
   //   Filesystem  1024-blocks  Used  Available  Capacity  Mounted on
   const stdout = await runDf(["-P", "-k"]);
-  return parseMacDfOutput(stdout, Date.now());
+  return stdout === null ? null : parseMacDfOutput(stdout, Date.now());
 }
 
+const DF_TIMEOUT_MS = 10_000;
+
 /**
- * Runs `df` and returns its stdout, or "" if it produced no usable
- * table. GNU df exits 1 when statfs fails on any one mount for a
- * reason other than EACCES or ENOENT, such as an sshfs mount whose
+ * The df run in progress, shared by every caller until its process
+ * exits. The renderer asks for drives every 10 s from several places,
+ * and a df blocked on a hung mount can outlive the timeout's SIGTERM
+ * (FUSE waits out a request its daemon has already read, even after
+ * a fatal signal), so a new df per call would pile them up.
+ */
+let dfRun: Promise<string | null> | null = null;
+
+/**
+ * Runs `df` and returns its stdout, or null if it printed no table
+ * to trust. Resolves within `timeoutMs` even if df never exits.
+ *
+ * GNU df exits 1 when statfs fails on any one mount for a reason
+ * other than EACCES or ENOENT, such as an sshfs mount whose
  * connection dropped (ENOTCONN) or a stale NFS handle (ESTALE). It
  * still prints a row for every other mount, but execFile rejects on
  * the exit status, so those rows are read back from the error.
+ *
+ * `command` and `timeoutMs` are for tests.
  */
-async function runDf(args: string[]): Promise<string> {
-  try {
-    const { stdout } = await execFileAsync("df", args, { timeout: 10_000 });
-    return stdout;
-  } catch (error) {
-    return stdoutOfFailedDf(error);
-  }
+export function runDf(
+  args: string[],
+  command = "df",
+  timeoutMs = DF_TIMEOUT_MS,
+): Promise<string | null> {
+  if (dfRun) return dfRun;
+  const exited = execFileAsync(command, args, { timeout: timeoutMs }).then(
+    ({ stdout }) => stdout,
+    stdoutOfFailedDf,
+  );
+  const run = settleBy(exited, timeoutMs, null);
+  dfRun = run;
+  void exited.then(() => {
+    dfRun = null;
+  });
+  return run;
+}
+
+/** Resolves with what `promise` resolves to, or with `fallback` after `ms`. */
+function settleBy<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), ms);
+    void promise.then((value) => {
+      clearTimeout(timer);
+      resolve(value);
+    });
+  });
 }
 
 /**
- * Returns the stdout carried by an execFile error when df ran to
- * completion and exited non-zero, and "" otherwise. The code is
+ * Returns the table in an execFile error's stdout when df ran to
+ * completion and exited non-zero, and null otherwise. The code is
  * the exit status only when it is a number. A df that the timeout
  * killed has a null code: GNU df prints its table only after it has
  * visited every mount, and anything BSD df wrote before a signal
  * could end partway through a row. A df that could not be started
  * (ENOENT) or overflowed maxBuffer has a string code.
  */
-export function stdoutOfFailedDf(error: unknown): string {
-  if (!error || typeof error !== "object") return "";
+export function stdoutOfFailedDf(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
   const { code, killed, stdout } = error as {
     code?: unknown;
     killed?: unknown;
     stdout?: unknown;
   };
-  if (typeof code !== "number" || killed === true) return "";
-  return typeof stdout === "string" ? stdout : "";
+  if (typeof code !== "number" || killed === true) return null;
+  return typeof stdout === "string" && stdout.trim() !== "" ? stdout : null;
 }
 
 function diskSpaceFromKb(

@@ -42,13 +42,23 @@
   `/Volumes/My  Passport`, keeps both. It used to collapse to one
   space, a path that does not exist.
 
-### Linux drive list with a dead mount
+### Drive list with a dead or hung mount
 
-- One broken mount no longer empties the drive list. When `df` cannot
-  read a mount, such as an sshfs mount whose connection dropped
-  ("Transport endpoint is not connected") or a stale NFS handle, it
-  still lists every other drive but exits with an error, and DiskHound
-  threw the whole list away. It now keeps the drives `df` printed.
+- On Linux, one broken mount no longer empties the drive list. When
+  `df` cannot read a mount, such as an sshfs mount whose connection
+  dropped ("Transport endpoint is not connected") or a stale NFS
+  handle, it still lists every other drive but exits with an error,
+  and DiskHound threw the whole list away. It now keeps the drives
+  `df` printed.
+- A mount that stops answering, such as an NFS share whose server went
+  offline or an sshfs mount whose network dropped, no longer empties
+  the drive list either. `df` waits on that mount until DiskHound gives
+  up after 10 seconds, and DiskHound then showed no drives. It now
+  shows the drives `df` last reported, or the ones saved when the app
+  last quit.
+- DiskHound runs one `df` at a time. It used to start a new one on
+  every refresh, and a `df` stuck on an sshfs mount does not exit even
+  when killed, so they piled up.
 
 ## 0.6.2 — 2026-09-23
 
