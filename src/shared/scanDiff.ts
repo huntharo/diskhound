@@ -1,4 +1,5 @@
 import {
+  hardlinkAccountingCompatible,
   sizeSemanticsCompatible,
   type DirectoryDelta,
   type ExtensionDelta,
@@ -71,6 +72,7 @@ export function computeDiff(
     timeBetweenMs: (current.finishedAt ?? 0) - (baseline.finishedAt ?? 0),
 
     sizeSemanticsChanged: !sizeSemanticsCompatible(baseline, current),
+    hardlinkAccountingChanged: !hardlinkAccountingCompatible(baseline, current),
   };
 }
 

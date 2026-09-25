@@ -13,8 +13,10 @@ import {
   type MainToWorkerMessage,
   type ScanFileRecord,
   type ScanSnapshot,
+  type WorkerToMainMessage,
 } from "../shared/contracts";
 import { occupancyBytes } from "../shared/allocatedSize";
+import { compareEntryNames, HardlinkTracker, type LinkStat } from "../shared/hardlinkTracker";
 import {
   createDevAcc,
   noteDevFile,
@@ -39,6 +41,8 @@ interface Baseline {
   filesByParent: Map<string, BaselineFileRecord[]>;
   /** Set of all directory paths known in the baseline (for subtree inheritance). */
   dirs: Set<string>;
+  /** `h:1` records: the tree had hardlinks when the baseline was written. */
+  extraLinks: number;
 }
 
 // Generous internal caps — large enough that no user reasonably hits them,
@@ -49,6 +53,9 @@ const DEFAULT_TOP_DIRECTORY_LIMIT = 10_000;
 const TOP_EXTENSION_LIMIT = 12;
 const STAT_BATCH_SIZE = 32;
 const SNAPSHOT_INTERVAL_MS = 200;
+// Count a hardlinked file's bytes once (see shared/hardlinkTracker.ts).
+// macOS and Linux only; the Windows JS worker still counts every name.
+const DEDUPE_HARDLINKS = process.platform !== "win32";
 // Scan everything — no exclusion lists. A disk analyzer must be comprehensive.
 
 // Guard: this module may get loaded outside a worker context
@@ -76,7 +83,10 @@ if (parentPort) {
   });
 }
 
-async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
+export async function runScan(
+  input: MainToWorkerMessage["input"],
+  post: (message: WorkerToMainMessage) => void = (message) => parentPort?.postMessage(message),
+): Promise<void> {
   const rootPath = Path.resolve(input.rootPath);
   // Mounts on a different filesystem than rootPath. Same-pool btrfs
   // subvolumes are not in this set. Checked before we descend so a
@@ -100,11 +110,13 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
 
   // Optional full-file index writer (gzipped NDJSON) for real diff tracking
   let indexGzip: ReturnType<typeof createGzip> | null = null;
+  let indexFile: ReturnType<typeof createWriteStream> | null = null;
   if (input.indexOutput) {
     try {
       mkdirSync(Path.dirname(input.indexOutput), { recursive: true });
       indexGzip = createGzip({ level: 6 });
       const outStream = createWriteStream(input.indexOutput);
+      indexFile = outStream;
       // Error listeners BEFORE pipe() — pipe doesn't propagate, and
       // a worker thread crash from an unhandled stream error makes
       // the whole scan look like it disappeared into the void.
@@ -137,8 +149,16 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
   };
   const finalizeIndex = async () => {
     if (indexGzip) {
+      // Wait for the file, not just gzip: "done" lets main read or rename it.
+      const file = indexFile;
       await new Promise<void>((resolve) => {
-        indexGzip!.end(() => resolve());
+        if (!file || file.closed) {
+          indexGzip!.end(() => resolve());
+          return;
+        }
+        file.once("close", () => resolve());
+        file.once("error", () => resolve());
+        indexGzip!.end();
       });
       indexGzip = null;
     }
@@ -163,6 +183,44 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
       baseline = null;
     }
   }
+
+  const hardlinks = DEDUPE_HARDLINKS ? new HardlinkTracker() : null;
+  let hardlinkBytesDeduped = 0;
+  // Phase-1 inheritance skips stat, so it never sees inode numbers. If one
+  // inode's links were split between an inherited subtree and a walked
+  // directory, both would claim the bytes. Inheritance therefore only runs
+  // on hardlink-free trees: a baseline that already flags extra links is
+  // not used, and the first walked file with nlink > 1 turns it off.
+  if (hardlinks && baseline && baseline.extraLinks > 0) {
+    console.error(
+      `[scanWorker] baseline has ${baseline.extraLinks} extra hardlinks — walking every directory`,
+    );
+    baseline = null;
+  }
+  // Files inherited so far, in walk order. When inheritance turns off, their
+  // inodes are read so an inherited name keeps ownership of its bytes.
+  const inheritedPaths: string[] = [];
+  const stopInheriting = async () => {
+    console.error(
+      `[scanWorker] hardlink found after ${inheritedDirs} inherited dirs — walking the rest`,
+    );
+    baseline = null;
+    for (let index = 0; index < inheritedPaths.length; index += STAT_BATCH_SIZE) {
+      const links = await Promise.all(
+        inheritedPaths.slice(index, index + STAT_BATCH_SIZE).map(async (path) => {
+          try {
+            return await linkStat(path, await FS.stat(path));
+          } catch {
+            return null;
+          }
+        }),
+      );
+      for (const link of links) {
+        if (link) hardlinks?.isExtraLink(link);
+      }
+    }
+    inheritedPaths.length = 0;
+  };
 
   directoryTotals.set(rootPath, {
     path: rootPath,
@@ -195,7 +253,7 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
       lastUpdatedAt: now,
     };
 
-    parentPort?.postMessage({
+    post({
       type: status === "done" || status === "cancelled" ? "done" : "progress",
       snapshot,
     });
@@ -240,10 +298,11 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
           bytesSeen += occupancy;
           if (!fileRecord.extraHardlink) {
             upsertRankedFile(largestFiles, fileRecord, TOP_FILE_LIMIT);
-            rollupDirectorySize(rootPath, fileRecord.parentPath, occupancy, directoryTotals, hottestDirectories, TOP_DIRECTORY_LIMIT);
             rollupExtension(extensionTotals, fileRecord.extension, occupancy);
           }
+          rollupDirectorySize(rootPath, fileRecord.parentPath, occupancy, directoryTotals, hottestDirectories, TOP_DIRECTORY_LIMIT);
           writeIndexEntry(fileRecord.path, fileRecord.size, fileRecord.modifiedAt, fileRecord.extraHardlink);
+          if (hardlinks) inheritedPaths.push(fileRecord.path);
         }
         // Also re-emit the directory entries under the subtree so the new
         // index remains self-contained for the next scan's baseline.
@@ -272,6 +331,10 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
     }
 
     const fileEntries: Dirent[] = [];
+    const subdirectories: string[] = [];
+    // Files before subdirectories, each by name: the Rust walker's order,
+    // so both engines pick the same owner for a hardlinked file.
+    entries.sort((left, right) => compareEntryNames(left.name, right.name));
 
     for (const entry of entries) {
       const fullPath = Path.join(directoryPath, entry.name);
@@ -292,7 +355,7 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
             depth: getDepth(rootPath, fullPath),
           });
         }
-        directoryStack.push(fullPath);
+        subdirectories.push(fullPath);
         continue;
       }
 
@@ -301,6 +364,10 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
       }
 
       fileEntries.push(entry);
+    }
+    // The stack pops last-in first, so push in reverse to walk by name.
+    for (let index = subdirectories.length - 1; index >= 0; index -= 1) {
+      directoryStack.push(subdirectories[index]!);
     }
 
     for (let index = 0; index < fileEntries.length; index += STAT_BATCH_SIZE) {
@@ -315,37 +382,56 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
             return null;
           }
 
-          return {
+          const link = hardlinks ? await linkStat(fullPath, stat) : null;
+
+          const fileRecord: ScanFileRecord = {
             path: fullPath,
             name: entry.name,
             parentPath: directoryPath,
             extension: getExtension(entry.name),
             size: occupancyBytes(stat),
             modifiedAt: stat.mtimeMs,
-          } satisfies ScanFileRecord;
+          };
+          return { fileRecord, link };
         }),
       );
 
-      for (const fileRecord of batchResults) {
-        if (!fileRecord) {
+      for (const result of batchResults) {
+        if (!result) {
           skippedEntries += 1;
           continue;
         }
 
-        filesVisited += 1;
-        bytesSeen += fileRecord.size;
+        const { fileRecord, link } = result;
+        // Decide in walk order: batch results keep the sorted order.
+        if (link && link.nlink > 1 && baseline) await stopInheriting();
+        const extraHardlink = link ? hardlinks!.isExtraLink(link) : false;
+        const occupancy = extraHardlink ? 0 : fileRecord.size;
 
-        upsertRankedFile(largestFiles, fileRecord, TOP_FILE_LIMIT);
-        rollupDirectorySize(rootPath, directoryPath, fileRecord.size, directoryTotals, hottestDirectories, TOP_DIRECTORY_LIMIT);
-        rollupExtension(extensionTotals, fileRecord.extension, fileRecord.size);
-        writeIndexEntry(fileRecord.path, fileRecord.size, fileRecord.modifiedAt);
+        filesVisited += 1;
+        bytesSeen += occupancy;
+
+        if (extraHardlink) {
+          hardlinkBytesDeduped += fileRecord.size;
+        } else {
+          upsertRankedFile(largestFiles, fileRecord, TOP_FILE_LIMIT);
+          rollupExtension(extensionTotals, fileRecord.extension, occupancy);
+        }
+        rollupDirectorySize(rootPath, directoryPath, occupancy, directoryTotals, hottestDirectories, TOP_DIRECTORY_LIMIT);
+        writeIndexEntry(fileRecord.path, fileRecord.size, fileRecord.modifiedAt, extraHardlink);
         maybeEmitProgress();
       }
     }
   }
 
   await finalizeIndex();
-  if (baseline) {
+  if (hardlinks && hardlinks.extraLinks > 0) {
+    console.error(
+      `[scanWorker] hardlinks: ${hardlinks.extraLinks} extra links counted once ` +
+      `(${hardlinkBytesDeduped} bytes), ${hardlinks.inodesWithUnseenLinks} inodes with links outside the scan`,
+    );
+  }
+  if (inheritedDirs > 0) {
     // Diagnostic: surfaces whether Phase-1 fast-path actually fired, and
     // how much of the tree we inherited vs. walked. Shows up in the
     // worker thread's stderr (captured by Electron's console).
@@ -364,6 +450,22 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
 
     lastEmitAt = now;
     emitSnapshot("running");
+  }
+}
+
+/**
+ * `dev` / `ino` for the hardlink tracker. Inode numbers past 2^53 lose
+ * precision as JS numbers, so those take a second, bigint stat.
+ */
+async function linkStat(path: string, stat: Stats): Promise<LinkStat> {
+  if (stat.nlink <= 1 || (Number.isSafeInteger(stat.ino) && Number.isSafeInteger(stat.dev))) {
+    return stat;
+  }
+  try {
+    const exact = await FS.stat(path, { bigint: true });
+    return { dev: exact.dev, ino: exact.ino, nlink: stat.nlink };
+  } catch {
+    return stat;
   }
 }
 
@@ -487,6 +589,7 @@ async function loadBaseline(filePath: string): Promise<Baseline> {
   const dirMtimes = new Map<string, number>();
   const filesByParent = new Map<string, ScanFileRecord[]>();
   const dirs = new Set<string>();
+  let extraLinks = 0;
 
   const gunzip = createGunzip();
   const source = createReadStream(filePath);
@@ -515,6 +618,7 @@ async function loadBaseline(filePath: string): Promise<Baseline> {
     }
 
     if (typeof rec.s !== "number" || typeof rec.m !== "number") continue;
+    if (rec.h === 1) extraLinks += 1;
 
     const name = Path.basename(rec.p);
     const parentPath = Path.resolve(Path.dirname(rec.p));
@@ -536,7 +640,7 @@ async function loadBaseline(filePath: string): Promise<Baseline> {
     list.push(fileRecord);
   }
 
-  return { dirMtimes, filesByParent, dirs };
+  return { dirMtimes, filesByParent, dirs, extraLinks };
 }
 
 /**
