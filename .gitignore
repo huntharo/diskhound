@@ -1,7 +1,7 @@
 node_modules/
 dist-electron/
 dist-renderer/
-release/
+/release/
 native/diskhound-native-scanner/target/
 .turbo/
 .vscode/
