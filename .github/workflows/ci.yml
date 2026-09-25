@@ -26,7 +26,10 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           git fetch --depth=1 origin "$BASE_SHA"
-          node scripts/changelog-guard.mjs
+          # Run main's copy. The pull request checkout can replace this
+          # script with one that always exits 0 and edit CHANGELOG.md.
+          git show "$BASE_SHA:scripts/changelog-guard.mjs" > /tmp/changelog-guard.mjs
+          node /tmp/changelog-guard.mjs
 
   typecheck-and-test:
     # A body-only edit does not change the build. A title edit does.
