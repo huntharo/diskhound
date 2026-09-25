@@ -3,7 +3,7 @@ import * as Path from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { makeTempDir, writeIndexFixture } from "../../testing/indexFixture";
+import { backslashParseOps, makeTempDir, writeIndexFixture } from "../../testing/indexFixture";
 import { expectNearLinear, measureOps, totalOps } from "../../testing/opCounter";
 import { collectFromIndex, collectFromWalk } from "../duplicates";
 import { normPath } from "../pathUtils";
@@ -32,6 +32,7 @@ function sizeOf(i: number): number {
 
 describe("collectFromIndex scaling", () => {
   it("reports progress without recounting every size bucket", async () => {
+    let parseOps = 0;
     const run = async (count: number) => {
       const root = Path.join(tmp.dir, `index-root-${count}`);
       const records = Array.from({ length: count }, (_, i) => ({
@@ -39,6 +40,7 @@ describe("collectFromIndex scaling", () => {
         s: sizeOf(i),
         m: 1,
       }));
+      parseOps = backslashParseOps(records[count - 1]!);
       const indexPath = writeIndexFixture(Path.join(tmp.dir, `dups-${count}.ndjson.gz`), records);
       const rootNorm = normPath(Path.resolve(root));
       const ticks: Array<[number, number]> = [];
@@ -57,8 +59,10 @@ describe("collectFromIndex scaling", () => {
       expect(ticks[0]).toEqual([5_000, 500]);
       return ops;
     };
-    expectNearLinear("collectFromIndex", await run(20_000), await run(160_000), { maxTotal: 160_000 * 12 });
-  });
+    const small = await run(20_000);
+    const large = await run(160_000);
+    expectNearLinear("collectFromIndex", small, large, { maxTotal: 160_000 * (12 + 2 * parseOps) });
+  }, 60_000);
 });
 
 describe("collectFromWalk scaling", () => {

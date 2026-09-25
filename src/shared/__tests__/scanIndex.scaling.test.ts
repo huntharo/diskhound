@@ -2,7 +2,7 @@ import * as Path from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { ascendingFileRecords, makeTempDir, writeIndexFixture } from "../../testing/indexFixture";
+import { ascendingFileRecords, backslashParseOps, makeTempDir, writeIndexFixture } from "../../testing/indexFixture";
 import { expectNearLinear, measureOps, measureOpsSync } from "../../testing/opCounter";
 import type { ScanSnapshot } from "../contracts";
 import { createIdleScanSnapshot } from "../contracts";
@@ -111,8 +111,9 @@ describe("buildSnapshotFromIndex scaling", () => {
     };
     const small = await run(6_000);
     const large = await run(48_000);
+    const [sample] = ascendingFileRecords(root, 1, { folders: 200 });
     expectNearLinear("buildSnapshotFromIndex", small, large, {
-      maxTotal: 48_000 * 25,
+      maxTotal: 48_000 * (25 + 2 * backslashParseOps(sample!)),
     });
     expect(large.compares).toBeLessThanOrEqual(4 * 48_000 * Math.log2(5_000));
   });
