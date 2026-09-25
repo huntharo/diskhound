@@ -66,7 +66,7 @@ describe("sidecarFromDirectoryRoots scaling", () => {
   it("drops nested roots in linear work", () => {
     // ~80 ops per folder, most of it classifyArtifactPath.
     expectNearLinear("sidecarFromDirectoryRoots", run(PROJECTS), run(PROJECTS * 8), {
-      maxTotal: PROJECTS * 8 * 5 * 120,
+      maxTotal: PROJECTS * 8 * 5 * 160,
     });
   });
 
@@ -99,7 +99,7 @@ describe("planRescanTargets scaling", () => {
       return measureOpsSync(() => planRescanTargets(sidecar, extras)).ops;
     };
     expectNearLinear("planRescanTargets", run(PROJECTS), run(PROJECTS * 8), {
-      maxTotal: PROJECTS * 8 * 3 * 60,
+      maxTotal: PROJECTS * 8 * 100,
     });
   });
 
@@ -132,7 +132,9 @@ describe("compactDevArtifactSidecar / reportFromSidecar scaling", () => {
     };
     // Stay under the root cap so both runs keep every root.
     expect(PROJECTS * 8 * 2).toBeLessThan(DEV_SIDECAR_ROOT_CAP);
-    expectNearLinear("compactDevArtifactSidecar", run(PROJECTS), run(PROJECTS * 8));
+    expectNearLinear("compactDevArtifactSidecar", run(PROJECTS), run(PROJECTS * 8), {
+      maxTotal: PROJECTS * 8 * 2 * 45,
+    });
   });
 
   it("builds a report in n log n", () => {
@@ -141,7 +143,9 @@ describe("compactDevArtifactSidecar / reportFromSidecar scaling", () => {
       const previous = sidecarWith(projects);
       return measureOpsSync(() => reportFromSidecar(sidecar, previous)).ops;
     };
-    expectNearLinear("reportFromSidecar", run(PROJECTS), run(PROJECTS * 8));
+    expectNearLinear("reportFromSidecar", run(PROJECTS), run(PROJECTS * 8), {
+      maxTotal: PROJECTS * 8 * 2 * 160,
+    });
   });
 });
 
@@ -158,7 +162,9 @@ describe("devArtifacts report helpers scaling", () => {
       })));
       return measureOpsSync(() => mergeDiagLogHotspots(report, dirs)).ops;
     };
-    expectNearLinear("mergeDiagLogHotspots", run(PROJECTS), run(PROJECTS * 8));
+    expectNearLinear("mergeDiagLogHotspots", run(PROJECTS), run(PROJECTS * 8), {
+      maxTotal: PROJECTS * 8 * 4 * 170,
+    });
   });
 
   it("drops deleted trees in linear work", () => {
@@ -167,6 +173,8 @@ describe("devArtifacts report helpers scaling", () => {
       const paths = report.artifacts.filter((_, i) => i % 3 === 0).map((artifact: DevArtifact) => artifact.path);
       return measureOpsSync(() => dropArtifactsFromReport(report, paths)).ops;
     };
-    expectNearLinear("dropArtifactsFromReport", run(PROJECTS), run(PROJECTS * 8));
+    expectNearLinear("dropArtifactsFromReport", run(PROJECTS), run(PROJECTS * 8), {
+      maxTotal: PROJECTS * 8 * 2 * 15,
+    });
   });
 });

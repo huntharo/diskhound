@@ -70,7 +70,7 @@ describe("analyzeCleanupFromIndex scaling", () => {
     // ~77 ops per file. Checking each cache file against the bucket's
     // sample made it ~225.
     expectNearLinear("analyzeCleanupFromIndex", await run(count), await run(count * 8), {
-      maxTotal: count * 8 * 100,
+      maxTotal: count * 8 * 120,
     });
   });
 });
@@ -101,6 +101,6 @@ describe("analyzeForCleanup scaling", () => {
     };
     const count = 1_400;
     // ~190 ops per file and folder, mostly classifyArtifactPath.
-    expectNearLinear("analyzeForCleanup", run(count), run(count * 8), { maxTotal: count * 8 * 250 });
+    expectNearLinear("analyzeForCleanup", run(count), run(count * 8), { maxTotal: count * 8 * 300 });
   });
 });

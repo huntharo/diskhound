@@ -56,8 +56,9 @@ describe("buildTreemapLayout scaling", () => {
         const input = countReads(files(count, shape, folders));
         return measureOpsSync(() => buildTreemapLayout(input, 1_600, 1_000, areaMode, layout)).ops;
       };
+      // ~20 ops per file for the flat layout, ~36 for the tree.
       expectNearLinear(`buildTreemapLayout ${shape} ${areaMode} ${layout}`, run(N), run(N * 8), {
-        maxTotal: N * 8 * 120,
+        maxTotal: N * 8 * (layout === "tree" ? 80 : 50),
       });
     });
   }
@@ -78,13 +79,13 @@ describe("buildTreemapLayout scaling", () => {
       const input = files(count, "equal");
       return measureOpsSync(() => buildTreemapRects(input, 1_600, 1_000)).ops;
     };
-    expectNearLinear("buildTreemapRects", rects(N), rects(N * 8));
+    expectNearLinear("buildTreemapRects", rects(N), rects(N * 8), { maxTotal: N * 8 * 40 });
 
     const composition = (count: number) => {
       const input = countReads(files(count, "geometric"));
       return measureOpsSync(() => buildTreemapComposition(input)).ops;
     };
-    expectNearLinear("buildTreemapComposition", composition(N), composition(N * 8));
+    expectNearLinear("buildTreemapComposition", composition(N), composition(N * 8), { maxTotal: N * 8 * 25 });
   });
 });
 

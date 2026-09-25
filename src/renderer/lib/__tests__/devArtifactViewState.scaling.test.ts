@@ -34,7 +34,7 @@ describe("groupDevArtifacts scaling", () => {
           const rows = countReads(artifacts(count));
           return measureOpsSync(() => groupDevArtifacts(rows, groupBy, sortBy)).ops;
         };
-        expectNearLinear(`groupDevArtifacts ${groupBy} ${sortBy}`, run(N), run(N * 8));
+        expectNearLinear(`groupDevArtifacts ${groupBy} ${sortBy}`, run(N), run(N * 8), { maxTotal: N * 8 * 100 });
       });
     }
   }

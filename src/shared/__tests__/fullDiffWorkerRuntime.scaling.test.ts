@@ -55,18 +55,19 @@ describe("mergeSortedChunks scaling", () => {
     });
     try {
       const run = async (chunks: number) => {
-        const paths = await writeChunks(chunks, 100);
+        const paths = await writeChunks(chunks, 50);
         const { result, ops } = await measureOps(async () => {
           const keys: string[] = [];
           for await (const rec of mergeSortedChunks(paths)) keys.push(rec.key);
           return keys;
         });
-        expect(result).toHaveLength(chunks * 100);
+        expect(result).toHaveLength(chunks * 50);
         expect(result.every((key, i) => i === 0 || result[i - 1]! < key)).toBe(true);
         return ops;
       };
-      // 16 → 128 chunks: a scan of every chunk head per record grows 64×.
-      expectNearLinear("mergeSortedChunks", await run(16), await run(128));
+      // 32 → 256 chunks: a scan of every chunk head per record grows 64×;
+      // a heap grows 8 × log(256)/log(32) = 12.8×.
+      expectNearLinear("mergeSortedChunks", await run(32), await run(256), { maxTotal: 256 * 50 * 80 });
     } finally {
       spy.mockRestore();
     }
@@ -104,7 +105,7 @@ describe("createTopChangeAccumulator scaling", () => {
       expect(Math.abs(result[0]!.deltaBytes)).toBe(count);
       return ops;
     };
-    expectNearLinear("createTopChangeAccumulator", run(2_000, 250), run(16_000, 2_000));
+    expectNearLinear("createTopChangeAccumulator", run(2_000, 250), run(16_000, 2_000), { maxTotal: 16_000 * 6 });
   });
 
   it("lists equal deltas in the order they were added", () => {
@@ -142,6 +143,6 @@ describe("computeFullDiffFromIndexFiles scaling", () => {
       expect(result?.changes).toHaveLength(count / 10);
       return ops;
     };
-    expectNearLinear("computeFullDiffFromIndexFiles", await run(2_000), await run(16_000));
+    expectNearLinear("computeFullDiffFromIndexFiles", await run(2_000), await run(16_000), { maxTotal: 16_000 * 60 });
   });
 });

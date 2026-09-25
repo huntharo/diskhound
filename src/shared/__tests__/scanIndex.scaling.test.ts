@@ -52,7 +52,7 @@ describe("loadLargestFiles scaling", () => {
     };
     const small = await run(N, LIMIT);
     const large = await run(N * 8, LIMIT * 8);
-    expectNearLinear("loadLargestFiles", small, large, { maxTotal: N * 8 * 20 });
+    expectNearLinear("loadLargestFiles", small, large, { maxTotal: N * 8 * 3 });
   });
 });
 
@@ -71,7 +71,7 @@ describe("loadDirectChildrenFromIndex scaling", () => {
     };
     const small = await run(N, LIMIT);
     const large = await run(N * 8, LIMIT * 8);
-    expectNearLinear("loadDirectChildrenFromIndex", small, large, { maxTotal: N * 8 * 30 });
+    expectNearLinear("loadDirectChildrenFromIndex", small, large, { maxTotal: N * 8 * 15 });
   });
 });
 
@@ -87,7 +87,7 @@ describe("searchIndexFile scaling", () => {
     // searchIndexFile caps the limit at 2,000.
     const small = await run(N, 200);
     const large = await run(N * 8, 1_600);
-    expectNearLinear("searchIndexFile", small, large, { maxTotal: N * 8 * 30 });
+    expectNearLinear("searchIndexFile", small, large, { maxTotal: N * 8 * 15 });
   });
 });
 
@@ -112,7 +112,7 @@ describe("buildSnapshotFromIndex scaling", () => {
     const small = await run(6_000);
     const large = await run(48_000);
     expectNearLinear("buildSnapshotFromIndex", small, large, {
-      maxTotal: 48_000 * 60,
+      maxTotal: 48_000 * 25,
     });
     expect(large.compares).toBeLessThanOrEqual(4 * 48_000 * Math.log2(5_000));
   });
@@ -134,7 +134,7 @@ describe("diffIndexes / computeDiff scaling", () => {
       const current = indexMap(count, count / 4);
       return measureOpsSync(() => diffIndexes("a", "b", baseline, current, count / 10)).ops;
     };
-    expectNearLinear("diffIndexes", run(N), run(N * 8));
+    expectNearLinear("diffIndexes", run(N), run(N * 8), { maxTotal: N * 8 * 20 });
   });
 
   function snapshot(count: number, offset: number): ScanSnapshot {
@@ -168,6 +168,6 @@ describe("diffIndexes / computeDiff scaling", () => {
       const current = snapshot(count, count / 4);
       return measureOpsSync(() => computeDiff(baseline, current, "a", "b")).ops;
     };
-    expectNearLinear("computeDiff", run(N), run(N * 8));
+    expectNearLinear("computeDiff", run(N), run(N * 8), { maxTotal: N * 8 * 60 });
   });
 });
