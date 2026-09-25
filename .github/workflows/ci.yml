@@ -51,7 +51,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        # windows-latest is VS 18 (2026), which blake2's node-gyp 11 does
+        # not recognize, so `bun install` fails. Same pin as release.yml.
+        os: [windows-2022, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
