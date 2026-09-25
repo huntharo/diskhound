@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### macOS
+
+- The traffic lights are now vertically centred in the header, in line
+  with the DiskHound name. They used to sit about 3.5pt high.
+
 ## 0.6.2 — 2026-09-23
 
 macOS no longer throws on startup when the theme is applied, and the

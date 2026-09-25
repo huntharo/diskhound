@@ -4345,7 +4345,15 @@ void (async () => {
       // Overlay caption buttons are Windows and Linux. On macOS the
       // option is ignored and setTitleBarOverlay is missing.
       ...(process.platform === "darwin"
-        ? {}
+        ? {
+            // AppKit's default spot centres the traffic lights on a 28pt
+            // title bar, ~3.5pt above the brand in our 40px header. The
+            // band is 39pt (1px border-bottom), the buttons are 14pt:
+            // (39 - 14) / 2 = 12.5, rounded high. x keeps the default
+            // inset, which the header's 78px macOS padding-left is sized
+            // around. Re-derive if --header-h changes.
+            trafficLightPosition: { x: 9, y: 12 },
+          }
         : {
             titleBarOverlay: {
               color: "#0a0a0f",
