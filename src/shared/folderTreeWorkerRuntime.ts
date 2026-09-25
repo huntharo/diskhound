@@ -5,6 +5,7 @@ import { Worker } from "node:worker_threads";
 import { createGunzip } from "node:zlib";
 
 import { resolveBundledWorkerScript } from "./bundledWorkerPath";
+import { unescapeJsonPath } from "./jsonPathUnescape";
 import { normPath } from "./pathUtils";
 import type {
   FolderTreeSidecarQueryInput,
@@ -71,19 +72,16 @@ export async function buildFolderTreeFromIndex(
     // records so a substring match is unambiguous.
     if (line.indexOf('"t":"d"') !== -1) continue;
 
-    // Fast path — regex match on the canonical shape. Backslash
-    // unescape happens on the captured path string (Windows paths have
-    // `\\` for every separator).
+    // Fast path — regex match on the canonical shape, then unescape the
+    // captured path string (Windows paths have `\\` for every
+    // separator; see unescapeJsonPath).
     let rawPath: string;
     let size: number;
     let mtime: number;
     const fastMatch = FILE_LINE_RE.exec(line);
-    if (fastMatch) {
-      // Unescape only if we see a backslash — ~70% of lines have them
-      // (Windows paths), but the check is one indexOf either way.
-      rawPath = fastMatch[1].indexOf("\\") === -1
-        ? fastMatch[1]
-        : fastMatch[1].replace(/\\\\/g, "\\").replace(/\\"/g, '"');
+    const fastPath = fastMatch ? unescapeJsonPath(fastMatch[1]) : null;
+    if (fastMatch && fastPath !== null) {
+      rawPath = fastPath;
       size = Number(fastMatch[2]);
       mtime = Number(fastMatch[3]);
     } else {

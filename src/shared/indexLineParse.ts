@@ -11,6 +11,8 @@
  * on-disk index format.
  */
 
+import { unescapeJsonPath } from "./jsonPathUnescape";
+
 export type ParsedIndexLine =
   | { t: "d"; p: string }
   | { t: "f"; p: string; s: number; m: number; h?: 1 };
@@ -18,26 +20,22 @@ export type ParsedIndexLine =
 const INDEX_FILE_LINE_RE = /^\{"p":"((?:\\.|[^"\\])*)","s":(\d+),"m":(\d+)(?:,\"h\":1)?\}$/;
 const INDEX_DIR_LINE_RE = /^\{"p":"((?:\\.|[^"\\])*)","t":"d","m":(\d+)\}$/;
 
-function unescapeIndexPath(escaped: string): string {
-  return escaped.indexOf("\\") === -1
-    ? escaped
-    : escaped.replace(/\\\\/g, "\\").replace(/\\"/g, '"');
-}
-
 export function parseIndexLine(line: string): ParsedIndexLine | null {
   const fileMatch = INDEX_FILE_LINE_RE.exec(line);
-  if (fileMatch) {
+  const filePath = fileMatch ? unescapeJsonPath(fileMatch[1]!) : null;
+  if (fileMatch && filePath !== null) {
     return {
       t: "f",
-      p: unescapeIndexPath(fileMatch[1]!),
+      p: filePath,
       s: Number(fileMatch[2]),
       m: Number(fileMatch[3]),
       ...(line.endsWith(',"h":1}') ? { h: 1 as const } : {}),
     };
   }
   const dirMatch = INDEX_DIR_LINE_RE.exec(line);
-  if (dirMatch) {
-    return { t: "d", p: unescapeIndexPath(dirMatch[1]!) };
+  const dirPath = dirMatch ? unescapeJsonPath(dirMatch[1]!) : null;
+  if (dirPath !== null) {
+    return { t: "d", p: dirPath };
   }
   try {
     const rec = JSON.parse(line) as { p?: string; s?: number; m?: number; t?: string; h?: number };
