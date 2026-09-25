@@ -4,10 +4,17 @@ on:
   push:
     branches: [main, master]
   pull_request:
+    # Default types are opened, synchronize, and reopened. Without
+    # edited, renaming a "Cut DiskHound" pull request keeps the old
+    # green changelog check on the same commit.
+    types: [opened, synchronize, reopened, edited]
     branches: [main, master]
 
 jobs:
   typecheck-and-test:
+    # A body-only edit does not change the guard's answer. A title
+    # edit does, so the whole job runs again.
+    if: github.event.action != 'edited' || github.event.changes.title
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,6 +45,7 @@ jobs:
         run: bun run build
 
   rust-check:
+    if: github.event.action != 'edited' || github.event.changes.title
     strategy:
       fail-fast: false
       matrix:

@@ -43,4 +43,4 @@ Set `package.json` `"version"` to the same number.
 
 ## Ship
 
-Commit `Cut DiskHound x.y.z.` Open the pull request with that same title so CI allows the changelog edit. After it merges, tag `vx.y.z` on that `main` commit and push the tag. The release workflow publishes from the tag and syncs `package.json` from it again.
+Commit `Cut DiskHound x.y.z.` Open the pull request with that same title so CI allows the changelog edit. Renaming the pull request re-runs that check. After it merges, tag `vx.y.z` on that `main` commit and push the tag. The release workflow publishes from the tag and syncs `package.json` from it again.
