@@ -21,3 +21,7 @@ DiskHound keeps its state in JSON and gzipped NDJSON files under Electron's user
 ## E2E
 
 `bun run test:e2e` runs the Playwright suite in `e2e/` against the built app and the native scanner. CI runs it on Linux, Windows and macOS. Read `e2e/AGENTS.md` before adding a spec.
+
+## Scaling tests
+
+New code that loops over per-file or per-folder collections needs a scaling test that counts operations, not time: run it at N and 8N and assert the count grows at most about 16× (twice the linear 8×), plus an absolute cap. If the cost also grows with a list limit or a folder count, grow that 8× too, or an O(N·limit) loop looks linear. See `scaling_tests` in `native/diskhound-native-scanner/src/main.rs` (it counts `work::step()`) and `src/scan/__tests__/scanWorkerScaling.test.ts` (it counts reads through getters and proxies).
