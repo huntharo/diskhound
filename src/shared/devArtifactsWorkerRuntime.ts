@@ -42,17 +42,19 @@ function runDevArtifactsRequest(
   return new Promise<DevArtifactReport | null>((resolve, reject) => {
     let settled = false;
 
+    // Mark settled and drop the listeners BEFORE terminate(). A
+    // terminated worker exits with code 1, and Node emits 'exit' to
+    // onExit before terminate()'s promise resolves. Settling afterwards
+    // let onExit reject a finished report as a crash.
     const settle = (callback: () => void) => {
       if (settled) return;
       settled = true;
       cleanup();
-      callback();
+      void worker.terminate().finally(callback);
     };
 
     const handleAbort = () => {
-      void worker.terminate().finally(() => {
-        settle(() => reject(new Error("Dev artifacts worker aborted")));
-      });
+      settle(() => reject(new Error("Dev artifacts worker aborted")));
     };
 
     const cleanup = () => {
@@ -68,32 +70,42 @@ function runDevArtifactsRequest(
         options.onProgress?.(message.progress);
         return;
       }
-      void worker.terminate().finally(() => {
-        if (message.type === "result") {
-          settle(() => resolve(message.report));
-          return;
-        }
-        settle(() => reject(new Error(message.message)));
-      });
+      if (message.type === "result") {
+        settle(() => resolve(message.report));
+        return;
+      }
+      settle(() => reject(new Error(message.message)));
     };
 
+    // A heap-limit kill arrives here as ERR_WORKER_OUT_OF_MEMORY, then
+    // 'exit' with code 1. Code 1 alone does not mean OOM: an uncaught
+    // throw and terminate() exit with 1 too.
     const onError = (error: Error) => {
+      if ((error as NodeJS.ErrnoException)?.code === "ERR_WORKER_OUT_OF_MEMORY") {
+        settle(() => reject(new Error("Dev artifacts worker out of memory.", { cause: error })));
+        return;
+      }
       settle(() => reject(error));
     };
 
     const onExit = (code: number) => {
-      if (!settled && code !== 0) {
-        const detail = code === 1
-          ? "Dev artifacts worker out of memory (exit code 1)."
-          : `Dev artifacts worker exited with code ${code}`;
-        settle(() => reject(new Error(detail)));
+      if (code !== 0) {
+        settle(() => reject(new Error(`Dev artifacts worker exited with code ${code}`)));
       }
     };
 
     worker.on("message", onMessage);
     worker.on("error", onError);
     worker.on("exit", onExit);
-    options.signal?.addEventListener("abort", handleAbort, { once: true });
+
+    if (options.signal) {
+      if (options.signal.aborted) {
+        handleAbort();
+        return;
+      }
+      options.signal.addEventListener("abort", handleAbort, { once: true });
+    }
+
     worker.postMessage(request);
   });
 }

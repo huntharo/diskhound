@@ -193,17 +193,19 @@ export async function runFolderTreeWorker(
   return await new Promise<SerializedFolderTree>((resolve, reject) => {
     let settled = false;
 
+    // Mark settled and drop the listeners BEFORE terminate(). A
+    // terminated worker exits with code 1, and Node emits 'exit' to
+    // onExit before terminate()'s promise resolves. Settling afterwards
+    // let onExit reject a finished tree as a crash.
     const settle = (callback: () => void) => {
       if (settled) return;
       settled = true;
       cleanup();
-      callback();
+      void worker.terminate().finally(callback);
     };
 
     const handleAbort = () => {
-      void worker.terminate().finally(() => {
-        settle(() => reject(new Error("Folder tree worker aborted")));
-      });
+      settle(() => reject(new Error("Folder tree worker aborted")));
     };
 
     const cleanup = () => {
@@ -218,25 +220,27 @@ export async function runFolderTreeWorker(
         return;
       }
 
-      void worker.terminate().finally(() => {
-        if (message.type === "result") {
-          settle(() => resolve(message.tree));
-          return;
-        }
-        settle(() => reject(new Error(message.message)));
-      });
+      if (message.type === "result") {
+        settle(() => resolve(message.tree));
+        return;
+      }
+      settle(() => reject(new Error(message.message)));
     };
 
+    // A heap-limit kill arrives here as ERR_WORKER_OUT_OF_MEMORY, then
+    // 'exit' with code 1. Code 1 alone does not mean OOM: an uncaught
+    // throw and terminate() exit with 1 too.
     const onError = (error: Error) => {
+      if ((error as NodeJS.ErrnoException)?.code === "ERR_WORKER_OUT_OF_MEMORY") {
+        settle(() => reject(new Error("Folder tree worker out of memory. The index may be too large for the worker's heap.", { cause: error })));
+        return;
+      }
       settle(() => reject(error));
     };
 
     const onExit = (code: number) => {
-      if (!settled && code !== 0) {
-        const detail = code === 1
-          ? `Folder tree worker out of memory (exit code 1). The index may exceed the worker's 8 GB heap.`
-          : `Folder tree worker exited with code ${code}`;
-        settle(() => reject(new Error(detail)));
+      if (code !== 0) {
+        settle(() => reject(new Error(`Folder tree worker exited with code ${code}`)));
       }
     };
 

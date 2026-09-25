@@ -20,29 +20,6 @@ interface FileIndexRecord {
   s: number;
 }
 
-/**
- * Compact map entry used for the loaded-fully side of the diff.
- * v0.5.39 collapses the previous `Map<string, FileIndexRecord>` into
- * `Map<string, CompactMapValue>` to shave memory on 7M+ file drives.
- *
- *   Was: Map<key, {p: string, s: number}>
- *        ~ 200B key + 32B object header + 200B p ref + 8B s = ~440B/entry
- *
- *   Now: Map<key, [origPath: string | null, size: number]>
- *        ~ 200B key + 24B array + 200B p ref + 8B s = ~432B/entry
- *        AND we set origPath = null when key === origPath (POSIX
- *        case-sensitive volumes always; Windows when no case-folding
- *        happened) — which on POSIX saves the entire 200B duplicate
- *        path string.
- *
- * For a 7M-file POSIX scan that's ~1.4 GB freed. On Windows the
- * saving is smaller (the lowercased key differs from the original
- * path) but still meaningful for ASCII-only paths where some
- * segments are already lowercase.
- *
- * Tuple chosen over an object because V8 optimises small in-bounds
- * arrays as packed elements — no per-property descriptors.
- */
 const DEFAULT_LIMIT = 500;
 const WINDOWS_PLATFORM = "win32";
 
@@ -433,18 +410,16 @@ export async function runFullDiffWorker(
   //   Default Node:      ~2 GB — OOMed on 4M-file drives
   //   v0.5.x:            4 GB  — OOMed on 7M-file drives
   //   v0.5.20-ish:       8 GB  — held until a 7.8M-file drive hit it
-  //   v0.5.39:           12 GB — paired with the compact-value map
-  //                              encoding below
+  //   v0.5.39:           12 GB — one side loaded into a compact Map
+  //   now:               2 GB  — external-sort streaming merge
   //
-  // Reserved pages don't commit until touched, so small diffs still
-  // pay zero extra cost. The 12 GB ceiling means the worker is safe
-  // up to roughly 10M-file index pairs on a box with 16+ GB RAM.
-  // Beyond that we'd need an external-sort-style streaming merge,
-  // which is a much bigger architectural change (tracked separately).
+  // The merge sorts each index into SORT_CHUNK-record runs on disk,
+  // then walks both sides in key order. It holds one chunk (~120k
+  // records) while writing runs and one record per run while merging,
+  // instead of a 7M-entry Map. 2 GB is a safety ceiling, not a working
+  // set.
   const worker = new Worker(options.workerPath, {
     resourceLimits: {
-      // Streaming merge keeps one sort-chunk (~120k records) in memory,
-      // not a 7M-entry Map. 2 GB is a safety ceiling, not a working set.
       maxOldGenerationSizeMb: 2048,
       maxYoungGenerationSizeMb: 256,
     },
@@ -454,17 +429,20 @@ export async function runFullDiffWorker(
   return await new Promise<FullDiffResult | null>((resolve, reject) => {
     let settled = false;
 
+    // Mark settled and drop the listeners BEFORE terminate(). A
+    // terminated worker exits with code 1, and Node emits 'exit' to
+    // onExit before terminate()'s promise resolves. Settling afterwards
+    // let onExit reject a finished diff as a crash, and main.ts then
+    // recomputed it on the main thread.
     const settle = (callback: () => void) => {
       if (settled) return;
       settled = true;
       cleanup();
-      callback();
+      void worker.terminate().finally(callback);
     };
 
     const handleAbort = () => {
-      void worker.terminate().finally(() => {
-        settle(() => reject(new Error("Full diff worker aborted")));
-      });
+      settle(() => reject(new Error("Full diff worker aborted")));
     };
 
     const cleanup = () => {
@@ -479,31 +457,30 @@ export async function runFullDiffWorker(
         return;
       }
 
-      void worker.terminate().finally(() => {
-        if (message.type === "result") {
-          settle(() => resolve(message.result));
-          return;
-        }
+      if (message.type === "result") {
+        settle(() => resolve(message.result));
+        return;
+      }
 
-        settle(() => reject(new Error(message.message)));
-      });
+      settle(() => reject(new Error(message.message)));
     };
 
     const onError = (error: Error) => {
+      // A heap-limit kill arrives here as ERR_WORKER_OUT_OF_MEMORY,
+      // then 'exit' with code 1. Tag it so the crash log line reads as
+      // a diagnosis. Code 1 alone does not mean OOM: an uncaught throw
+      // and terminate() exit with 1 too.
+      if ((error as NodeJS.ErrnoException)?.code === "ERR_WORKER_OUT_OF_MEMORY") {
+        const detail = `Full diff worker out of memory. The streaming merge still needs headroom for sort chunks — the fast top-N summary still works.`;
+        settle(() => reject(new Error(detail, { cause: error })));
+        return;
+      }
       settle(() => reject(error));
     };
 
     const onExit = (code: number) => {
-      if (!settled && code !== 0) {
-        // Code 1 on a worker thread is almost always the V8 heap
-        // running out of room (ERR_WORKER_OUT_OF_MEMORY surfaces as
-        // exit code 1 in node:worker_threads). Tag it explicitly so
-        // the crash log line reads as a diagnosis rather than a
-        // generic "exited with code 1."
-        const detail = code === 1
-          ? `Full diff worker out of memory (exit code 1). The streaming merge still needs headroom for sort chunks — the fast top-N summary still works.`
-          : `Full diff worker exited with code ${code}`;
-        settle(() => reject(new Error(detail)));
+      if (code !== 0) {
+        settle(() => reject(new Error(`Full diff worker exited with code ${code}`)));
       }
     };
 
