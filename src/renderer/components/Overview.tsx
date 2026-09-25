@@ -1,6 +1,14 @@
+import { Fragment } from "preact";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 
-import type { DevArtifactReport, ExtensionBucket, ScanDiffResult, ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
+import type {
+  DevArtifactReport,
+  DiskSpaceInfo,
+  ExtensionBucket,
+  ScanDiffResult,
+  ScanFileRecord,
+  ScanSnapshot,
+} from "../../shared/contracts";
 import { mergeDiagLogHotspots } from "../../shared/devArtifacts";
 import {
   deletedPathLabel,
@@ -48,6 +56,10 @@ interface Props {
    * spinner copy.
    */
   scanPercent?: number | null;
+  /** Drive cards, to link the other disks a scan left out. */
+  drives?: DiskSpaceInfo[];
+  /** Open another drive's scan, as clicking its pill does. */
+  onOpenDrive?: (path: string) => void;
 }
 
 type OverviewRecentWindow = "7d" | "30d" | "90d";
@@ -108,7 +120,7 @@ function getInitialShowFolders(): boolean {
 // canvas render performance.
 const DENSE_TREEMAP_LIMIT = 5_000;
 
-export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev, scanPercent }: Props) {
+export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev, scanPercent, drives, onOpenDrive }: Props) {
   const { bytesSeen, filesVisited, directoriesVisited, skippedEntries } = snapshot;
   // Live-ticking elapsed: during a running scan the snapshot only updates
   // ~5x/second via progress messages, so the "elapsed" metric would
@@ -148,6 +160,12 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
   const [dominantExpanded, setDominantExpanded] = useState(false);
   const [denseFiles, setDenseFiles] = useState<ScanFileRecord[] | null>(null);
   const [latestDiff, setLatestDiff] = useState<ScanDiffResult | null>(null);
+  // Other disks mounted below the root have their own drive pill and scan.
+  // System volumes the walk also left out (VM, Preboot) have no pill.
+  const otherDisks = useMemo(() => {
+    const pills = new Set((drives ?? []).map((drive) => drive.drive));
+    return (snapshot.skippedMounts ?? []).filter((mount) => pills.has(mount));
+  }, [drives, snapshot.skippedMounts]);
   const { busy, runAction, handleEasyMove } = usePathActions();
   const confirmDelete = useConfirmPermanentDelete();
   const { findProtectedFolder } = useExcludedFolderProtection();
@@ -322,6 +340,7 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
         <DevCleanupTile snapshot={snapshot} onViewDev={onViewDev} />
       </div>
 
+      {otherDisks.length > 0 && onOpenDrive && <OtherDisksNote mounts={otherDisks} onOpenDrive={onOpenDrive} />}
       {latestDiff && <LatestScanSummary diff={latestDiff} onViewDetails={onViewChanges} />}
 
 
@@ -785,11 +804,14 @@ function Metric({ value, label, accent, title }: { value: string; label: string;
 function LatestScanSummary({ diff, onViewDetails }: { diff: ScanDiffResult; onViewDetails?: () => void }) {
   const grew = diff.totalBytesDelta > 0;
   const bytesLabel = formatBytes(Math.abs(diff.totalBytesDelta));
-  const accountingChanged = diff.sizeSemanticsChanged || diff.hardlinkAccountingChanged;
+  const accountingChanged =
+    diff.sizeSemanticsChanged || diff.hardlinkAccountingChanged || diff.volumeAccountingChanged;
   const title = diff.sizeSemanticsChanged
     ? "Size accounting changed to size on disk — run one more scan before comparing"
     : diff.hardlinkAccountingChanged
     ? "Hardlinked files are now counted once — run one more scan before comparing"
+    : diff.volumeAccountingChanged
+    ? "Scans now stay on this disk and count each folder once — run one more scan before comparing"
     : diff.totalBytesDelta === 0
     ? "No size change since the previous scan"
     : grew
@@ -840,6 +862,27 @@ function LatestScanSummary({ diff, onViewDetails }: { diff: ScanDiffResult; onVi
           </span>
         ))}
       </div>
+    </div>
+  );
+}
+
+function OtherDisksNote({ mounts, onOpenDrive }: { mounts: string[]; onOpenDrive: (path: string) => void }) {
+  return (
+    <div className="other-disks-note">
+      {mounts.length === 1 ? "Another disk is mounted here and has its own scan: " : "Other disks are mounted here and have their own scans: "}
+      {mounts.map((mount, index) => (
+        <Fragment key={mount}>
+          {index > 0 && " · "}
+          <button
+            type="button"
+            className="scan-summary-view-details"
+            onClick={() => onOpenDrive(mount)}
+            title={`Open ${mount}`}
+          >
+            {basename(mount)} →
+          </button>
+        </Fragment>
+      ))}
     </div>
   );
 }

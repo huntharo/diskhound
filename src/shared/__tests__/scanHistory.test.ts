@@ -62,6 +62,11 @@ describe("scanHistory", () => {
     expect(getScanHistory("/home/me")[0].hardlinkAccounting).toBe("once");
   });
 
+  it("keeps the volume accounting marker for baseline selection", async () => {
+    await saveScanToHistory({ ...makeSnapshot("/", 5000, Date.now()), volumeAccounting: "own-disk" });
+    expect(getScanHistory("/")[0].volumeAccounting).toBe("own-disk");
+  });
+
   it("returns history entries sorted newest-first", async () => {
     const now = Date.now();
     await saveScanToHistory(makeSnapshot("C:\\test", 1000, now - 3000));

@@ -1304,7 +1304,7 @@ export function App() {
             />
           ) : (
             <>
-              {view === "overview" && <ErrorBoundary name="Overview"><Overview snapshot={snapshot} onFilterExtension={onFilterExtension} onViewChanges={() => setView("changes")} onViewDev={() => setView("dev")} scanPercent={currentScanPercent} /></ErrorBoundary>}
+              {view === "overview" && <ErrorBoundary name="Overview"><Overview snapshot={snapshot} onFilterExtension={onFilterExtension} onViewChanges={() => setView("changes")} onViewDev={() => setView("dev")} scanPercent={currentScanPercent} drives={drives} onOpenDrive={(path) => void handleScanDrive(path)} /></ErrorBoundary>}
               {view === "files" && <ErrorBoundary name="File List"><FileList snapshot={indexSearchSnapshot} initialFilter={filterExt} /></ErrorBoundary>}
               {view === "folders" && (
                 <ErrorBoundary name="Folders">

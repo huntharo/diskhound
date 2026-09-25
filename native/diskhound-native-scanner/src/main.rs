@@ -6,8 +6,6 @@ use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-#[cfg(target_os = "linux")]
-use std::sync::atomic::AtomicUsize;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use flate2::Compression;
@@ -34,6 +32,8 @@ mod dev_artifacts;
 mod index_line;
 #[cfg(not(windows))]
 mod hardlinks;
+#[cfg(not(windows))]
+mod walk_prune;
 #[cfg(test)]
 mod test_support;
 
@@ -454,6 +454,10 @@ struct ScanSnapshot {
     /// indexing phase when the byte-based bar is stuck near 100%.
     /// None for the walker path where this number isn't known upfront.
     expected_total_files: Option<u64>,
+    /// Mount points below the root the walk left out because they are
+    /// another disk. The UI links the ones with a drive pill.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    skipped_mounts: Vec<String>,
 }
 
 /// Coarse-grained scan progress phases. The UI switches status copy
@@ -540,6 +544,8 @@ struct ScanState {
     expected_total_files: Option<u64>,
     /// Disk touches so far. Shared with walker threads.
     io: Arc<IoStats>,
+    /// Other disks the walk left out. See walk_prune.
+    skipped_mounts: Vec<String>,
 }
 
 impl ScanState {
@@ -585,6 +591,7 @@ impl ScanState {
             scan_phase: ScanPhase::Starting,
             expected_total_files: None,
             io,
+            skipped_mounts: Vec::new(),
         }
     }
 }
@@ -1339,338 +1346,17 @@ fn scan_root(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
     scan_generic(root_path, state)
 }
 
-/// Virtual / pseudo filesystem mount points that a user scan should
-/// never descend into. Walking these is both meaningless (the
-/// "files" under /proc and /sys are kernel-generated text and
-/// change every read) and occasionally dangerous (certain /proc
-/// entries can hang or cause side effects when opened).
-///
-/// The list covers the roots only; jwalk handles the subtree by
-/// virtue of the `.process_read_dir()` predicate pruning the walk
-/// below these mounts.
-///
-/// Docker and snap bind-mounts are excluded too — docker's
-/// overlayfs images + snap squashfs mounts multiply the visible
-/// file count 10-100× without telling the user anything useful
-/// about the host filesystem's free space.
-///
-/// Separately, `foreign_mount_points` drops any mount whose
-/// kernel device id differs from the scan root. btrfs subvolumes
-/// of the same pool share that id (so a scan of `/` still includes
-/// `/home` when both are subvolumes of one disk). A Windows NTFS
-/// mount, tmpfs, or AppImage FUSE mount does not, and is left for
-/// its own drive pill. `st_dev` is the wrong key here: btrfs gives
-/// each subvolume a distinct `st_dev` even when `df` shows one pool.
-/// `duplicate_mount_paths` drops second copies on the same filesystem:
-/// bind mounts, and subvolumes also reachable through another mount.
-#[cfg(not(windows))]
-const LINUX_SKIP_PREFIXES: &[&str] = &[
-    "/proc",
-    "/sys",
-    "/dev",
-    "/run",
-    "/snap",
-    "/var/lib/docker/overlay2",
-    "/var/lib/docker/containers",
-    "/var/lib/containers/storage/overlay",
-    // Flatpak + Nix per-app mounts; not the install roots, just the
-    // transient bind-mount views that blow up file counts.
-    "/var/lib/flatpak/exports",
-];
-
-#[cfg(not(windows))]
-fn should_skip_linux_path(path: &Path) -> bool {
-    let s = path.to_string_lossy();
-    // Match exact prefix followed by end-of-string or '/'. Pure
-    // `starts_with` would false-positive on paths like
-    // "/devices" matching "/dev".
-    for prefix in LINUX_SKIP_PREFIXES {
-        if s.len() == prefix.len() && s == *prefix {
-            return true;
-        }
-        if s.len() > prefix.len()
-            && s.as_bytes().starts_with(prefix.as_bytes())
-            && s.as_bytes()[prefix.len()] == b'/'
-        {
-            return true;
-        }
-    }
-    false
-}
-
-/// One line of `/proc/self/mountinfo`: mount point, the major:minor of
-/// the filesystem, and the path inside that filesystem the mount shows
-/// (`/` for a whole filesystem, `/@home` for a btrfs subvolume, the
-/// source directory for a bind mount). btrfs subvolumes of one pool
-/// share the major:minor; `stat.st_dev` does not.
-#[cfg(target_os = "linux")]
-struct LinuxMount {
-    point: String,
-    dev: String,
-    root: String,
-}
-
-#[cfg(target_os = "linux")]
-fn unescape_mountinfo(field: &str) -> String {
-    let bytes = field.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\\'
-            && i + 3 < bytes.len()
-            && bytes[i + 1..i + 4].iter().all(|c| c.is_ascii_digit())
-        {
-            if let Ok(v) =
-                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 4]).unwrap_or(""), 8)
-            {
-                out.push(v);
-                i += 4;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-#[cfg(target_os = "linux")]
-fn trim_mount_point(path: &str) -> &str {
-    if path.len() > 1 {
-        path.trim_end_matches('/')
-    } else {
-        path
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn parse_mountinfo(text: &str) -> Vec<LinuxMount> {
-    let mut mounts = Vec::new();
-    for line in text.lines() {
-        let Some((before, _)) = line.split_once(" - ") else {
-            continue;
-        };
-        let fields: Vec<&str> = before.split(' ').collect();
-        if fields.len() < 5 {
-            continue;
-        }
-        let dev = fields[2];
-        if dev.is_empty() || !dev.contains(':') {
-            continue;
-        }
-        let point = unescape_mountinfo(fields[4]);
-        let point = trim_mount_point(&point).to_string();
-        if point.is_empty() {
-            continue;
-        }
-        let root = unescape_mountinfo(fields[3]);
-        mounts.push(LinuxMount {
-            point,
-            dev: dev.to_string(),
-            root: trim_mount_point(&root).to_string(),
-        });
-    }
-    mounts
-}
-
-#[cfg(target_os = "linux")]
-fn path_is_under(root: &str, path: &str) -> bool {
-    if root == "/" {
-        return path != "/";
-    }
-    path.starts_with(root) && path.as_bytes().get(root.len()) == Some(&b'/')
-}
-
-/// Mount points under `root` that live on a different filesystem.
-/// Same-pool btrfs subvolumes are kept. The scan root itself is never
-/// included, so an explicit scan of `/mnt/windows` still walks it.
-#[cfg(target_os = "linux")]
-fn foreign_mount_points(mounts: &[LinuxMount], root: &str) -> HashSet<String> {
-    let root = trim_mount_point(root);
-    let Some(root_dev) = mounts
-        .iter()
-        .filter(|m| root == m.point || path_is_under(&m.point, root))
-        .max_by_key(|m| m.point.len())
-        .map(|m| m.dev.clone())
-    else {
-        return HashSet::new();
-    };
-    mounts
-        .iter()
-        .filter(|m| m.dev != root_dev && path_is_under(root, &m.point))
-        .map(|m| m.point.clone())
-        .collect()
-}
-
-/// `path` relative to `base`: `Some("")` when they are equal,
-/// `Some("/rest")` when `path` is under `base`, `None` otherwise.
-#[cfg(target_os = "linux")]
-fn relative_mount_path<'a>(path: &'a str, base: &str) -> Option<&'a str> {
-    if path == base {
-        Some("")
-    } else if base == "/" {
-        Some(path)
-    } else if path_is_under(base, path) {
-        Some(&path[base.len()..])
-    } else {
-        None
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn join_mount_path(base: &str, rel: &str) -> String {
-    if rel.is_empty() {
-        base.to_string()
-    } else if base == "/" {
-        rel.to_string()
-    } else {
-        format!("{base}{rel}")
-    }
-}
-
-/// Paths under `root` that would walk a second copy of files the scan
-/// already reaches through another mount of the same filesystem. That
-/// happens with a bind mount, a btrfs subvolume that is also visible
-/// inside a mounted top-level volume, or openSUSE's
-/// `/.snapshots/<n>/snapshot` when `<n>` is the running root.
-///
-/// For two walked mounts A and B on one device, where B's mountinfo root
-/// is inside A's, B's files also appear inside A at A + (root(B) − root(A)).
-/// That second path is pruned and B's mount point is kept, so `/home`
-/// wins over `/@home` and a bind's mount point wins over its source. If
-/// B is mounted inside that second path, a bind of a folder into itself,
-/// B's mount point is pruned instead. Two mounts of the same subtree keep
-/// the one mounted first. Sibling subvolumes, such as `/` from `@` and
-/// `/home` from `@home`, never overlap and are both walked.
-#[cfg(target_os = "linux")]
-fn duplicate_mount_paths(mounts: &[LinuxMount], root: &str) -> HashSet<String> {
-    let root = trim_mount_point(root);
-    // A later mount on the same point hides the earlier one.
-    let last_at: HashMap<&str, usize> = mounts
-        .iter()
-        .enumerate()
-        .map(|(i, m)| (m.point.as_str(), i))
-        .collect();
-    let visible: Vec<(usize, &LinuxMount)> = mounts
-        .iter()
-        .enumerate()
-        .filter(|(i, m)| last_at[m.point.as_str()] == *i)
-        .collect();
-    let Some(&(home_index, home)) = visible
-        .iter()
-        .filter(|(_, m)| root == m.point || path_is_under(&m.point, root))
-        .max_by_key(|(_, m)| m.point.len())
-    else {
-        return HashSet::new();
-    };
-    // The walk never gets to a mount under another filesystem's mount or
-    // a skipped prefix, or to one a later mount above it covers. Pruning
-    // its source would leave those files counted nowhere.
-    let reachable = |i: usize, m: &LinuxMount| {
-        !should_skip_linux_path(Path::new(&m.point))
-            && !visible.iter().any(|(j, above)| {
-                path_is_under(&above.point, &m.point)
-                    && (*j > i || (above.dev != home.dev && path_is_under(root, &above.point)))
-            })
-    };
-    // Each same-device mount the walk enters: mountinfo order, where the
-    // walk enters it, and the path inside the filesystem found there.
-    let walked: Vec<(usize, String, String)> = visible
-        .iter()
-        .filter(|(i, m)| {
-            *i == home_index
-                || (m.dev == home.dev && path_is_under(root, &m.point) && reachable(*i, m))
-        })
-        .map(|(i, m)| {
-            let entry = if *i == home_index { root.to_string() } else { m.point.clone() };
-            let inside = relative_mount_path(&entry, &m.point).unwrap_or("");
-            (*i, entry.clone(), join_mount_path(&m.root, inside))
-        })
-        .collect();
-
-    let mut duplicates = HashSet::new();
-    for (a_index, a_entry, a_fs) in &walked {
-        for (b_index, b_entry, b_fs) in &walked {
-            if a_index == b_index {
-                continue;
-            }
-            let Some(rel) = relative_mount_path(b_fs, a_fs) else {
-                continue;
-            };
-            if rel.is_empty() && a_index < b_index {
-                continue;
-            }
-            let copy = join_mount_path(a_entry, rel);
-            // Another mount inside A, at or above `copy`, covers it: A's
-            // own files there are never reached.
-            let covered = visible.iter().any(|(_, m)| {
-                path_is_under(a_entry, &m.point)
-                    && (m.point == copy || path_is_under(&m.point, &copy))
-            });
-            if covered {
-                continue;
-            }
-            // `copy` itself is B's mount point only when B is bound onto
-            // itself, and the check above already skipped that.
-            if path_is_under(&copy, b_entry) {
-                duplicates.insert(b_entry.clone());
-            } else {
-                duplicates.insert(copy);
-            }
-        }
-    }
-    // Paths under another pruned path are never reached anyway.
-    let nested: Vec<String> = duplicates
-        .iter()
-        .filter(|path| duplicates.iter().any(|other| path_is_under(other, path)))
-        .cloned()
-        .collect();
-    for path in nested {
-        duplicates.remove(&path);
-    }
-    duplicates
-}
-
-/// Mount paths a Linux walk skips: other filesystems, and second copies
-/// of this one.
-#[cfg(target_os = "linux")]
-struct LinuxMountPrunes {
-    foreign: HashSet<String>,
-    duplicates: HashSet<String>,
-}
-
-#[cfg(target_os = "linux")]
-fn load_linux_mount_prunes(root: &Path) -> LinuxMountPrunes {
-    let text = match std::fs::read_to_string("/proc/self/mountinfo") {
-        Ok(text) => text,
-        Err(err) => {
-            eprintln!(
-                "[diskhound-native-scanner] linux: could not read mountinfo ({err}) — scan may cross into other disks"
-            );
-            return LinuxMountPrunes {
-                foreign: HashSet::new(),
-                duplicates: HashSet::new(),
-            };
-        }
-    };
-    let mounts = parse_mountinfo(&text);
-    let root = normalize_path(root);
-    let duplicates = duplicate_mount_paths(&mounts, &root);
-    if !duplicates.is_empty() {
-        let mut listed: Vec<&String> = duplicates.iter().collect();
-        listed.sort();
-        eprintln!(
-            "[diskhound-native-scanner] linux: skipping second copies reached through another mount: {listed:?}"
-        );
-    }
-    LinuxMountPrunes {
-        foreign: foreign_mount_points(&mounts, &root),
-        duplicates,
-    }
-}
-
 #[cfg(not(windows))]
 fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
+    scan_generic_with_plan(root_path, state, walk_prune::plan_for(root_path))
+}
+
+#[cfg(not(windows))]
+fn scan_generic_with_plan(
+    root_path: &Path,
+    state: &mut ScanState,
+    plan: walk_prune::PrunePlan,
+) -> Result<(), String> {
     state.scan_phase = ScanPhase::Indexing;
     state.expected_total_files = state.input.expected_total_files;
 
@@ -1696,36 +1382,38 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
         }
     });
 
-    // Other disks and pseudo filesystems mounted under the root.
-    // macOS keeps the old walk: firmlinks make st_dev / mount ids lie
-    // about where user files live, and this bug is the Linux one.
-    #[cfg(target_os = "linux")]
-    let mount_prunes = load_linux_mount_prunes(root_path);
-    #[cfg(target_os = "linux")]
-    let pruned_mounts = Arc::new(AtomicUsize::new(0));
-    #[cfg(target_os = "linux")]
-    let pruned_mounts_for_walk = Arc::clone(&pruned_mounts);
-    #[cfg(target_os = "linux")]
-    let pruned_duplicates = Arc::new(AtomicUsize::new(0));
-    #[cfg(target_os = "linux")]
-    let pruned_duplicates_for_walk = Arc::clone(&pruned_duplicates);
+    // Pseudo filesystems, other disks mounted under the root, second
+    // copies through a Linux bind mount, and on macOS the Data-volume twins
+    // of firmlinked folders. See walk_prune.
+    if !plan.other_mounts.is_empty()
+        || !plan.duplicate_mounts.is_empty()
+        || !plan.firmlink_twins.is_empty()
+    {
+        let sorted = |set: &HashSet<String>| {
+            let mut paths: Vec<String> = set.iter().cloned().collect();
+            paths.sort();
+            paths
+        };
+        eprintln!(
+            "[diskhound-native-scanner] prune: {} firmlink twins, other mounts {:?}, second copies through another mount {:?}",
+            plan.firmlink_twins.len(),
+            sorted(&plan.other_mounts),
+            sorted(&plan.duplicate_mounts),
+        );
+    }
+    let plan = Arc::new(plan);
+    let pruned = Arc::new(walk_prune::PruneLog::default());
+    let pruned_for_walk = Arc::clone(&pruned);
     let io_for_walk = Arc::clone(&state.io);
 
     let walker = WalkDir::new(root_path)
         .sort(false)
         .skip_hidden(false)
         .parallelism(jwalk::Parallelism::RayonNewPool(thread_count))
-        // Prune virtual/pseudo filesystems BEFORE descending. Drops
-        // /proc, /sys, /dev, /run, /snap, docker overlayfs, etc. so
-        // we never touch kernel-generated content. Without this a
-        // scan of `/` produced millions of bogus entries and sometimes
-        // hung on e.g. /proc/kcore.
-        //
-        // Also drop mount points that are a different filesystem than
-        // the scan root (NTFS at /mnt/windows, tmpfs, FUSE). Same-pool
-        // btrfs subvolumes stay. See foreign_mount_points. And drop the
-        // second path to files another mount of this filesystem already
-        // shows. See duplicate_mount_paths.
+        // Prune BEFORE descending: /proc and /dev hold kernel-generated
+        // entries (a scan of `/` used to hang on /proc/kcore), another
+        // disk has its own drive pill, and a bind mount's source or a
+        // firmlink twin would count the same files twice.
         .process_read_dir(move |depth, _path, _state, children| {
             // jwalk calls this once per read_dir, with the depth of the
             // directory read, and once more up front for the root entry
@@ -1737,22 +1425,15 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
                 let Ok(child) = child_result else {
                     return true; // Let the outer loop handle read errors.
                 };
-                if should_skip_linux_path(&child.path()) {
-                    return false;
-                }
-                #[cfg(target_os = "linux")]
-                if child.file_type().is_dir() {
-                    let point = trim_mount_point(&normalize_path(&child.path())).to_string();
-                    if mount_prunes.foreign.contains(&point) {
-                        pruned_mounts_for_walk.fetch_add(1, Ordering::Relaxed);
-                        return false;
-                    }
-                    if mount_prunes.duplicates.contains(&point) {
-                        pruned_duplicates_for_walk.fetch_add(1, Ordering::Relaxed);
-                        return false;
+                let path = child.path();
+                let path = path.to_string_lossy();
+                match plan.skip_reason(&path, child.file_type().is_dir()) {
+                    None => true,
+                    Some(reason) => {
+                        pruned_for_walk.note(reason, &path);
+                        false
                     }
                 }
-                true
             });
             // Fixed order so the first link of a hardlinked file, which
             // owns its bytes, is the same link on every scan. jwalk
@@ -1859,21 +1540,16 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
         record_file_with_link_flag(state, file_record, extra_hardlink)?;
     }
 
-    #[cfg(target_os = "linux")]
-    let (pruned, duplicates) = (
-        pruned_mounts.load(Ordering::Relaxed),
-        pruned_duplicates.load(Ordering::Relaxed),
-    );
-    #[cfg(not(target_os = "linux"))]
-    let (pruned, duplicates) = (0usize, 0usize);
+    state.skipped_mounts = pruned.other_mounts();
     eprintln!(
-        "[diskhound-native-scanner] linux: walk done in {} ms (files={}, dirs={}, skipped={}, foreign_mounts_pruned={}, duplicate_mounts_pruned={}, readdir_calls={}, stat_calls={})",
+        "[diskhound-native-scanner] linux: walk done in {} ms (files={}, dirs={}, skipped={}, foreign_mounts_pruned={}, duplicate_mounts_pruned={}, firmlink_twins_pruned={}, readdir_calls={}, stat_calls={})",
         walk_started.elapsed().as_millis(),
         state.files_visited,
         state.directories_visited,
         state.skipped_entries,
-        pruned,
-        duplicates,
+        state.skipped_mounts.len(),
+        pruned.duplicate_mounts(),
+        pruned.firmlink_twins(),
         state.io.readdir_calls(),
         state.io.stat_calls(),
     );
@@ -3960,6 +3636,7 @@ impl ScanState {
             last_updated_at: now_ms,
             scan_phase: self.scan_phase,
             expected_total_files: self.expected_total_files,
+            skipped_mounts: self.skipped_mounts.clone(),
         }
     }
 }
@@ -3989,6 +3666,7 @@ fn early_running_snapshot(root_path: &str, started_at_ms: u64, elapsed_ms: u64) 
         last_updated_at: now_ms,
         scan_phase: ScanPhase::Starting,
         expected_total_files: None,
+        skipped_mounts: Vec::new(),
     }
 }
 
@@ -5618,157 +5296,67 @@ mod windows_visit_once_tests {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
-mod linux_mount_tests {
-    use super::{duplicate_mount_paths, foreign_mount_points, parse_mountinfo, unescape_mountinfo};
-    use std::collections::HashSet;
+#[cfg(all(test, unix))]
+mod unix_prune_scan_tests {
+    use super::*;
+    use crate::test_support::*;
+    use crate::walk_prune::PrunePlan;
 
-    fn duplicates(mountinfo: &str, root: &str) -> Vec<String> {
-        let mut paths: Vec<String> =
-            duplicate_mount_paths(&parse_mountinfo(mountinfo), root).into_iter().collect();
-        paths.sort();
-        paths
+    fn occupancy(path: &Path) -> u64 {
+        std::fs::metadata(path).unwrap().blocks() * 512
     }
 
-    const FIXTURE: &str = "\
-36 35 0:29 / / rw,relatime - btrfs /dev/mapper/root rw\n\
-37 36 0:29 /@home /home rw - btrfs /dev/mapper/root rw\n\
-38 36 0:29 /@log /var/log rw - btrfs /dev/mapper/root rw\n\
-39 36 0:58 / /tmp rw - tmpfs tmpfs rw\n\
-40 36 259:9 / /boot rw - vfat /dev/nvme0n1p1 rw\n\
-41 36 259:6 / /mnt/windows rw - ntfs3 /dev/nvme1n1p1 ro\n\
-42 36 259:7 / /mnt/windows-backup rw - ntfs3 /dev/sdc1 rw\n\
-43 39 0:99 / /tmp/.mount_DiskHo rw - fuse.AppImage DiskHound ro\n\
-44 36 0:30 / /mnt/my\\040disk rw - ext4 /dev/sdb1 rw\n\
-45 41 0:58 / /mnt/windows/nested-tmp rw - tmpfs tmpfs rw\n";
-
+    /// A small `/` on macOS. `Users` is the firmlinked name and `Data/Users`
+    /// its twin; a hardlink stands in for the firmlink, which a test can't
+    /// create. `Data/.Spotlight-V100` exists only on the Data volume, and
+    /// `Volumes/USB` is another disk.
     #[test]
-    fn unescapes_octal_space() {
-        assert_eq!(unescape_mountinfo(r"/mnt/my\040disk"), "/mnt/my disk");
-    }
+    fn scan_skips_twins_and_other_disks_and_walks_data_only_folders_once() {
+        let tree = TempTree::new("prune-scan");
+        let home_file = tree.write("root/Users/me/a.bin", 8 * 1024);
+        tree.link(&home_file, "root/Data/Users/me/a.bin");
+        let data_only = tree.write("root/Data/.Spotlight-V100/store.db", 4 * 1024);
+        tree.write("root/Volumes/USB/photo.jpg", 16 * 1024);
+        let root = tree.path("root");
+        let root_s = normalize_path(&root);
+        let plan = PrunePlan {
+            other_mounts: [format!("{root_s}/Volumes/USB")].into(),
+            firmlink_twins: [format!("{root_s}/Data/Users")].into(),
+            ..PrunePlan::default()
+        };
+        let index_path = tree.path("index.ndjson.gz");
 
-    #[test]
-    fn root_scan_keeps_same_pool_subvolumes_and_drops_other_disks() {
-        let mounts = parse_mountinfo(FIXTURE);
-        let foreign = foreign_mount_points(&mounts, "/");
-        assert!(foreign.contains("/mnt/windows"));
-        assert!(foreign.contains("/mnt/windows-backup"));
-        assert!(foreign.contains("/boot"));
-        assert!(foreign.contains("/tmp"));
-        assert!(foreign.contains("/tmp/.mount_DiskHo"));
-        assert!(foreign.contains("/mnt/my disk"));
-        assert!(foreign.contains("/mnt/windows/nested-tmp"));
-        assert!(!foreign.contains("/home"));
-        assert!(!foreign.contains("/var/log"));
-        assert!(!foreign.contains("/"));
-    }
+        let mut state = test_state(&root, &index_path);
+        scan_generic_with_plan(&root, &mut state, plan).unwrap();
+        let snapshot = serde_json::to_value(state.snapshot(ScanStatus::Done, None)).unwrap();
+        let index = finish_index(&mut state, &index_path);
 
-    #[test]
-    fn home_scan_does_not_include_windows() {
-        let mounts = parse_mountinfo(FIXTURE);
-        let foreign = foreign_mount_points(&mounts, "/home");
-        assert!(foreign.is_empty());
-    }
+        let (dirs, files) = assert_listed_once(&index);
+        assert_each_inode_owned_once(&index);
+        assert_eq!(
+            files,
+            [normalize_path(&home_file), normalize_path(&data_only)].into(),
+        );
+        assert!(index.iter().all(|rec| !rec.extra_hardlink), "the twin is never reached");
+        assert!(dirs.contains(&format!("{root_s}/Data/.Spotlight-V100")));
+        assert!(!dirs.iter().any(|d| d.starts_with(&format!("{root_s}/Data/Users"))));
+        assert!(!dirs.iter().any(|d| d.starts_with(&format!("{root_s}/Volumes/USB"))));
+        assert_eq!(state.bytes_seen, occupancy(&home_file) + occupancy(&data_only));
+        assert_eq!(state.io.readdir_calls(), dirs.len() as u64, "pruned folders are never listed");
 
-    #[test]
-    fn a_bind_mount_is_walked_once_through_its_mount_point() {
-        let mountinfo = "\
-125 196 0:66 / /scan rw - tmpfs tmpfs rw\n\
-126 125 0:66 /proj /scan/view rw - tmpfs tmpfs rw\n";
-        assert_eq!(duplicates(mountinfo, "/scan"), vec!["/scan/proj"]);
-        // Scans that reach only one copy prune nothing.
-        assert!(duplicates(mountinfo, "/scan/proj").is_empty());
-        assert!(duplicates(mountinfo, "/scan/view").is_empty());
+        assert_eq!(state.skipped_mounts, vec![format!("{root_s}/Volumes/USB")]);
+        assert_eq!(snapshot["skippedMounts"], serde_json::json!([format!("{root_s}/Volumes/USB")]));
     }
 
     #[test]
-    fn sibling_subvolumes_are_both_walked() {
-        // Fedora and Ubuntu: / is subvolume root (or @), /home is home (or @home).
-        let mountinfo = "\
-30 1 0:29 /root / rw - btrfs /dev/nvme0n1p3 rw\n\
-31 30 0:29 /home /home rw - btrfs /dev/nvme0n1p3 rw\n\
-32 30 0:29 /var /var rw - btrfs /dev/nvme0n1p3 rw\n";
-        assert!(duplicates(mountinfo, "/").is_empty());
-    }
-
-    #[test]
-    fn subvolumes_inside_a_mounted_top_level_volume_are_walked_at_their_mount_points() {
-        let found = duplicates(FIXTURE, "/");
-        assert_eq!(found, vec!["/@home", "/@log"]);
-        assert!(duplicates(FIXTURE, "/home").is_empty());
-        // Other disks are foreign_mount_points' job, not duplicates.
-        assert!(!found.iter().any(|p| p.starts_with("/mnt")));
-    }
-
-    #[test]
-    fn opensuse_root_snapshot_is_not_walked_again_under_snapshots() {
-        let mountinfo = "\
-60 1 0:40 /@/.snapshots/1/snapshot / rw - btrfs /dev/vda2 rw\n\
-61 60 0:40 /@/.snapshots /.snapshots rw - btrfs /dev/vda2 rw\n\
-62 60 0:40 /@/home /home rw - btrfs /dev/vda2 rw\n";
-        assert_eq!(duplicates(mountinfo, "/"), vec!["/.snapshots/1/snapshot"]);
-    }
-
-    #[test]
-    fn a_folder_bound_inside_itself_is_skipped_at_the_inner_mount() {
-        let mountinfo = "\
-20 1 8:1 / / rw - ext4 /dev/sda1 rw\n\
-21 20 8:1 /data /data/sub/loop rw - ext4 /dev/sda1 rw\n";
-        assert_eq!(duplicates(mountinfo, "/"), vec!["/data/sub/loop"]);
-        assert_eq!(duplicates(mountinfo, "/data"), vec!["/data/sub/loop"]);
-    }
-
-    #[test]
-    fn the_same_folder_bound_twice_keeps_the_first_mount() {
-        let mountinfo = "\
-20 1 8:1 / / rw - ext4 /dev/sda1 rw\n\
-21 20 8:1 /data/x /mnt/a rw - ext4 /dev/sda1 rw\n\
-22 20 8:1 /data/x /mnt/b rw - ext4 /dev/sda1 rw\n\
-23 20 8:1 / /mnt/whole rw - ext4 /dev/sda1 rw\n";
-        assert_eq!(duplicates(mountinfo, "/"), vec!["/data/x", "/mnt/b", "/mnt/whole"]);
-    }
-
-    #[test]
-    fn a_folder_bound_onto_itself_is_walked_once_without_pruning() {
-        let mountinfo = "\
-20 1 8:1 / / rw - ext4 /dev/sda1 rw\n\
-21 20 8:1 /srv /srv rw - ext4 /dev/sda1 rw\n";
-        assert!(duplicates(mountinfo, "/").is_empty());
-    }
-
-    #[test]
-    fn a_mount_the_walk_never_reaches_prunes_nothing() {
-        // /tmp/x sits under a tmpfs, and /mnt/y is covered by the tmpfs
-        // mounted on /mnt after it. Neither is walked, so /data/x and
-        // /data/y are the only way to those files.
-        let mountinfo = "\
-20 1 8:1 / / rw - ext4 /dev/sda1 rw\n\
-21 20 0:50 / /tmp rw - tmpfs tmpfs rw\n\
-22 21 8:1 /data/x /tmp/x rw - ext4 /dev/sda1 rw\n\
-23 20 8:1 /data/y /mnt/y rw - ext4 /dev/sda1 rw\n\
-24 20 0:51 / /mnt rw - tmpfs tmpfs rw\n";
-        let found: HashSet<String> = duplicate_mount_paths(&parse_mountinfo(mountinfo), "/");
-        assert!(found.is_empty(), "{found:?}");
-    }
-
-    #[test]
-    fn a_copy_under_a_foreign_mount_is_already_out_of_the_walk() {
-        let mountinfo = "\
-20 1 8:1 / / rw - ext4 /dev/sda1 rw\n\
-21 20 0:50 / /data rw - tmpfs tmpfs rw\n\
-22 20 8:1 /data/x /mnt/x rw - ext4 /dev/sda1 rw\n";
-        // /data on the root disk is hidden under the tmpfs, so /mnt/x is
-        // the only way to its files.
-        let found: HashSet<String> = duplicate_mount_paths(&parse_mountinfo(mountinfo), "/");
-        assert!(found.is_empty(), "{found:?}");
-    }
-
-    #[test]
-    fn explicit_windows_scan_walks_that_disk_and_skips_nested_other_fs() {
-        let mounts = parse_mountinfo(FIXTURE);
-        let foreign = foreign_mount_points(&mounts, "/mnt/windows");
-        assert!(foreign.contains("/mnt/windows/nested-tmp"));
-        assert!(!foreign.contains("/mnt/windows"));
-        assert!(!foreign.contains("/mnt/windows-backup"));
+    fn snapshot_omits_skipped_mounts_when_there_are_none() {
+        let tree = TempTree::new("prune-none");
+        tree.write("root/a.txt", 10);
+        let root = tree.path("root");
+        let index_path = tree.path("index.ndjson.gz");
+        let mut state = test_state(&root, &index_path);
+        scan_generic_with_plan(&root, &mut state, PrunePlan::default()).unwrap();
+        let snapshot = serde_json::to_value(state.snapshot(ScanStatus::Done, None)).unwrap();
+        assert!(snapshot.get("skippedMounts").is_none());
     }
 }

@@ -23,7 +23,7 @@ import {
   sidecarFromAcc,
   writeDevArtifactSidecar,
 } from "../shared/devArtifactSidecar";
-import { mountPathsToSkip } from "../shared/linuxMounts";
+import { loadScanPrunePlan, skipReason } from "../shared/scanPrune";
 
 /**
  * Parsed baseline state used by the Phase-1 smart-rescan optimization. For
@@ -90,11 +90,12 @@ export async function runScan(
   post: (message: WorkerToMainMessage) => void = (message) => parentPort?.postMessage(message),
 ): Promise<void> {
   const rootPath = Path.resolve(input.rootPath);
-  // Mounts on a different filesystem than rootPath, and second paths to
-  // files another mount of this one already shows (bind mounts). Same-pool
-  // btrfs subvolumes are walked. Checked before we descend so a scan of
-  // `/` does not walk `/mnt/windows`, tmpfs, or a bind's source twice.
-  const skippedMounts = mountPathsToSkip(rootPath);
+  // Other disks mounted below rootPath, second copies through a Linux bind
+  // mount, and on macOS the Data-volume twins of firmlinked folders. Checked
+  // before we descend so a scan of `/` does not walk `/mnt/windows`,
+  // `/Volumes/USB`, a bind's source, or the Data volume twice.
+  const prunePlan = await loadScanPrunePlan(rootPath);
+  const skippedMounts = new Set<string>();
   const scanOptions = input.options;
   const TOP_FILE_LIMIT = input.limits?.topFileLimit ?? DEFAULT_TOP_FILE_LIMIT;
   const TOP_DIRECTORY_LIMIT = input.limits?.topDirectoryLimit ?? DEFAULT_TOP_DIRECTORY_LIMIT;
@@ -254,6 +255,7 @@ export async function runScan(
         .slice(0, TOP_EXTENSION_LIMIT),
       errorMessage,
       lastUpdatedAt: now,
+      ...(skippedMounts.size > 0 ? { skippedMounts: [...skippedMounts].sort() } : {}),
     };
 
     post({
@@ -347,7 +349,9 @@ export async function runScan(
       }
 
       if (entry.isDirectory()) {
-        if (skippedMounts.has(fullPath)) {
+        const pruned = skipReason(prunePlan, fullPath);
+        if (pruned) {
+          if (pruned === "other-mount") skippedMounts.add(fullPath);
           continue;
         }
         if (!directoryTotals.has(fullPath)) {

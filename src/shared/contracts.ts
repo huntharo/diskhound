@@ -90,6 +90,26 @@ export function hardlinkAccountingCompatible(
 }
 
 /**
+ * macOS scans stay on the root's disk and walk the Data volume once. The
+ * Data-side twins of firmlinked folders (/System/Volumes/Data/Users is
+ * /Users), /Volumes/*, and the VM and Preboot volumes are left out.
+ * History without this marker walked them, so a scan of `/` counted most
+ * of the disk twice. Linux already left other disks out; the marker is
+ * macOS only.
+ */
+export type VolumeAccounting = "own-disk";
+
+export const MAC_VOLUME_ACCOUNTING: VolumeAccounting = "own-disk";
+
+export function volumeAccountingCompatible(
+  a: { volumeAccounting?: VolumeAccounting } | null | undefined,
+  b: { volumeAccounting?: VolumeAccounting } | null | undefined,
+): boolean {
+  if (process.platform !== "darwin") return true;
+  return a?.volumeAccounting === b?.volumeAccounting;
+}
+
+/**
  * Whether a persisted scan's `s` / `bytesSeen` values are size-on-disk.
  * Pre-field history: Unix already used allocated occupancy; Windows used
  * logical EOF. Mixing those Windows indexes into a new scan would keep
@@ -136,6 +156,13 @@ export interface ScanSnapshot {
   sizeSemantics?: ScanSizeSemantics;
   /** macOS/Linux: `once` when hardlinked bytes were counted once. */
   hardlinkAccounting?: HardlinkAccounting;
+  /** macOS: `own-disk` when the walk stayed on the root's disk. */
+  volumeAccounting?: VolumeAccounting;
+  /**
+   * Mount points below the root that the walk left out because they are
+   * another disk (/Volumes/Storage, /mnt/windows). Omitted when none were.
+   */
+  skippedMounts?: string[];
 }
 
 export interface PathActionResult {
@@ -654,6 +681,8 @@ export interface ScanHistoryEntry {
   sizeSemantics?: ScanSizeSemantics;
   /** macOS/Linux: missing on history that counted every hardlink. */
   hardlinkAccounting?: HardlinkAccounting;
+  /** macOS: missing on history that walked the Data volume twice. */
+  volumeAccounting?: VolumeAccounting;
 }
 
 export type FileDeltaKind = "added" | "removed" | "grew" | "shrank";
@@ -726,6 +755,11 @@ export interface ScanDiffResult {
    * hardlinked file once. Totals are not comparable.
    */
   hardlinkAccountingChanged: boolean;
+  /**
+   * macOS: true when one scan walked the Data volume twice and other
+   * disks, and the other stayed on its own disk. Totals are not comparable.
+   */
+  volumeAccountingChanged: boolean;
 }
 
 // ── Full File-Index Diff Types ─────────────────────────────

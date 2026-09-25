@@ -31,9 +31,13 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   const out = { ...counted, stat };
   return { ...out, default: out };
 });
-// mountinfo is read once per scan on Linux and never on macOS. Stubbed so
-// both record the same budget; it is not a per-entry read.
-vi.mock("../../shared/linuxMounts", () => ({ mountPathsToSkip: () => new Set<string>() }));
+// The prune plan reads mountinfo on Linux, and the mount table and
+// firmlinks on macOS, once per scan. Stubbed so both record the same
+// budget; it is not a per-entry read.
+vi.mock("../../shared/scanPrune", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../shared/scanPrune")>();
+  return { ...original, loadScanPrunePlan: async () => original.emptyPrunePlan() };
+});
 
 interface IndexLine {
   p: string;
