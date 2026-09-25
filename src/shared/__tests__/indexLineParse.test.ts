@@ -81,9 +81,22 @@ describe("parseIndexLine", () => {
     expect(parseIndexLine(line)).toEqual({ t: "d", p: "D:\\proj" });
   });
 
+  it("decodes every escape the native writer emits on the fast path", () => {
+    // append_json_escaped: \" \\ \n \r \t, other control chars as \u00XX.
+    const path = 'C:\\odd "dir"\\a\tb\nc\rd\u0001e.bin';
+    const line = JSON.stringify({ p: path, s: 1, m: 2 });
+    expect(line).toContain("\\u0001");
+    expect(parseIndexLine(line)).toEqual({ t: "f", p: path, s: 1, m: 2 });
+    expect(parseIndexLine(JSON.stringify({ p: path, t: "d", m: 2 }))).toEqual({ t: "d", p: path });
+  });
+
   it("returns null for garbage", () => {
     expect(parseIndexLine("not json")).toBeNull();
     expect(parseIndexLine('{"s":1}')).toBeNull();
+  });
+
+  it("skips a canonical-shaped line with an invalid escape instead of throwing", () => {
+    expect(parseIndexLine('{"p":"C:\\\\a\\qb","s":1,"m":2}')).toBeNull();
   });
 });
 

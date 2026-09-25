@@ -25,6 +25,20 @@ describe("parseFolderTreeSidecarLine", () => {
     });
   });
 
+  it("decodes every escape the native writer emits on the fast path", () => {
+    // append_folder_tree_line escapes k, d paths and f names with
+    // append_json_escaped: \" \\ \n \r \t, other control chars as \u00XX.
+    const path = 'C:\\odd "dir"\\a\tb\nc\rd\u0001e.bin';
+    const line = JSON.stringify({ k: path, d: [[path, 1, 2]], f: [["x\ty\u0001.bin", 3, 4]] });
+    expect(line).toContain("\\u0001");
+    expect(line.startsWith('{"k":"')).toBe(true);
+    expect(parseFolderTreeSidecarLine(line)).toEqual({
+      key: path,
+      dirs: [{ path, size: 1, fileCount: 2 }],
+      files: [{ name: "x\ty\u0001.bin", size: 3, modifiedAt: 4 }],
+    });
+  });
+
   it("falls back to JSON.parse for odd field order", () => {
     const line = JSON.stringify({
       f: [["z.bin", 9, 1]],
@@ -62,5 +76,10 @@ describe("parseFolderTreeSidecarLine", () => {
   it("returns null for garbage and missing keys", () => {
     expect(parseFolderTreeSidecarLine("not json")).toBeNull();
     expect(parseFolderTreeSidecarLine('{"d":[],"f":[]}')).toBeNull();
+  });
+
+  it("returns null for a canonical-shaped line with an invalid escape", () => {
+    expect(parseFolderTreeSidecarLine('{"k":"c:\\\\a\\qb","d":[],"f":[]}')).toBeNull();
+    expect(parseFolderTreeSidecarLine('{"k":"c:\\\\a","d":[],"f":[["x\\q",1,2]]}')).toBeNull();
   });
 });

@@ -26,6 +26,7 @@ import {
   type AffinityRule,
   type AppSettings,
   type DevArtifactReport,
+  type DevBranch,
   type DiskIoSnapshot,
   type FullDiffStatus,
   type FullDiffResult,
@@ -59,6 +60,7 @@ import {
   markFullScan,
   startDiskMonitoring,
 } from "./shared/diskMonitor";
+import { readDevBranch } from "./shared/devBranch";
 import { getStorageAccounting } from "./shared/macStorageAccounting";
 import { createScanSnapshotStore } from "./shared/scanStore";
 import { createSettingsStore, type SettingsStore } from "./shared/settingsStore";
@@ -1677,6 +1679,15 @@ void (async () => {
         `Remove or narrow that exclusion in Settings > Protected Folders to allow this action.`,
     };
   };
+
+  // ── IPC: Build identity ───────────────────────────────────
+
+  // Development builds name the checkout they run from in the header.
+  // Read once: the code running is what was built at launch, even if
+  // the checkout moves to another branch afterwards.
+  let devBranch: Promise<DevBranch | null> | null = null;
+  ipcMain.handle("diskhound:get-dev-branch", () =>
+    (devBranch ??= app.isPackaged ? Promise.resolve(null) : readDevBranch(projectRoot)));
 
   // ── IPC: Scan ─────────────────────────────────────────────
 

@@ -194,6 +194,9 @@ const api: DiskhoundNativeApi = {
     return () => { ipcRenderer.removeListener("diskhound:update-status", wrapped); };
   },
 
+  // Build identity
+  getDevBranch: () => ipcRenderer.invoke("diskhound:get-dev-branch"),
+
   // Tray
   minimizeToTray: () => ipcRenderer.send("diskhound:minimize-to-tray"),
   quitApp: () => ipcRenderer.send("diskhound:quit-app"),
