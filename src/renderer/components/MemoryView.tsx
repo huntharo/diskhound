@@ -5,6 +5,7 @@ import { findMatchingRule } from "../lib/affinityMatch";
 import { formatBytes, formatCount } from "../lib/format";
 import { saveLocalPreference } from "../lib/localPreference";
 import { processMetadataParts, processSearchText } from "../lib/processMetadata";
+import { squarify } from "../lib/treemap";
 import { nativeApi } from "../nativeApi";
 import { GpuView } from "./GpuView";
 import {
@@ -1115,93 +1116,6 @@ interface TreemapRect {
   color: string;
 }
 
-interface WeightedProcess {
-  process: ProcessInfo;
-  weight: number;
-}
-
-function squarifyProcesses(items: WeightedProcess[], bounds: { x: number; y: number; w: number; h: number }, totalWeight: number, out: TreemapRect[]): void {
-  if (items.length === 0 || bounds.w <= 0 || bounds.h <= 0) return;
-
-  if (items.length === 1) {
-    out.push({
-      ...bounds,
-      process: items[0]!.process,
-      color: colorForProcessName(items[0]!.process.name),
-    });
-    return;
-  }
-
-  const isWide = bounds.w >= bounds.h;
-  const sideLen = isWide ? bounds.h : bounds.w;
-  const totalArea = bounds.w * bounds.h;
-
-  let rowItems: WeightedProcess[] = [];
-  let rowWeight = 0;
-  let bestAspect = Infinity;
-  let splitIndex = 0;
-
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i]!;
-    const nextItems = [...rowItems, item];
-    const nextRowWeight = rowWeight + item.weight;
-    const nextRowLen = (nextRowWeight / totalWeight) * (isWide ? bounds.w : bounds.h);
-
-    let worstAspect = 0;
-    for (const ri of nextItems) {
-      const itemLen = sideLen > 0 && nextRowLen > 0
-        ? (ri.weight / totalWeight) * totalArea / nextRowLen
-        : 1;
-      const aspect = Math.max(nextRowLen / itemLen, itemLen / nextRowLen);
-      worstAspect = Math.max(worstAspect, aspect);
-    }
-
-    if (worstAspect <= bestAspect || rowItems.length === 0) {
-      bestAspect = worstAspect;
-      rowItems = nextItems;
-      rowWeight = nextRowWeight;
-      splitIndex = i + 1;
-    } else {
-      break;
-    }
-  }
-
-  // Lay out the row, then recurse on remaining items + remaining bounds.
-  const rowLen = (rowWeight / totalWeight) * (isWide ? bounds.w : bounds.h);
-  let cursor = 0;
-  for (const ri of rowItems) {
-    const itemLen = rowLen > 0
-      ? (ri.weight / rowWeight) * sideLen
-      : 0;
-    if (isWide) {
-      out.push({
-        x: bounds.x,
-        y: bounds.y + cursor,
-        w: rowLen,
-        h: itemLen,
-        process: ri.process,
-        color: colorForProcessName(ri.process.name),
-      });
-    } else {
-      out.push({
-        x: bounds.x + cursor,
-        y: bounds.y,
-        w: itemLen,
-        h: rowLen,
-        process: ri.process,
-        color: colorForProcessName(ri.process.name),
-      });
-    }
-    cursor += itemLen;
-  }
-
-  const nextBounds = isWide
-    ? { x: bounds.x + rowLen, y: bounds.y, w: bounds.w - rowLen, h: bounds.h }
-    : { x: bounds.x, y: bounds.y + rowLen, w: bounds.w, h: bounds.h - rowLen };
-
-  squarifyProcesses(items.slice(splitIndex), nextBounds, totalWeight - rowWeight, out);
-}
-
 function ProcessTreemap(props: {
   processes: ProcessInfo[];
   totalBytes: number;
@@ -1341,7 +1255,9 @@ function ProcessTreemap(props: {
     }
 
     const rects: TreemapRect[] = [];
-    squarifyProcesses(weighted, { x: 0, y: 0, w: dims.w, h: dims.h }, totalWeight, rects);
+    squarify(weighted, { x: 0, y: 0, w: dims.w, h: dims.h }, totalWeight, (item, rect) => {
+      rects.push({ ...rect, process: item.process, color: colorForProcessName(item.process.name) });
+    });
     rectsRef.current = rects;
 
     for (const r of rects) {
