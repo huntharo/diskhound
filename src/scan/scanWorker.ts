@@ -110,11 +110,13 @@ export async function runScan(
 
   // Optional full-file index writer (gzipped NDJSON) for real diff tracking
   let indexGzip: ReturnType<typeof createGzip> | null = null;
+  let indexFile: ReturnType<typeof createWriteStream> | null = null;
   if (input.indexOutput) {
     try {
       mkdirSync(Path.dirname(input.indexOutput), { recursive: true });
       indexGzip = createGzip({ level: 6 });
       const outStream = createWriteStream(input.indexOutput);
+      indexFile = outStream;
       // Error listeners BEFORE pipe() — pipe doesn't propagate, and
       // a worker thread crash from an unhandled stream error makes
       // the whole scan look like it disappeared into the void.
@@ -147,8 +149,16 @@ export async function runScan(
   };
   const finalizeIndex = async () => {
     if (indexGzip) {
+      // Wait for the file, not just gzip: "done" lets main read or rename it.
+      const file = indexFile;
       await new Promise<void>((resolve) => {
-        indexGzip!.end(() => resolve());
+        if (!file || file.closed) {
+          indexGzip!.end(() => resolve());
+          return;
+        }
+        file.once("close", () => resolve());
+        file.once("error", () => resolve());
+        indexGzip!.end();
       });
       indexGzip = null;
     }
@@ -372,14 +382,7 @@ export async function runScan(
             return null;
           }
 
-          let link: LinkStat | null = null;
-          if (hardlinks) {
-            try {
-              link = await linkStat(fullPath, stat);
-            } catch {
-              return null;
-            }
-          }
+          const link = hardlinks ? await linkStat(fullPath, stat) : null;
 
           const fileRecord: ScanFileRecord = {
             path: fullPath,
@@ -428,7 +431,7 @@ export async function runScan(
       `(${hardlinkBytesDeduped} bytes), ${hardlinks.inodesWithUnseenLinks} inodes with links outside the scan`,
     );
   }
-  if (baseline) {
+  if (inheritedDirs > 0) {
     // Diagnostic: surfaces whether Phase-1 fast-path actually fired, and
     // how much of the tree we inherited vs. walked. Shows up in the
     // worker thread's stderr (captured by Electron's console).
@@ -458,8 +461,12 @@ async function linkStat(path: string, stat: Stats): Promise<LinkStat> {
   if (stat.nlink <= 1 || (Number.isSafeInteger(stat.ino) && Number.isSafeInteger(stat.dev))) {
     return stat;
   }
-  const exact = await FS.stat(path, { bigint: true });
-  return { dev: exact.dev, ino: exact.ino, nlink: stat.nlink };
+  try {
+    const exact = await FS.stat(path, { bigint: true });
+    return { dev: exact.dev, ino: exact.ino, nlink: stat.nlink };
+  } catch {
+    return stat;
+  }
 }
 
 function getExtension(fileName: string): string {

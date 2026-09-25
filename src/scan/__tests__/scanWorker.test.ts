@@ -55,21 +55,12 @@ function settleDirMtimes(dir: string): void {
   FS.utimesSync(dir, past, past);
 }
 
-async function readIndex(path: string): Promise<IndexLine[]> {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return gunzipSync(FS.readFileSync(path))
-        .toString("utf8")
-        .split("\n")
-        .filter(Boolean)
-        .map((line) => JSON.parse(line) as IndexLine);
-    } catch (error) {
-      // runScan resolves when gzip has finished; the file stream can
-      // still be flushing its last chunk.
-      if (attempt >= 40) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-  }
+function readIndex(path: string): IndexLine[] {
+  return gunzipSync(FS.readFileSync(path))
+    .toString("utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as IndexLine);
 }
 
 async function scan(rootRel: string, name: string, extra: Partial<ScanStartInput> = {}) {
@@ -79,7 +70,7 @@ async function scan(rootRel: string, name: string, extra: Partial<ScanStartInput
     if (message.type === "error") throw new Error(message.message);
     if (message.type === "done") snapshot = message.snapshot;
   });
-  const files = (await readIndex(indexOutput)).filter((line) => line.t !== "d");
+  const files = readIndex(indexOutput).filter((line) => line.t !== "d");
   const extraLinks = files
     .filter((line) => line.h === 1)
     .map((line) => Path.relative(at(rootRel), line.p))
