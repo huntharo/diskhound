@@ -1,0 +1,32 @@
+name: Changelog guard
+
+# Kept apart from ci.yml, which does not run on edits. An edit starts
+# only this workflow, so the build and test checks keep their results.
+on:
+  pull_request:
+    # Default types are opened, synchronize, and reopened. Without
+    # edited, renaming a "Cut DiskHound" pull request keeps the old
+    # green changelog check on the same commit.
+    types: [opened, synchronize, reopened, edited]
+    branches: [main, master]
+
+jobs:
+  # Runs on every pull_request event, including a body-only edit.
+  # Skipping it would post a successful skipped check on the same
+  # commit and cover a failed title edit.
+  changelog-guard:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reject feature-branch changelog edits
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --depth=1 origin "$BASE_SHA"
+          # Run main's copy. The pull request checkout can replace this
+          # script with one that always exits 0 and edit CHANGELOG.md.
+          git show "$BASE_SHA:scripts/changelog-guard.mjs" > /tmp/changelog-guard.mjs
+          node /tmp/changelog-guard.mjs
