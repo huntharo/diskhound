@@ -3198,7 +3198,8 @@ button, input, select, textarea { font: inherit; }
   background: rgba(255,255,255,0.015);
   pointer-events: none;
 }
-.folder-protected-note {
+.folder-protected-note,
+.folder-paged-note {
   margin: 8px 14px;
   padding: 8px 10px;
   border: 1px solid rgba(59,130,246,0.2);

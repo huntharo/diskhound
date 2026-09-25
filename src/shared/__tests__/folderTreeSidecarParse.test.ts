@@ -39,6 +39,26 @@ describe("parseFolderTreeSidecarLine", () => {
     });
   });
 
+  it("decodes control-character escapes the way JSON.parse does", () => {
+    // Native writes \u0008 where JSON.stringify writes \b; both decode.
+    const line = '{"k":"/tmp/a\\nb","d":[["/tmp/a\\nb/c\\u0008d\\\\n",1,1]],"f":[["t\\tab\\"q",2,3]]}';
+    expect(parseFolderTreeSidecarLine(line)).toEqual({
+      key: "/tmp/a\nb",
+      dirs: [{ path: "/tmp/a\nb/c\bd\\n", size: 1, fileCount: 1 }],
+      files: [{ name: "t\tab\"q", size: 2, modifiedAt: 3 }],
+    });
+    expect(parseFolderTreeSidecarLine(line)).toEqual(
+      (() => {
+        const rec = JSON.parse(line);
+        return {
+          key: rec.k,
+          dirs: [{ path: rec.d[0][0], size: 1, fileCount: 1 }],
+          files: [{ name: rec.f[0][0], size: 2, modifiedAt: 3 }],
+        };
+      })(),
+    );
+  });
+
   it("returns null for garbage and missing keys", () => {
     expect(parseFolderTreeSidecarLine("not json")).toBeNull();
     expect(parseFolderTreeSidecarLine('{"d":[],"f":[]}')).toBeNull();

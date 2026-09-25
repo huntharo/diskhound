@@ -1,8 +1,7 @@
 import * as FS from "node:fs/promises";
 import * as FS_SYNC from "node:fs";
-import { createReadStream } from "node:fs";
 import * as Path from "node:path";
-import { createInterface } from "node:readline";
+import { getHeapStatistics } from "node:v8";
 import { Worker } from "node:worker_threads";
 import { createGunzip, createGzip } from "node:zlib";
 
@@ -22,6 +21,7 @@ import {
 import {
   createIdleScanSnapshot,
   defaultScanOptions,
+  FOLDER_CHILDREN_MAX_DIRS,
   normalizeAppSettings,
   type AffinityRule,
   type AppSettings,
@@ -118,9 +118,17 @@ import {
 } from "./shared/fullDiffWorkerRuntime";
 import {
   resolveBundledFolderTreeWorkerPath,
+  runFolderTreeQueryWorker,
   runFolderTreeWorker,
 } from "./shared/folderTreeWorkerRuntime";
-import { parseFolderTreeSidecarLine } from "./shared/folderTreeSidecarParse";
+import {
+  MAX_HEAP_FRACTION_DURING_LOAD,
+  planFolderTreeLoad,
+  type FolderTreeLoadPlan,
+} from "./shared/folderTreeLoadPlan";
+import { loadFolderTreeSidecar } from "./shared/folderTreeSidecarLoad";
+import { EMPTY_FOLDER_NODE, FolderTreePageCache } from "./shared/folderTreePageCache";
+import type { FolderTreeSidecarQueryResult } from "./shared/folderTreeSidecarQuery";
 import {
   dropSidecarRoots,
   loadDevArtifactReport,
@@ -289,6 +297,12 @@ app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
 // Extra ceiling only commits pages when touched; the common case pays
 // nothing. 8 GB is comfortable on a modern 16+ GB machine and still
 // leaves room for renderer + GPU + tray processes.
+//
+// NOTE: Electron builds V8 with pointer compression, so this does not
+// take effect. On Electron 40 `heap_size_limit` still reads 4096 MB with
+// the flag set, and the main isolate and its worker_threads share that
+// one 4 GB cage. folderTreeLoadPlan sizes the Folders-tab tree against
+// the real limit.
 app.commandLine.appendSwitch("js-flags", "--max-old-space-size=8192");
 if (process.platform === "linux") {
   app.commandLine.appendSwitch("class", "diskhound");
@@ -1105,14 +1119,7 @@ void (async () => {
             const prewarmHistoryId = historyId;
             const prewarmRootPath = message.snapshot.rootPath ?? undefined;
             setTimeout(() => {
-              void ensureFolderTree(prewarmHistoryId, prewarmRootPath, {
-                skipIfMemoryPressureMb: PREWARM_RSS_CEILING_MB,
-              }).catch((err) => {
-                writeCrashLog(
-                  "folder-tree-prewarm",
-                  err instanceof Error ? (err.stack ?? err.message) : String(err),
-                );
-              });
+              prewarmFolderTree(prewarmHistoryId, prewarmRootPath, "folder-tree-prewarm");
             }, 3000);
           } catch {
             // Scanner may have skipped or failed to write the index — ignore
@@ -2808,7 +2815,14 @@ void (async () => {
     }
   }
 
-  async function readFolderTreeSidecar(scanId: string): Promise<FolderTree | null> {
+  /**
+   * Stream the sidecar into a FolderTree. Returns null when it's missing
+   * or unreadable (the caller rebuilds from the index), or "heap-ceiling"
+   * when loading it pushed the V8 heap past MAX_HEAP_FRACTION_DURING_LOAD
+   * of the limit. That's the backstop for a folderTreeLoadPlan estimate
+   * that came in low: the partial tree is dropped and the scan is paged.
+   */
+  async function readFolderTreeSidecar(scanId: string): Promise<FolderTree | null | "heap-ceiling"> {
     const filePath = folderTreeSidecarPath(scanId);
     if (!FS_SYNC.existsSync(filePath)) {
       writeCrashLog(
@@ -2818,52 +2832,33 @@ void (async () => {
       return null;
     }
 
-    const tree: FolderTree = new Map();
-    let linesRead = 0;
-    let parseFailures = 0;
-    try {
-      const gunzip = createGunzip();
-      const src = createReadStream(filePath);
-      // CRITICAL: attach error listeners BEFORE pipe(). pipe doesn't
-      // propagate errors — an unhandled error event on src (e.g.
-      // ENOENT race when the sidecar was deleted between existsSync
-      // and createReadStream's async open) surfaces as the
-      // "DiskHound — Unexpected error" dialog. Same for gunzip if
-      // the gzipped data is corrupt or truncated. The outer
-      // try/catch picks up the rejection from the for-await loop and
-      // returns null so the caller rebuilds the tree from the index.
-      src.on("error", () => { /* swallowed — for-await aborts */ });
-      gunzip.on("error", () => { /* swallowed */ });
-      src.pipe(gunzip);
-      const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
-      for await (const line of rl) {
-        if (!line) continue;
-        linesRead++;
-        const parsed = parseFolderTreeSidecarLine(line);
-        if (!parsed) { parseFailures++; continue; }
-        tree.set(parsed.key, { dirs: parsed.dirs, files: parsed.files });
-        if (linesRead % 4_000 === 0) {
-          await new Promise<void>((resolve) => setImmediate(resolve));
-        }
-      }
-      // Log success/failure ratio so we can tell if a sidecar was
-      // present-but-corrupt (rare, but hard to diagnose without
-      // explicit instrumentation). Before this, a sidecar that
-      // parsed to 0 entries would silently fall through to the
-      // worker-based rebuild, which OOM'd on big drives and made
-      // the Folders tab unusable after app restart.
+    const heapCeilingBytes = getHeapStatistics().heap_size_limit * MAX_HEAP_FRACTION_DURING_LOAD;
+    const result = await loadFolderTreeSidecar(filePath, { heapCeilingBytes });
+    if (result.status === "heap-ceiling") {
       writeCrashLog(
         "folder-tree-sidecar-read",
-        `scanId=${scanId} lines=${linesRead} parseFailures=${parseFailures} treeSize=${tree.size}`,
+        `scanId=${scanId} stopped at line ${result.lines}: heap ${Math.round(result.heapUsedBytes / 1024 / 1024)} MB passed the ${Math.round(heapCeilingBytes / 1024 / 1024)} MB load ceiling — paging this scan instead`,
       );
-      return tree;
-    } catch (err) {
+      return "heap-ceiling";
+    }
+    if (result.status === "error") {
       writeCrashLog(
         "folder-tree-sidecar-read",
-        `scanId=${scanId} linesRead=${linesRead} error=${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+        `scanId=${scanId} linesRead=${result.lines} error=${result.error instanceof Error ? (result.error.stack ?? result.error.message) : String(result.error)}`,
       );
       return null;
     }
+    // Log success/failure ratio so we can tell if a sidecar was
+    // present-but-corrupt (rare, but hard to diagnose without
+    // explicit instrumentation). Before this, a sidecar that
+    // parsed to 0 entries would silently fall through to the
+    // worker-based rebuild, which OOM'd on big drives and made
+    // the Folders tab unusable after app restart.
+    writeCrashLog(
+      "folder-tree-sidecar-read",
+      `scanId=${scanId} lines=${result.lines} parseFailures=${result.parseFailures} treeSize=${result.tree.size}`,
+    );
+    return result.tree;
   }
 
   async function deleteFolderTreeSidecar(scanId: string): Promise<void> {
@@ -2894,6 +2889,15 @@ void (async () => {
    *      tree (original cost); writes sidecar on success
    */
   const PREWARM_RSS_CEILING_MB = 5500;
+  /** Loading this scan's tree hit the heap ceiling; callers page it instead. */
+  class FolderTreeTooLargeError extends Error {
+    constructor(scanId: string) {
+      super(`Folder tree for scan ${scanId} is too large to hold in memory`);
+      this.name = "FolderTreeTooLargeError";
+    }
+  }
+  /** Scans whose in-memory load hit the heap ceiling. Paged from then on. */
+  const folderTreePagedScanIds = new Set<string>();
   const ensureFolderTree = async (
     id: string,
     rootPath?: string,
@@ -2925,6 +2929,10 @@ void (async () => {
       const started = Date.now();
       const sidecarFilePresent = FS_SYNC.existsSync(folderTreeSidecarPath(id));
       const fromDisk = await readFolderTreeSidecar(id);
+      if (fromDisk === "heap-ceiling") {
+        folderTreePagedScanIds.add(id);
+        throw new FolderTreeTooLargeError(id);
+      }
       if (fromDisk && fromDisk.size > 0) {
         writeCrashLog(
           "folder-tree-sidecar-hit",
@@ -2972,6 +2980,8 @@ void (async () => {
     }
     folderTreeInflight.delete(id);
     folderTreeRootByScanId.delete(id);
+    folderTreePages.invalidateScan(id);
+    folderTreePagedScanIds.delete(id);
   };
 
   /**
@@ -2989,6 +2999,155 @@ void (async () => {
     }
   };
 
+  // ── Folder tree load planning and paging ─────────────────────────
+  //
+  // A scan's whole tree can be far bigger than the V8 heap. A 42M-file
+  // `/` scan wrote a 995 MB sidecar that needs ~8.9 GB as a FolderTree,
+  // and Electron caps the main process (and its workers, which share
+  // the same pointer-compression cage) at 4 GB. Loading it at boot
+  // aborted the app every launch. folderTreeLoadPlan decides per scan:
+  // hold the whole tree ("memory"), read one folder at a time from the
+  // sidecar ("paged"), or refuse with a message ("unavailable").
+
+  /** DISKHOUND_FOLDER_TREE_MAX_HEAP_MB caps the in-memory tree. 0 forces paging. */
+  const folderTreeMaxHeapOverride = (() => {
+    const raw = process.env.DISKHOUND_FOLDER_TREE_MAX_HEAP_MB;
+    if (raw === undefined || raw.trim() === "") return undefined;
+    const mb = Number(raw);
+    return Number.isFinite(mb) && mb >= 0 ? mb * 1024 * 1024 : undefined;
+  })();
+
+  const fileSizeOrNull = (filePath: string): number | null => {
+    try {
+      return FS_SYNC.statSync(filePath).size;
+    } catch {
+      return null;
+    }
+  };
+
+  const planFolderTreeFor = (id: string, rootPath?: string): FolderTreeLoadPlan => {
+    const entry = (rootPath ? getScanHistory(rootPath) : getAllEntries()).find((e) => e.id === id);
+    const sidecarBytes = fileSizeOrNull(folderTreeSidecarPath(id));
+    const heap = getHeapStatistics();
+    const plan = planFolderTreeLoad({
+      sidecarBytes,
+      hasIndex: FS_SYNC.existsSync(indexFilePath(id)),
+      filesVisited: entry?.filesVisited,
+      directoriesVisited: entry?.directoriesVisited,
+      heapLimitBytes: heap.heap_size_limit,
+      heapUsedBytes: heap.used_heap_size,
+      maxTreeHeapBytes: folderTreeMaxHeapOverride,
+    });
+    if (plan.mode === "memory" && sidecarBytes !== null && folderTreePagedScanIds.has(id)) {
+      return { ...plan, mode: "paged", reason: `${plan.reason}, but loading it hit the heap ceiling earlier` };
+    }
+    return plan;
+  };
+
+  // One crash.log line per scan and mode, not one per folder click.
+  const loggedFolderTreePlans = new Set<string>();
+  const logFolderTreePlan = (id: string, plan: FolderTreeLoadPlan) => {
+    const key = `${id}:${plan.mode}`;
+    if (loggedFolderTreePlans.has(key)) return;
+    loggedFolderTreePlans.add(key);
+    writeCrashLog("folder-tree-plan", `scanId=${id} mode=${plan.mode}: ${plan.reason}`);
+  };
+
+  /**
+   * Pre-warm only trees the plan says fit in memory. Paged and
+   * unavailable scans load on the user's first Folders click instead.
+   */
+  const prewarmFolderTree = (id: string, rootPath: string | undefined, tag: string) => {
+    const plan = planFolderTreeFor(id, rootPath);
+    if (plan.mode !== "memory") {
+      writeCrashLog("folder-tree-prewarm-skipped", `scanId=${id} mode=${plan.mode}: ${plan.reason}`);
+      return;
+    }
+    void ensureFolderTree(id, rootPath, {
+      skipIfMemoryPressureMb: PREWARM_RSS_CEILING_MB,
+    }).catch((err) => {
+      // The sidecar reader already logged why; the scan is paged now.
+      if (err instanceof FolderTreeTooLargeError) return;
+      writeCrashLog(tag, err instanceof Error ? (err.stack ?? err.message) : String(err));
+    });
+  };
+
+  // Paged mode: each uncached folder is one streaming pass over the
+  // sidecar in a worker (~5 s for a 1 GB sidecar). The pass also keeps
+  // the folder's siblings and up to three levels below them (4 below
+  // the parent), so going back up or across and the next few drill-ins
+  // are instant. Main holds at most ~96 MB of parsed pages.
+  const FOLDER_TREE_PAGE_CACHE_HEAP_BYTES = 96 * 1024 * 1024;
+  const FOLDER_TREE_QUERY_MAX_DEPTH = 4;
+  const FOLDER_TREE_QUERY_MAX_LINE_BYTES = 8 * 1024 * 1024;
+  const folderTreeKeySeparator: "/" | "\\" = process.platform === "win32" ? "\\" : "/";
+  const folderTreePages = new FolderTreePageCache(FOLDER_TREE_PAGE_CACHE_HEAP_BYTES, folderTreeKeySeparator);
+  const folderTreePageInflight = new Map<string, Promise<FolderTreeSidecarQueryResult>>();
+
+  const getPagedFolderNode = async (id: string, key: string): Promise<FolderNode> => {
+    const cached = folderTreePages.lookup(id, key);
+    if (cached) return cached;
+    const inflightKey = `${id}\u0000${key}`;
+    let pending = folderTreePageInflight.get(inflightKey);
+    if (!pending) {
+      const parentEnd = key.lastIndexOf(folderTreeKeySeparator);
+      pending = runFolderTreeQueryWorker(
+        {
+          sidecarPath: folderTreeSidecarPath(id),
+          targetKey: key,
+          anchorKey: parentEnd >= 0 ? key.slice(0, parentEnd) : key,
+          separator: folderTreeKeySeparator,
+          maxDepth: FOLDER_TREE_QUERY_MAX_DEPTH,
+          maxBytes: FOLDER_TREE_QUERY_MAX_LINE_BYTES,
+        },
+        { workerPath: folderTreeWorkerEntry },
+      )
+        .then((result) => {
+          folderTreePages.add(id, result);
+          return result;
+        })
+        .finally(() => {
+          folderTreePageInflight.delete(inflightKey);
+        });
+      folderTreePageInflight.set(inflightKey, pending);
+    }
+    const result = await pending;
+    // Another query can evict this page before we read it back.
+    return folderTreePages.lookup(id, key)
+      ?? result.entries.find(([entryKey]) => entryKey === key)?.[1]
+      ?? EMPTY_FOLDER_NODE;
+  };
+
+  type FolderNodeLookup =
+    | { node: FolderNode | null; loadMode: "memory" | "paged" }
+    | { unavailableMessage: string };
+
+  const lookupFolderNode = async (id: string, rootPath: string, key: string): Promise<FolderNodeLookup> => {
+    folderTreeRootByScanId.set(id, normPath(rootPath));
+    try {
+      if (folderTreeCache.has(id) || folderTreeInflight.has(id)) {
+        const tree = await ensureFolderTree(id, rootPath);
+        return { node: tree.get(key) ?? null, loadMode: "memory" };
+      }
+      const plan = planFolderTreeFor(id, rootPath);
+      logFolderTreePlan(id, plan);
+      if (plan.mode === "unavailable") {
+        return {
+          unavailableMessage: FS_SYNC.existsSync(indexFilePath(id))
+            ? "This scan is too big to open in Folders without its saved folder summary, and that file is missing. Rescan this drive to rebuild it."
+            : "This scan's folder index is no longer on disk. Rescan this drive to browse its folders.",
+        };
+      }
+      if (plan.mode === "memory") {
+        const tree = await ensureFolderTree(id, rootPath);
+        return { node: tree.get(key) ?? null, loadMode: "memory" };
+      }
+    } catch (err) {
+      if (!(err instanceof FolderTreeTooLargeError)) throw err;
+    }
+    return { node: await getPagedFolderNode(id, key), loadMode: "paged" };
+  };
+
   /**
    * Memory diagnostic summary including the caches we know can grow
    * (folder-tree parent count, treemap cache entries, full-diff memory
@@ -2999,6 +3158,10 @@ void (async () => {
     return [
       describeMemoryUsage(),
       `folderTree: ${folderTreeCache.size} trees, ${folderTreeTotalEntries.toLocaleString()} entries`,
+      (() => {
+        const pages = folderTreePages.stats();
+        return `folderTreePages: ${pages.pages} pages, ${pages.nodes.toLocaleString()} nodes, ~${Math.round(pages.heapBytes / 1024 / 1024)} MB`;
+      })(),
       `treemapCache: ${treemapStats.entries} entries, ${treemapStats.inflight} inflight`,
       `fullDiffMem: ${fullDiffCache.size} entries`,
     ].join(" | ");
@@ -3038,6 +3201,8 @@ void (async () => {
   // Folders tab is instant on app launch. Fire-and-forget — the user
   // won't notice the seconds-long index read because it happens in
   // the background before they've had a chance to click the tab.
+  // Only when the plan says the tree fits: loading a 995 MB sidecar
+  // here aborted the app ~20 s into every launch.
   void (async () => {
     try {
       const rehydrated = await scanStore.get();
@@ -3045,7 +3210,7 @@ void (async () => {
       const hist = getScanHistory(rehydrated.rootPath);
       const latestId = hist[0]?.id;
       if (!latestId) return;
-      await ensureFolderTree(latestId, rehydrated.rootPath);
+      prewarmFolderTree(latestId, rehydrated.rootPath, "folder-tree-prewarm-boot");
     } catch (err) {
       writeCrashLog(
         "folder-tree-prewarm-boot",
@@ -3105,10 +3270,13 @@ void (async () => {
       if (!currentId) return empty;
 
       try {
-        const tree = await ensureFolderTree(currentId, rootPath);
         const normalizedParent = normPath(parentPath).replace(/[\\/]+$/, "");
-        const node = tree.get(normalizedParent);
-        if (!node) return empty;
+        const lookup = await lookupFolderNode(currentId, rootPath, normalizedParent);
+        if ("unavailableMessage" in lookup) {
+          return { ...empty, unavailableMessage: lookup.unavailableMessage };
+        }
+        const { node, loadMode } = lookup;
+        if (!node) return { ...empty, loadMode };
         // Expand the compact in-cache file shape into the full
         // ScanFileRecord the renderer expects. Done on the way out
         // because the cache holds 1M+ parent entries and duplicating
@@ -3132,8 +3300,16 @@ void (async () => {
         const visibleSize =
           visibleDirs.reduce((sum, dir) => sum + dir.size, 0) +
           visibleFiles.reduce((sum, file) => sum + file.size, 0);
+        // The native sidecar doesn't cap child dirs per folder, and one
+        // folder can have tens of thousands. The renderer draws 200, so
+        // send the largest FOLDER_CHILDREN_MAX_DIRS and the count.
+        const sentDirs = visibleDirs.length > FOLDER_CHILDREN_MAX_DIRS
+          ? [...visibleDirs].sort((a, b) => b.size - a.size).slice(0, FOLDER_CHILDREN_MAX_DIRS)
+          : visibleDirs;
         return {
-          dirs: visibleDirs,
+          dirs: sentDirs,
+          visibleDirCount: visibleDirs.length,
+          loadMode,
           files: visibleFiles,
           totalSize,
           totalItemCount: node.dirs.length + files.length,
@@ -4025,14 +4201,7 @@ void (async () => {
       const prewarmId = historyId;
       const prewarmRoot = rootPath;
       setTimeout(() => {
-        void ensureFolderTree(prewarmId, prewarmRoot, {
-          skipIfMemoryPressureMb: PREWARM_RSS_CEILING_MB,
-        }).catch((err) => {
-          writeCrashLog(
-            "folder-tree-prewarm",
-            err instanceof Error ? (err.stack ?? err.message) : String(err),
-          );
-        });
+        prewarmFolderTree(prewarmId, prewarmRoot, "folder-tree-prewarm");
       }, 3000);
     } catch { /* ignore */ }
 

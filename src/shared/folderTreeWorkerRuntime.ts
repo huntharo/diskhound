@@ -7,6 +7,10 @@ import { createGunzip } from "node:zlib";
 import { resolveBundledWorkerScript } from "./bundledWorkerPath";
 import { normPath } from "./pathUtils";
 import type {
+  FolderTreeSidecarQueryInput,
+  FolderTreeSidecarQueryResult,
+} from "./folderTreeSidecarQuery";
+import type {
   CompactFolderFileRecord,
   FolderTreeWorkerInput,
   FolderTreeWorkerRequest,
@@ -16,6 +20,10 @@ import type {
 
 const FILES_PER_FOLDER = 200;
 const DIRS_PER_FOLDER = 500;
+/** Index rebuilds only run for trees folderTreeLoadPlan sized at ≤ 512 MB. */
+const FOLDER_TREE_BUILD_WORKER_HEAP_MB = 2048;
+/** A paged query keeps at most a few MB of lines; parsing them needs little more. */
+const FOLDER_TREE_QUERY_WORKER_HEAP_MB = 256;
 
 /**
  * Build a full parent → children map by streaming the completed scan
@@ -172,19 +180,14 @@ export async function runFolderTreeWorker(
   input: FolderTreeWorkerInput,
   options: RunFolderTreeWorkerOptions,
 ): Promise<SerializedFolderTree> {
-  // 8 GB old-gen ceiling. The MFT fast path emits a ~25% larger record
-  // set than the walker because it expands hardlinks and recovers
-  // extension-record $DATA that the walker couldn't see — on a 7M-file
-  // C:\ that works out to ~8.3M entries, which pushes the worker's
-  // working set past 4 GB. 0.4.x shipped with 8 GB but user reports
-  // still hit OOM on drives where baseline + scan index combined push
-  // the worker past 8 GB during tree assembly. 12 GB gives room for
-  // the tree Map + the streaming JSON.parse temp allocations on the
-  // largest realistic drives. Reserved pages don't commit until
-  // touched, so this costs nothing on small scans.
+  // Electron's main isolate and its workers share one 4 GB pointer-
+  // compression cage, so a bigger resourceLimit is capped at 4 GB and a
+  // worker that fills the cage aborts the whole app, not just itself.
+  // folderTreeLoadPlan only sends small indexes here. A tight limit
+  // makes a bad estimate fail as a worker OOM that main survives.
   const worker = new Worker(options.workerPath, {
     resourceLimits: {
-      maxOldGenerationSizeMb: 12288,
+      maxOldGenerationSizeMb: FOLDER_TREE_BUILD_WORKER_HEAP_MB,
       maxYoungGenerationSizeMb: 256,
     },
   });
@@ -224,7 +227,7 @@ export async function runFolderTreeWorker(
         settle(() => resolve(message.tree));
         return;
       }
-      settle(() => reject(new Error(message.message)));
+      settle(() => reject(new Error(message.type === "error" ? message.message : `Unexpected ${message.type}`)));
     };
 
     // A heap-limit kill arrives here as ERR_WORKER_OUT_OF_MEMORY, then
@@ -232,7 +235,7 @@ export async function runFolderTreeWorker(
     // throw and terminate() exit with 1 too.
     const onError = (error: Error) => {
       if ((error as NodeJS.ErrnoException)?.code === "ERR_WORKER_OUT_OF_MEMORY") {
-        settle(() => reject(new Error("Folder tree worker out of memory. The index may be too large for the worker's heap.", { cause: error })));
+        settle(() => reject(new Error(`Folder tree worker out of memory. The index may be too large for the worker's ${FOLDER_TREE_BUILD_WORKER_HEAP_MB} MB heap.`, { cause: error })));
         return;
       }
       settle(() => reject(error));
@@ -261,6 +264,67 @@ export async function runFolderTreeWorker(
       requestId,
       input,
     };
+    worker.postMessage(request);
+  });
+}
+
+/**
+ * Run one paged sidecar query (see folderTreeSidecarQuery.ts) in a
+ * short-lived worker. Main's event loop stays free while the worker
+ * gunzips and scans the whole sidecar, and a surprise in the data hits
+ * the worker's small heap limit instead of the shared cage.
+ *
+ * Marks itself settled and drops its listeners before terminate():
+ * terminate() makes the worker exit with code 1, and an exit handler
+ * still attached would misreport that as a failure. It resolves only
+ * after terminate() finishes, so the worker's heap is freed from the
+ * shared cage before the caller builds on the result.
+ */
+export async function runFolderTreeQueryWorker(
+  input: FolderTreeSidecarQueryInput,
+  options: RunFolderTreeWorkerOptions,
+): Promise<FolderTreeSidecarQueryResult> {
+  const worker = new Worker(options.workerPath, {
+    resourceLimits: { maxOldGenerationSizeMb: FOLDER_TREE_QUERY_WORKER_HEAP_MB },
+  });
+  const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  return await new Promise<FolderTreeSidecarQueryResult>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      worker.off("message", onMessage);
+      worker.off("error", onError);
+      worker.off("exit", onExit);
+      options.signal?.removeEventListener("abort", onAbort);
+      void worker.terminate().finally(callback);
+    };
+    const onMessage = (message: FolderTreeWorkerResponse) => {
+      if (!message || message.requestId !== requestId) return;
+      if (message.type === "query-result") {
+        finish(() => resolve(message.result));
+      } else {
+        finish(() => reject(new Error(message.type === "error" ? message.message : `Unexpected ${message.type}`)));
+      }
+    };
+    const onError = (error: Error) => finish(() => reject(error));
+    const onExit = (code: number) => {
+      finish(() => reject(new Error(`Folder tree query worker exited with code ${code}`)));
+    };
+    const onAbort = () => finish(() => reject(new Error("Folder tree query aborted")));
+
+    worker.on("message", onMessage);
+    worker.on("error", onError);
+    worker.on("exit", onExit);
+    if (options.signal) {
+      if (options.signal.aborted) {
+        onAbort();
+        return;
+      }
+      options.signal.addEventListener("abort", onAbort, { once: true });
+    }
+    const request: FolderTreeWorkerRequest = { type: "query", requestId, input };
     worker.postMessage(request);
   });
 }
