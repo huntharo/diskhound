@@ -27,6 +27,7 @@ import {
 } from "../../shared/storageSharing";
 import { artifactDeltaLabel, artifactHeadline, artifactTail } from "../lib/devArtifactDisplay";
 import {
+  artifactsAtPaths,
   effectiveDevSort,
   groupDevArtifacts,
   hasDevChangeData,
@@ -516,7 +517,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
 
   const deleteMany = async (paths: string[], label: string) => {
     if (paths.length === 0 || !root) return;
-    const targets = remaining.filter((artifact) => paths.includes(artifact.path));
+    const targets = artifactsAtPaths(remaining, paths);
     if (targets.length === 0) return;
     const totalBytes = targets.reduce((sum, artifact) => sum + artifact.size, 0);
     const targetSharing = summarizeDevSharing(targets);
