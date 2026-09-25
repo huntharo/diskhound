@@ -2,13 +2,14 @@ import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 /**
- * Feature pull requests must not edit CHANGELOG.md. A release cut may,
- * and its title starts with "Cut DiskHound" (or the branch is release/*).
+ * Feature pull requests must not edit CHANGELOG.md. A release cut may.
+ * The pull request title has to start with "Cut DiskHound". A branch
+ * named release/* is not enough: anyone can pick that prefix.
  */
-export function changelogEditAllowed({ files, title = "", branch = "" }) {
+export function changelogEditAllowed({ files, title = "" }) {
   const touchesChangelog = files.some((file) => file === "CHANGELOG.md" || file.endsWith("/CHANGELOG.md"));
   if (!touchesChangelog) return { ok: true, reason: "" };
-  if (/^Cut DiskHound\b/.test(title) || /^release\//.test(branch)) {
+  if (/^Cut DiskHound\b/.test(title)) {
     return { ok: true, reason: "" };
   }
   return {
@@ -37,7 +38,6 @@ function main() {
   const decision = changelogEditAllowed({
     files: changedFiles(baseSha),
     title: process.env.PR_TITLE ?? "",
-    branch: process.env.HEAD_REF ?? "",
   });
   if (decision.ok) return;
   console.error(decision.reason);

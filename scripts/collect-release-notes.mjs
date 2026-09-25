@@ -2,9 +2,13 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-/** Latest `## x.y.z — date` heading, ignoring `## Unreleased`. */
+/**
+ * Latest `## x.y.z — date` heading, ignoring `## Unreleased`.
+ * The prerelease part matches scripts/sync-version-from-tag.mjs,
+ * including a hyphen inside an identifier (`0.7.0-beta-1`).
+ */
 export function latestChangelogVersion(markdown) {
-  const match = markdown.match(/^## (\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?) — /m);
+  const match = markdown.match(/^## (\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?) — /m);
   return match?.[1] ?? null;
 }
 

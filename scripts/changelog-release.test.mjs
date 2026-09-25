@@ -13,8 +13,9 @@ describe("latestChangelogVersion", () => {
     expect(latestChangelogVersion(markdown)).toBe("0.6.2");
   });
 
-  it("reads a prerelease heading", () => {
+  it("reads a prerelease heading, including a hyphen inside the identifier", () => {
     expect(latestChangelogVersion("## 0.5.44-beta.1 — 2026-08-01\n")).toBe("0.5.44-beta.1");
+    expect(latestChangelogVersion("## 0.7.0-beta-1 — 2026-08-01\n\n## 0.6.2 — 2026-09-23\n")).toBe("0.7.0-beta-1");
   });
 });
 
@@ -103,6 +104,6 @@ describe("changelogEditAllowed", () => {
       files: ["CHANGELOG.md"],
       title: "notes",
       branch: "release/0.6.3",
-    }).ok).toBe(true);
+    }).ok).toBe(false);
   });
 });
