@@ -42,6 +42,14 @@
   `/Volumes/My  Passport`, keeps both. It used to collapse to one
   space, a path that does not exist.
 
+### Linux drive list with a dead mount
+
+- One broken mount no longer empties the drive list. When `df` cannot
+  read a mount, such as an sshfs mount whose connection dropped
+  ("Transport endpoint is not connected") or a stale NFS handle, it
+  still lists every other drive but exits with an error, and DiskHound
+  threw the whole list away. It now keeps the drives `df` printed.
+
 ## 0.6.2 — 2026-09-23
 
 macOS no longer throws on startup when the theme is applied, and the

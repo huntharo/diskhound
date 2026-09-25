@@ -279,17 +279,13 @@ const REAL_FILESYSTEM_TYPES = new Set([
 ]);
 
 async function getLinuxDiskSpace(): Promise<DiskSpaceInfo[]> {
-  try {
-    // GNU `df -P -k -T` includes the filesystem type
-    // as an extra column. Adding -T upfront means we never need to
-    // cross-reference /proc/mounts — one subprocess, one parse pass.
-    // Column layout with -T:
-    //   Filesystem  Type  1024-blocks  Used  Available  Capacity  Mounted on
-    const { stdout } = await execFileAsync("df", ["-P", "-k", "-T"], { timeout: 10_000 });
-    return parseLinuxDfOutput(stdout, Date.now());
-  } catch {
-    return [];
-  }
+  // GNU `df -P -k -T` includes the filesystem type
+  // as an extra column. Adding -T upfront means we never need to
+  // cross-reference /proc/mounts — one subprocess, one parse pass.
+  // Column layout with -T:
+  //   Filesystem  Type  1024-blocks  Used  Available  Capacity  Mounted on
+  const stdout = await runDf(["-P", "-k", "-T"]);
+  return parseLinuxDfOutput(stdout, Date.now());
 }
 
 export function parseLinuxDfOutput(stdout: string, timestamp = Date.now()): DiskSpaceInfo[] {
@@ -322,15 +318,48 @@ export function parseLinuxDfOutput(stdout: string, timestamp = Date.now()): Disk
 }
 
 async function getMacDiskSpace(): Promise<DiskSpaceInfo[]> {
+  // macOS/BSD `df` does not support GNU `-T`, so keep this path
+  // separate from Linux. `-P -k` gives stable POSIX columns:
+  //   Filesystem  1024-blocks  Used  Available  Capacity  Mounted on
+  const stdout = await runDf(["-P", "-k"]);
+  return parseMacDfOutput(stdout, Date.now());
+}
+
+/**
+ * Runs `df` and returns its stdout, or "" if it produced no usable
+ * table. GNU df exits 1 when statfs fails on any one mount for a
+ * reason other than EACCES or ENOENT, such as an sshfs mount whose
+ * connection dropped (ENOTCONN) or a stale NFS handle (ESTALE). It
+ * still prints a row for every other mount, but execFile rejects on
+ * the exit status, so those rows are read back from the error.
+ */
+async function runDf(args: string[]): Promise<string> {
   try {
-    // macOS/BSD `df` does not support GNU `-T`, so keep this path
-    // separate from Linux. `-P -k` gives stable POSIX columns:
-    //   Filesystem  1024-blocks  Used  Available  Capacity  Mounted on
-    const { stdout } = await execFileAsync("df", ["-P", "-k"], { timeout: 10_000 });
-    return parseMacDfOutput(stdout, Date.now());
-  } catch {
-    return [];
+    const { stdout } = await execFileAsync("df", args, { timeout: 10_000 });
+    return stdout;
+  } catch (error) {
+    return stdoutOfFailedDf(error);
   }
+}
+
+/**
+ * Returns the stdout carried by an execFile error when df ran to
+ * completion and exited non-zero, and "" otherwise. The code is
+ * the exit status only when it is a number. A df that the timeout
+ * killed has a null code: GNU df prints its table only after it has
+ * visited every mount, and anything BSD df wrote before a signal
+ * could end partway through a row. A df that could not be started
+ * (ENOENT) or overflowed maxBuffer has a string code.
+ */
+export function stdoutOfFailedDf(error: unknown): string {
+  if (!error || typeof error !== "object") return "";
+  const { code, killed, stdout } = error as {
+    code?: unknown;
+    killed?: unknown;
+    stdout?: unknown;
+  };
+  if (typeof code !== "number" || killed === true) return "";
+  return typeof stdout === "string" ? stdout : "";
 }
 
 function diskSpaceFromKb(

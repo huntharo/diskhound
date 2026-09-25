@@ -1,10 +1,16 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
 import { describe, expect, it } from "vitest";
 
 import {
   parseLinuxDfOutput,
   parseMacDfOutput,
   parseWindowsCimLogicalDisks,
+  stdoutOfFailedDf,
 } from "../diskMonitor";
+
+const execFileAsync = promisify(execFile);
 
 describe("parseMacDfOutput", () => {
   it("keeps the startup disk and mounted user volumes", () => {
@@ -252,6 +258,65 @@ describe("parseLinuxDfOutput", () => {
     ].join("\n");
 
     expect(parseLinuxDfOutput(stdout).map((drive) => drive.drive)).toEqual(["/mnt/fine"]);
+  });
+});
+
+describe("stdoutOfFailedDf", () => {
+  // A Node child stands in for df so each case gets the error that
+  // promisified execFile really rejects with.
+  function runFakeDf(script: string, timeout?: number): Promise<unknown> {
+    return execFileAsync(process.execPath, ["-e", script], { timeout }).then(
+      () => {
+        throw new Error("expected the fake df to fail");
+      },
+      (error: unknown) => error,
+    );
+  }
+
+  it("keeps the rows GNU df printed before exiting 1 for a dead mount", async () => {
+    // coreutils prints every mount it could stat, then exits 1 when
+    // statfs failed on one of them with anything but EACCES or ENOENT.
+    const table = [
+      "Filesystem     Type 1024-blocks      Used Available Capacity Mounted on",
+      "/dev/nvme0n1p2 ext4   490617784 412345678  53278906      89% /",
+      "/dev/sdb1      ext4   976490576 400000000 576490576      41% /mnt/backup",
+      "",
+    ].join("\n");
+    const error = await runFakeDf(
+      `process.stdout.write(${JSON.stringify(table)});` +
+        `process.stderr.write("df: /home/me/remote: Transport endpoint is not connected\\n");` +
+        `process.exitCode = 1;`,
+    );
+
+    const stdout = stdoutOfFailedDf(error);
+
+    expect(stdout).toBe(table);
+    expect(parseLinuxDfOutput(stdout).map((drive) => drive.drive)).toEqual(["/", "/mnt/backup"]);
+  });
+
+  it("drops what a df killed by the timeout had written", async () => {
+    const error = await runFakeDf(
+      `process.stdout.write("Filesystem 1024-blocks Used Available Capacity Mounted on\\n");` +
+        `setTimeout(() => {}, 60_000);`,
+      500,
+    );
+
+    expect(error).toMatchObject({ killed: true, code: null });
+    expect(stdoutOfFailedDf(error)).toBe("");
+  });
+
+  it("returns nothing when df could not be started", async () => {
+    const error = await execFileAsync("diskhound-no-such-df", ["-P"]).catch((e: unknown) => e);
+
+    expect(error).toMatchObject({ code: "ENOENT" });
+    expect(stdoutOfFailedDf(error)).toBe("");
+  });
+
+  it("returns nothing for errors that carry no exit status", () => {
+    expect(stdoutOfFailedDf(undefined)).toBe("");
+    expect(stdoutOfFailedDf(new Error("boom"))).toBe("");
+    expect(stdoutOfFailedDf({ code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER", stdout: "/dev/sda1" })).toBe("");
+    expect(stdoutOfFailedDf({ code: 1, stdout: Buffer.from("rows") })).toBe("");
   });
 });
 
