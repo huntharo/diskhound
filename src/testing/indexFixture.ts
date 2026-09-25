@@ -42,8 +42,9 @@ export function* ascendingFileRecords(
  * What `parseIndexLine` spends unescaping the `\` separators in one line
  * like `record`, beyond the same line with `/` separators. It's a few
  * string ops per `\`: 0 on macOS and Linux, about 20 for a path under a
- * Windows temp dir. Tests over parsed index lines add twice lines × this
- * to their absolute caps (the same headroom as the rest of the cap), so
+ * Windows temp dir. Every index reader unescapes paths the same way
+ * (`unescapeJsonPath`), so tests over index lines add twice lines × this
+ * to their absolute caps, the same headroom as the rest of the cap. Then
  * one cap fits every OS.
  */
 export function backslashParseOps(record: Record<string, unknown>): number {
