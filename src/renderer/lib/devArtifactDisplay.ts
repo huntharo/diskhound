@@ -61,8 +61,8 @@ function pathSep(path: string, parts: string[]): string {
   return "/";
 }
 
-function joinTail(parts: string[]): string {
-  return parts.join("\\");
+function joinTail(parts: string[], sep: string): string {
+  return parts.join(sep);
 }
 
 function relativeFrom(path: string, root: string): string {
@@ -74,7 +74,7 @@ function relativeFrom(path: string, root: string): string {
   while (i < rootKey.length && i < pathKey.length && rootKey[i] === pathKey[i]) i += 1;
   if (i === 0) return basenameOf(path);
   const tail = pathParts.slice(i);
-  return tail.length > 0 ? joinTail(tail) : basenameOf(path);
+  return tail.length > 0 ? joinTail(tail, pathSep(path, pathParts)) : basenameOf(path);
 }
 
 export function isGenericArtifactLeaf(name: string): boolean {
@@ -160,13 +160,15 @@ export function shortenVisiblePath(path: string, max = 52): string {
 }
 
 export function shortenUnscopedParent(parent: string): string {
-  const rest = stripDrive(splitPath(parent));
+  const parts = splitPath(parent);
+  const sep = pathSep(parent, parts);
+  const rest = stripDrive(parts);
   const usersIdx = rest.findIndex((p) => p.toLowerCase() === "users");
   if (usersIdx >= 0 && rest[usersIdx + 2]?.toLowerCase() === "appdata") {
-    return joinTail(rest.slice(usersIdx + 2));
+    return joinTail(rest.slice(usersIdx + 2), sep);
   }
-  if (rest.length <= 3) return joinTail(rest);
-  return joinTail(rest.slice(-3));
+  if (rest.length <= 3) return joinTail(rest, sep);
+  return joinTail(rest.slice(-3), sep);
 }
 
 export function artifactHeadline(artifact: DevArtifact): string {

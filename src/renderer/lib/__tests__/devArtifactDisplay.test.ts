@@ -146,4 +146,42 @@ describe("artifact display", () => {
   it("keeps a short unscoped parent as-is after the drive", () => {
     expect(shortenUnscopedParent("C:\\Windows\\Temp")).toBe("Windows\\Temp");
   });
+
+  it("joins tails with the source path's separator", () => {
+    const posix = artifact({
+      path: "/Users/dev/code/diskhound/target/debug",
+      projectPath: "/Users/dev/code/diskhound",
+      projectName: "diskhound",
+    });
+    expect(artifactHeadline(posix)).toBe("diskhound");
+    expect(artifactTail(posix)).toBe("target/debug");
+
+    const windows = artifact({
+      path: "C:\\Users\\dev\\code\\diskhound\\target\\debug",
+      projectPath: "C:\\Users\\dev\\code\\diskhound",
+      projectName: "diskhound",
+    });
+    expect(artifactHeadline(windows)).toBe("diskhound");
+    expect(artifactTail(windows)).toBe("target\\debug");
+  });
+
+  it("keeps POSIX separators for unscoped and home-level artifacts", () => {
+    const crate = artifact({
+      path: "/home/dev/code/diskhound/target/debug",
+      kind: "rust-target",
+    });
+    expect(artifactHeadline(crate)).toBe("/home/dev/code/diskhound");
+    expect(artifactTail(crate)).toBe("target/debug");
+
+    const goMod = artifact({
+      path: "/home/dev/pkg/mod",
+      kind: "go-module",
+    });
+    expect(artifactHeadline(goMod)).toBe("pkg/mod");
+    expect(artifactTail(goMod)).toBe("/home/dev");
+
+    expect(shortenUnscopedParent("/opt/tools")).toBe("opt/tools");
+    expect(shortenUnscopedParent("/var/lib/tools/cache")).toBe("lib/tools/cache");
+    expect(shortenUnscopedParent("C:\\ProgramData\\tools\\cache\\x")).toBe("tools\\cache\\x");
+  });
 });
