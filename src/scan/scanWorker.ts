@@ -32,15 +32,17 @@ import { mountPathsToSkip } from "../shared/linuxMounts";
  * baseline's, we inherit all those file records without re-walking the
  * subtree.
  */
-interface BaselineFileRecord extends ScanFileRecord {
+export interface BaselineFileRecord extends ScanFileRecord {
   extraHardlink?: boolean;
 }
 
-interface Baseline {
+export interface Baseline {
   dirMtimes: Map<string, number>;
   filesByParent: Map<string, BaselineFileRecord[]>;
-  /** Set of all directory paths known in the baseline (for subtree inheritance). */
-  dirs: Set<string>;
+  /** The baseline's directories (`dirMtimes`' keys), for subtree lookups. */
+  dirs: PathIndex;
+  /** `filesByParent`'s keys, for subtree lookups. */
+  parents: PathIndex;
   /** `h:1` records: the tree had hardlinks when the baseline was written. */
   extraLinks: number;
 }
@@ -99,8 +101,8 @@ export async function runScan(
   const startedAt = Date.now();
   const directoryTotals = new Map<string, DirectoryHotspot>();
   const extensionTotals = new Map<string, ExtensionBucket>();
-  const largestFiles: ScanFileRecord[] = [];
-  const hottestDirectories: DirectoryHotspot[] = [];
+  const largestFiles = new TopN<ScanFileRecord>(TOP_FILE_LIMIT, biggestFirst);
+  const hottestDirectories = new HottestDirectories(directoryTotals, TOP_DIRECTORY_LIMIT);
   const directoryStack = [rootPath];
 
   let filesVisited = 0;
@@ -245,8 +247,8 @@ export async function runScan(
       directoriesVisited,
       skippedEntries,
       bytesSeen,
-      largestFiles: largestFiles.slice(0, TOP_FILE_LIMIT),
-      hottestDirectories: hottestDirectories.slice(0, TOP_DIRECTORY_LIMIT),
+      largestFiles: largestFiles.sorted(),
+      hottestDirectories: hottestDirectories.current(filesVisited, status !== "running"),
       topExtensions: Array.from(extensionTotals.values())
         .sort((left, right) => right.size - left.size)
         .slice(0, TOP_EXTENSION_LIMIT),
@@ -298,10 +300,10 @@ export async function runScan(
           const occupancy = fileRecord.extraHardlink ? 0 : fileRecord.size;
           bytesSeen += occupancy;
           if (!fileRecord.extraHardlink) {
-            upsertRankedFile(largestFiles, fileRecord, TOP_FILE_LIMIT);
+            largestFiles.offer(fileRecord);
             rollupExtension(extensionTotals, fileRecord.extension, occupancy);
           }
-          rollupDirectorySize(rootPath, fileRecord.parentPath, occupancy, directoryTotals, hottestDirectories, TOP_DIRECTORY_LIMIT);
+          rollupDirectorySize(rootPath, fileRecord.parentPath, occupancy, directoryTotals);
           writeIndexEntry(fileRecord.path, fileRecord.size, fileRecord.modifiedAt, fileRecord.extraHardlink);
           if (hardlinks) inheritedPaths.push(fileRecord.path);
         }
@@ -415,10 +417,10 @@ export async function runScan(
         if (extraHardlink) {
           hardlinkBytesDeduped += fileRecord.size;
         } else {
-          upsertRankedFile(largestFiles, fileRecord, TOP_FILE_LIMIT);
+          largestFiles.offer(fileRecord);
           rollupExtension(extensionTotals, fileRecord.extension, occupancy);
         }
-        rollupDirectorySize(rootPath, directoryPath, occupancy, directoryTotals, hottestDirectories, TOP_DIRECTORY_LIMIT);
+        rollupDirectorySize(rootPath, directoryPath, occupancy, directoryTotals);
         writeIndexEntry(fileRecord.path, fileRecord.size, fileRecord.modifiedAt, extraHardlink);
         maybeEmitProgress();
       }
@@ -484,69 +486,143 @@ function getDepth(rootPath: string, directoryPath: string): number {
   return relativePath.split(Path.sep).length;
 }
 
-function upsertRankedFile(
-  ranked: ScanFileRecord[],
-  nextRecord: ScanFileRecord,
-  limit: number,
-): void {
-  const existingIndex = ranked.findIndex((candidate) => candidate.path === nextRecord.path);
-  if (existingIndex >= 0) {
-    ranked.splice(existingIndex, 1);
-  } else if (ranked.length >= limit && nextRecord.size <= ranked[ranked.length - 1].size) {
-    return; // Too small to make the list
+/**
+ * The top `limit` items in `compare` order (negative when `a` ranks first).
+ * A binary heap with the lowest-ranked kept item at the root, so an item
+ * that doesn't make the list costs one compare and one that does costs
+ * O(log limit). A sorted array searched and re-sorted on every insert made
+ * a scan O(files × limit).
+ */
+export class TopN<T> {
+  private readonly heap: T[] = [];
+
+  constructor(
+    readonly limit: number,
+    private readonly compare: (a: T, b: T) => number,
+  ) {}
+
+  get size(): number {
+    return this.heap.length;
   }
 
-  ranked.push(nextRecord);
-  ranked.sort((left, right) => right.size - left.size);
+  offer(item: T): void {
+    const heap = this.heap;
+    if (heap.length < this.limit) {
+      heap.push(item);
+      this.siftUp(heap.length - 1);
+    } else if (heap.length > 0 && this.compare(item, heap[0]!) < 0) {
+      heap[0] = item;
+      this.siftDown(0);
+    }
+  }
 
-  if (ranked.length > limit) {
-    ranked.length = limit;
+  /** Every kept item, first-ranked first. */
+  sorted(): T[] {
+    return [...this.heap].sort(this.compare);
+  }
+
+  /** Whether `heap[a]` ranks below `heap[b]`, i.e. belongs nearer the root. */
+  private below(a: number, b: number): boolean {
+    return this.compare(this.heap[a]!, this.heap[b]!) > 0;
+  }
+
+  private swap(a: number, b: number): void {
+    const heap = this.heap;
+    [heap[a], heap[b]] = [heap[b]!, heap[a]!];
+  }
+
+  private siftUp(index: number): void {
+    while (index > 0) {
+      const parent = (index - 1) >> 1;
+      if (!this.below(index, parent)) return;
+      this.swap(index, parent);
+      index = parent;
+    }
+  }
+
+  private siftDown(index: number): void {
+    const length = this.heap.length;
+    while (true) {
+      const left = index * 2 + 1;
+      if (left >= length) return;
+      const right = left + 1;
+      const child = right < length && this.below(right, left) ? right : left;
+      if (!this.below(child, index)) return;
+      this.swap(index, child);
+      index = child;
+    }
   }
 }
 
-function upsertRankedDirectory(
-  ranked: DirectoryHotspot[],
-  nextRecord: DirectoryHotspot,
+function comparePaths(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** Bigger first; of two the same size, the smaller path first. */
+export function biggestFirst(a: { size: number; path: string }, b: { size: number; path: string }): number {
+  return b.size - a.size || comparePaths(a.path, b.path);
+}
+
+/** The `limit` biggest folders holding at least one file, biggest first. */
+export function rankDirectories(
+  directoryTotals: Map<string, DirectoryHotspot>,
   limit: number,
-): void {
-  const existingIndex = ranked.findIndex((candidate) => candidate.path === nextRecord.path);
-  if (existingIndex >= 0) {
-    ranked.splice(existingIndex, 1, { ...nextRecord });
-  } else if (ranked.length >= limit && nextRecord.size <= ranked[ranked.length - 1].size) {
-    return; // Too small to make the list
-  } else {
-    ranked.push({ ...nextRecord });
+): DirectoryHotspot[] {
+  const top = new TopN<DirectoryHotspot>(limit, biggestFirst);
+  for (const directory of directoryTotals.values()) {
+    if (directory.fileCount > 0) top.offer(directory);
   }
+  // Copies: the totals keep changing after the snapshot is taken.
+  return top.sorted().map((directory) => ({ ...directory }));
+}
 
-  ranked.sort((left, right) => right.size - left.size);
+/**
+ * `hottestDirectories` for snapshots. Ranking costs O(folders), so a
+ * running snapshot re-ranks only once as many files as there are folders
+ * have been added since the last ranking. The total stays linear in files
+ * however often snapshots fire.
+ */
+export class HottestDirectories {
+  private ranked: DirectoryHotspot[] = [];
+  private dueAt = 0;
 
-  if (ranked.length > limit) {
-    ranked.length = limit;
+  constructor(
+    private readonly directoryTotals: Map<string, DirectoryHotspot>,
+    private readonly limit: number,
+  ) {}
+
+  current(filesVisited: number, final: boolean): DirectoryHotspot[] {
+    if (final || filesVisited >= this.dueAt) {
+      this.ranked = rankDirectories(this.directoryTotals, this.limit);
+      this.dueAt = filesVisited + this.directoryTotals.size;
+    }
+    return this.ranked;
   }
 }
 
-function rollupDirectorySize(
+/** Add a file's size to its folder and each ancestor up to the root. */
+export function rollupDirectorySize(
   rootPath: string,
   directoryPath: string,
   fileSize: number,
   directoryTotals: Map<string, DirectoryHotspot>,
-  hottestDirectories: DirectoryHotspot[],
-  dirLimit: number,
 ): void {
   let currentPath = directoryPath;
 
   while (true) {
-    const existing = directoryTotals.get(currentPath) ?? {
-      path: currentPath,
-      size: 0,
-      fileCount: 0,
-      depth: getDepth(rootPath, currentPath),
-    };
+    let existing = directoryTotals.get(currentPath);
+    if (!existing) {
+      existing = {
+        path: currentPath,
+        size: 0,
+        fileCount: 0,
+        depth: getDepth(rootPath, currentPath),
+      };
+      directoryTotals.set(currentPath, existing);
+    }
 
     existing.size += fileSize;
     existing.fileCount += 1;
-    directoryTotals.set(currentPath, existing);
-    upsertRankedDirectory(hottestDirectories, existing, dirLimit);
 
     if (currentPath === rootPath) {
       return;
@@ -588,8 +664,7 @@ function rollupExtension(
  */
 async function loadBaseline(filePath: string): Promise<Baseline> {
   const dirMtimes = new Map<string, number>();
-  const filesByParent = new Map<string, ScanFileRecord[]>();
-  const dirs = new Set<string>();
+  const filesByParent = new Map<string, BaselineFileRecord[]>();
   let extraLinks = 0;
 
   const gunzip = createGunzip();
@@ -613,7 +688,6 @@ async function loadBaseline(filePath: string): Promise<Baseline> {
     if (rec.t === "d") {
       if (typeof rec.m === "number") {
         dirMtimes.set(normalized, rec.m);
-        dirs.add(normalized);
       }
       continue;
     }
@@ -641,27 +715,78 @@ async function loadBaseline(filePath: string): Promise<Baseline> {
     list.push(fileRecord);
   }
 
-  return { dirMtimes, filesByParent, dirs, extraLinks };
+  return createBaseline(dirMtimes, filesByParent, extraLinks);
+}
+
+export function createBaseline(
+  dirMtimes: Map<string, number>,
+  filesByParent: Map<string, BaselineFileRecord[]>,
+  extraLinks: number,
+): Baseline {
+  return {
+    dirMtimes,
+    filesByParent,
+    dirs: new PathIndex(dirMtimes.keys()),
+    parents: new PathIndex(filesByParent.keys()),
+    extraLinks,
+  };
+}
+
+/**
+ * Paths sorted so the ones under a folder are one contiguous run, found by
+ * binary search: O(log paths + matches) per lookup. `under` returns them in
+ * the order they were added, which for a baseline is the order the scan
+ * that wrote it walked them. Scanning every path per inherited folder was
+ * O(folders²).
+ */
+export class PathIndex {
+  private readonly byPath: Array<{ path: string; order: number }>;
+
+  constructor(paths: Iterable<string>) {
+    let order = 0;
+    this.byPath = Array.from(paths, (path) => ({ path, order: order++ }));
+    this.byPath.sort((a, b) => comparePaths(a.path, b.path));
+  }
+
+  /** Paths under `dir`, not `dir` itself. */
+  under(dir: string): string[] {
+    const prefix = dir.endsWith(Path.sep) ? dir : dir + Path.sep;
+    const byPath = this.byPath;
+    let low = 0;
+    let high = byPath.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (byPath[middle]!.path < prefix) low = middle + 1;
+      else high = middle;
+    }
+    const matches: Array<{ path: string; order: number }> = [];
+    for (let index = low; index < byPath.length; index += 1) {
+      const entry = byPath[index]!;
+      if (!entry.path.startsWith(prefix)) break;
+      if (entry.path !== dir) matches.push(entry);
+    }
+    return matches.sort((a, b) => a.order - b.order).map((entry) => entry.path);
+  }
 }
 
 /**
  * Return all file records under the given directory (direct + descendants)
  * from the baseline. Used when we skip walking an unchanged subtree.
  */
-function inheritSubtree(dirPath: string, baseline: Baseline): BaselineFileRecord[] {
+export function inheritSubtree(dirPath: string, baseline: Baseline): BaselineFileRecord[] {
   const norm = Path.resolve(dirPath);
   const out: BaselineFileRecord[] = [];
-  const prefix = norm.endsWith(Path.sep) ? norm : norm + Path.sep;
+  // A loop, not out.push(...list): spreading a folder of ~120k+ files
+  // overflows the call stack.
+  const add = (list: BaselineFileRecord[] | undefined) => {
+    if (!list) return;
+    for (const record of list) out.push(record);
+  };
 
-  // Direct children first (hot path — avoid iterating the full map when
-  // the subtree is a leaf)
-  const direct = baseline.filesByParent.get(norm);
-  if (direct) out.push(...direct);
-
-  // Descendants: anyone whose parentPath starts with our prefix
-  for (const [parent, list] of baseline.filesByParent) {
-    if (parent === norm) continue;
-    if (parent.startsWith(prefix)) out.push(...list);
+  // Direct children first, then descendants in baseline order.
+  add(baseline.filesByParent.get(norm));
+  for (const parent of baseline.parents.under(norm)) {
+    add(baseline.filesByParent.get(parent));
   }
 
   return out;
@@ -672,12 +797,6 @@ function inheritSubtree(dirPath: string, baseline: Baseline): BaselineFileRecord
  * the baseline. Used to re-emit their dir entries in the new index so the
  * next scan's baseline retains mtime info even for subtrees we skipped.
  */
-function subtreeDirs(dirPath: string, baseline: Baseline): string[] {
-  const norm = Path.resolve(dirPath);
-  const prefix = norm.endsWith(Path.sep) ? norm : norm + Path.sep;
-  const out: string[] = [];
-  for (const dir of baseline.dirs) {
-    if (dir !== norm && dir.startsWith(prefix)) out.push(dir);
-  }
-  return out;
+export function subtreeDirs(dirPath: string, baseline: Baseline): string[] {
+  return baseline.dirs.under(Path.resolve(dirPath));
 }
