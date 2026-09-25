@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Drive picker and header
+
+- Long mount paths no longer run out of the drive picker cards or crowd
+  the header. Card titles and drive pills stay on one line and truncate
+  in the middle, keeping the last segment
+  (`/Library/Developer/CoreSim…/iOS_21A342`). Hover for the full path.
+
 ## 0.6.2 — 2026-09-23
 
 macOS no longer throws on startup when the theme is applied, and the

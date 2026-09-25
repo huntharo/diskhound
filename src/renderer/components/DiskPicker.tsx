@@ -4,6 +4,7 @@ import type { DiskSpaceInfo, RecentScan } from "../../shared/contracts";
 import { formatBytes, relativeTime } from "../lib/format";
 import { useLiveDiskSpace } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
+import { MiddleEllipsis } from "./MiddleEllipsis";
 
 interface Props {
   onScanDrive: (drivePath: string) => void;
@@ -123,7 +124,7 @@ function DriveCard({ drive, onScan }: { drive: DiskSpaceInfo; onScan: () => void
     : drive.drive;
 
   return (
-    <button className="drive-card" onClick={onScan}>
+    <button className="drive-card" onClick={onScan} title={drive.drive}>
       <div className="drive-card-icon">
         <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
           <rect x="2" y="4" width="18" height="14" rx="2.5" stroke="currentColor" strokeWidth="1.3" />
@@ -133,7 +134,7 @@ function DriveCard({ drive, onScan }: { drive: DiskSpaceInfo; onScan: () => void
       </div>
 
       <div className="drive-card-info">
-        <div className="drive-card-name">{driveLabel}</div>
+        <MiddleEllipsis className="drive-card-name" text={driveLabel} maxTail={24} />
         <div className="drive-card-bar">
           <div className={`drive-card-fill ${level}`} style={{ width: `${pct}%` }} />
         </div>

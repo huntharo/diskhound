@@ -30,6 +30,7 @@ import { DevView } from "./components/DevView";
 import { DuplicatesView } from "./components/DuplicatesView";
 import { DiskIoView } from "./components/DiskIoView";
 import { MemoryView } from "./components/MemoryView";
+import { MiddleEllipsis } from "./components/MiddleEllipsis";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ShortcutHelp } from "./components/ShortcutHelp";
 import { EasyMoveView } from "./components/EasyMoveView";
@@ -1452,7 +1453,7 @@ function DrivePill({ drive, active, scanning, scanPercent, onScan }: {
       onClick={onScan}
       title={title}
     >
-      <span>{drive.drive}</span>
+      <MiddleEllipsis className="drive-pill-label" text={drive.drive} maxTail={12} />
       <div className="drive-pill-bar">
         <div className={`drive-pill-fill ${level}`} style={{ width: `${pct}%` }} />
         {scanning && <div className="drive-pill-scan-pulse" aria-hidden="true" />}
@@ -1468,7 +1469,7 @@ function DrivePill({ drive, active, scanning, scanPercent, onScan }: {
           />
         )}
       </div>
-      <span>
+      <span className="drive-pill-free">
         {scanning && scanPercent !== null
           ? `${scanPercent}%`
           : `${formatBytes(drive.freeBytes)} free`}
