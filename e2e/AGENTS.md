@@ -74,3 +74,13 @@ wrap the command in `xvfb-run --auto-servernum`.
   `com.diskhound.app`, the same one the installed app uses. `bun run
   dev` has the same effect. On macOS the unsigned Electron gets
   "Operation not permitted" in the main output, which is harmless.
+
+## Known gaps
+
+Pin a known bug with `test.fail(condition, reason)`. The test must
+assert the correct behavior. Playwright then reports it as passing while
+the bug exists, and as failing once the bug is fixed, so whoever fixes
+the bug has to remove the mark.
+
+- `links.spec.ts`, APFS clones (macOS only): a file and its clone count
+  twice toward the scan total.
