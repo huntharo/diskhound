@@ -4,7 +4,7 @@ import * as Path from "node:path";
 import { createInterface } from "node:readline";
 import { createGunzip } from "node:zlib";
 
-import type { DevArtifact, DevArtifactKind, DevArtifactReport } from "./contracts";
+import type { DevArtifact, DevArtifactCloneInfo, DevArtifactKind, DevArtifactReport } from "./contracts";
 import { classifyArtifactPath } from "./devArtifacts";
 import { occupancyBytes } from "./allocatedSize";
 import { attachPipeErrorHandlers } from "./streamSafety";
@@ -21,6 +21,8 @@ export interface DevArtifactRootRec {
   kind: DevArtifactKind;
   size: number;
   files: number;
+  /** APFS clone accounting from the native macOS scan (optional). */
+  clone?: DevArtifactCloneInfo;
 }
 
 export interface DevArtifactSidecar {
@@ -334,6 +336,7 @@ export function sidecarFromReport(report: DevArtifactReport): DevArtifactSidecar
       kind: artifact.kind,
       size: artifact.size,
       files: artifact.fileCount,
+      ...(artifact.clone ? { clone: artifact.clone } : {}),
     })),
     projects,
     droppedPaths: report.droppedPaths?.length ? report.droppedPaths : undefined,
@@ -362,6 +365,7 @@ export function reportFromSidecar(
       fileCount: rec.files,
       previousSize,
       deltaBytes: previousSize != null ? rec.size - previousSize : null,
+      ...(rec.clone ? { clone: rec.clone } : {}),
     });
   }
   artifacts.sort((a, b) => b.size - a.size);
@@ -663,7 +667,41 @@ export async function rescanDevArtifactSidecar(
   }
 
   emit(targets.length, targets[targets.length - 1] ?? sidecar.rootPath, true);
-  const next = sidecarFromAcc(acc, sidecar.rootPath);
+  const next = carryCloneInfo(sidecarFromAcc(acc, sidecar.rootPath), sidecar);
   if (!sidecar.droppedPaths?.length) return next;
   return { ...next, droppedPaths: sidecar.droppedPaths };
+}
+
+/**
+ * Rescan walks with `fs.stat`, which has no APFS clone attributes. Keep
+ * the last full scan's clone info for trees that still exist: which
+ * trees share a pnpm store is structural and survives a size refresh.
+ * Byte fields are scaled to the new size so the row never claims more
+ * shared bytes than the tree now holds.
+ */
+export function carryCloneInfo(next: DevArtifactSidecar, previous: DevArtifactSidecar): DevArtifactSidecar {
+  const byPath = new Map<string, DevArtifactRootRec>();
+  for (const rec of previous.roots) {
+    if (rec.clone) byPath.set(pathKey(rec.path), rec);
+  }
+  if (byPath.size === 0) return next;
+  return {
+    ...next,
+    roots: next.roots.map((rec) => {
+      const old = byPath.get(pathKey(rec.path));
+      if (!old?.clone || old.size <= 0) return rec;
+      const ratio = Math.min(1, rec.size / old.size);
+      const scale = (n: number) => Math.round(n * ratio);
+      return {
+        ...rec,
+        clone: {
+          ...old.clone,
+          cloneSize: scale(old.clone.cloneSize),
+          clonePrivateSize: scale(old.clone.clonePrivateSize),
+          cloneInternalSize: scale(old.clone.cloneInternalSize),
+          cloneSharedSize: scale(old.clone.cloneSharedSize),
+        },
+      };
+    }),
+  };
 }

@@ -33,6 +33,22 @@ describe("parseIndexLine", () => {
     });
   });
 
+  it("reads the APFS clone suffix on the fast path", () => {
+    expect(parseIndexLine('{"p":"/u/a.js","s":4096,"m":1,"v":0,"k":1}')).toEqual({
+      t: "f", p: "/u/a.js", s: 4096, m: 1, v: 0, k: 1,
+    });
+    expect(parseIndexLine('{"p":"/u/a.js","s":4096,"m":1,"h":1,"v":12}')).toEqual({
+      t: "f", p: "/u/a.js", s: 4096, m: 1, h: 1, v: 12,
+    });
+    expect(parseIndexLine('{"p":"/u/a.js","s":4096,"m":1,"k":1}')).toEqual({
+      t: "f", p: "/u/a.js", s: 4096, m: 1, k: 1,
+    });
+    // Out-of-order keys still parse through JSON.parse.
+    expect(parseIndexLine('{"p":"/u/a.js","s":4096,"m":1,"k":1,"v":3}')).toEqual({
+      t: "f", p: "/u/a.js", s: 4096, m: 1, v: 3, k: 1,
+    });
+  });
+
   it("parses the canonical directory shape", () => {
     const line = JSON.stringify({ p: "C:\\Users", t: "d", m: 99 });
     expect(parseIndexLine(line)).toEqual({ t: "d", p: "C:\\Users" });

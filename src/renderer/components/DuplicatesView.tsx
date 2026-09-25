@@ -679,7 +679,10 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
             onReveal={(p) => void runAction(p, () => nativeApi.revealPath(p))}
             onOpen={(p) => void runAction(p, () => nativeApi.openPath(p))}
             onTrash={(p) => void runAction(p, () => nativeApi.trashPath(p), { deletedAction: "trash" })}
-            onDelete={(p) => void runAction(p, () => nativeApi.permanentlyDeletePath(p), { deletedAction: "delete" })}
+            onDelete={(p) => void runAction(p, () => nativeApi.permanentlyDeletePath(p), {
+              deletedAction: "delete",
+              expectedBytes: group.size,
+            })}
             onMove={(p) => void handleEasyMove(p)}
             onToggleFileSelected={togglePathSelected}
             onToggleGroupSelected={setGroupSelected}

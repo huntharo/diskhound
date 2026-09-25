@@ -38,6 +38,8 @@ const GENERIC_LEAVES = new Set([
   "ccache",
   "sccache",
   ".pnpm-store",
+  // ~/Library/pnpm/store → headline "pnpm", not "store".
+  "store",
   ".yarn",
   ".bun",
   ".cargo",

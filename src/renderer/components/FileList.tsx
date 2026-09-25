@@ -11,6 +11,12 @@ import {
   type DeletedPathRecord,
 } from "../lib/deletedPaths";
 import { formatBytes, formatCount, humanAge, relativePath } from "../lib/format";
+import {
+  captureFreeBytes,
+  checkFreedSpace,
+  freedSpaceCheckEnabled,
+  permanentDeleteFreesNote,
+} from "../lib/freedSpaceCheck";
 import { useConfirmPermanentDelete, useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
 import {
@@ -295,12 +301,15 @@ export function FileList({ snapshot, initialFilter }: Props) {
   const runAction = async (
     path: string,
     action: () => Promise<PathActionResult>,
-    opts?: { dismiss?: boolean; deletedAction?: DeletedPathAction },
+    opts?: { dismiss?: boolean; deletedAction?: DeletedPathAction; expectedBytes?: number },
   ) => {
     markBusy(path);
+    const expectedBytes = opts?.deletedAction === "delete" ? opts.expectedBytes ?? 0 : 0;
+    const freeBefore = freedSpaceCheckEnabled(expectedBytes) ? await captureFreeBytes(path) : null;
     const result = await action();
     clearBusy(path);
     if (result.ok) {
+      if (freeBefore !== null) void checkFreedSpace({ path, expectedBytes, freeBefore });
       if (opts?.deletedAction) {
         markDeletedPath(path, opts.deletedAction);
         setSelected((s) => { const next = new Set(s); next.delete(path); return next; });
@@ -332,9 +341,12 @@ export function FileList({ snapshot, initialFilter }: Props) {
     if (label === "delete") {
       const msg =
         `Permanently delete ${targets.length} file(s)?\n\n` +
-        `This SKIPS the trash and CANNOT be undone — the OS will free the bytes immediately.`;
+        `This SKIPS the trash and CANNOT be undone — ${permanentDeleteFreesNote()}.`;
       if (!confirm(msg)) return;
     }
+    const expectedBytes = label === "delete" ? targets.reduce((sum, f) => sum + f.size, 0) : 0;
+    const checkPath = targets[0]!.path;
+    const freeBefore = freedSpaceCheckEnabled(expectedBytes) ? await captureFreeBytes(checkPath) : null;
 
     const ok: string[] = [];
     for (const f of targets) {
@@ -342,6 +354,14 @@ export function FileList({ snapshot, initialFilter }: Props) {
       const r = await action(f.path);
       clearBusy(f.path);
       if (r.ok) ok.push(f.path);
+    }
+    if (ok.length > 0 && freeBefore !== null) {
+      const okSet = new Set(ok);
+      void checkFreedSpace({
+        path: checkPath,
+        expectedBytes: targets.filter((f) => okSet.has(f.path)).reduce((sum, f) => sum + f.size, 0),
+        freeBefore,
+      });
     }
     if (ok.length > 0) {
       markDeletedPaths(ok, label);
@@ -443,7 +463,7 @@ export function FileList({ snapshot, initialFilter }: Props) {
           className="bulk-btn danger"
           disabled={selectedActionableTotal === 0}
           onClick={() => void bulkAction("delete", nativeApi.permanentlyDeletePath)}
-          title="Permanently delete — skips trash, frees disk space immediately, cannot be undone"
+          title={`Permanently delete — skips trash, ${permanentDeleteFreesNote()}, cannot be undone`}
         >
           Delete selected
         </button>
@@ -487,10 +507,13 @@ export function FileList({ snapshot, initialFilter }: Props) {
                   if (confirmDelete) {
                     const msg =
                       `Permanently delete ${file.name}?\n\n` +
-                      `This SKIPS the trash and CANNOT be undone — the OS will free the bytes immediately.`;
+                      `This SKIPS the trash and CANNOT be undone — ${permanentDeleteFreesNote()}.`;
                     if (!confirm(msg)) return;
                   }
-                  void runAction(file.path, () => nativeApi.permanentlyDeletePath(file.path), { deletedAction: "delete" });
+                  void runAction(file.path, () => nativeApi.permanentlyDeletePath(file.path), {
+                    deletedAction: "delete",
+                    expectedBytes: file.size,
+                  });
                 }}
                 onContextMenu={(x, y) => setContextMenu({ x, y, path: file.path })}
               />

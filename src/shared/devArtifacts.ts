@@ -89,6 +89,21 @@ function joinSegments(original: string, count: number): string {
   return parts.join(sep);
 }
 
+const PNPM_STORE_PARENTS: string[][] = [
+  ["library", "pnpm", "store"],
+  [".local", "share", "pnpm", "store"],
+  ["appdata", "local", "pnpm", "store"],
+];
+
+/** Segment count up to and including `store` when parts[i] starts a pnpm store path. */
+function pnpmStoreRootDepth(parts: string[], i: number): number | null {
+  for (const seq of PNPM_STORE_PARENTS) {
+    if (i + seq.length > parts.length) continue;
+    if (seq.every((name, j) => parts[i + j]!.toLowerCase() === name)) return i + seq.length;
+  }
+  return null;
+}
+
 export function classifyArtifactPath(filePath: string): { root: string; kind: DevArtifactKind } | null {
   const parts = splitSegments(filePath);
   for (let i = 0; i < parts.length; i++) {
@@ -111,6 +126,15 @@ export function classifyArtifactPath(filePath: string): { root: string; kind: De
 
     if (lower === "pkg" && i + 1 < parts.length && parts[i + 1]!.toLowerCase() === "mod") {
       return { root: joinSegments(filePath, i + 2), kind: "go-module" };
+    }
+
+    // pnpm's global content-addressable store outside a `.pnpm-store`
+    // folder: ~/Library/pnpm/store (macOS), ~/.local/share/pnpm/store
+    // (Linux), %LOCALAPPDATA%\pnpm\store (Windows). Projects' node_modules
+    // are clones / hard links of it — see storageSharing.ts.
+    const pnpmStoreDepth = pnpmStoreRootDepth(parts, i);
+    if (pnpmStoreDepth !== null) {
+      return { root: joinSegments(filePath, pnpmStoreDepth), kind: "package-cache" };
     }
 
     if (lower === ".cache" && i + 1 < parts.length) {

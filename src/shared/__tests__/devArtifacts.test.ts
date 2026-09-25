@@ -40,6 +40,23 @@ describe("classifyArtifactPath", () => {
     });
   });
 
+  it("detects pnpm's global store outside a .pnpm-store folder", () => {
+    expect(classifyArtifactPath("/Users/dev/Library/pnpm/store/v10/files/00/abc-index.json")).toEqual({
+      root: "/Users/dev/Library/pnpm/store",
+      kind: "package-cache",
+    });
+    expect(classifyArtifactPath("/home/dev/.local/share/pnpm/store/v3/files/ff/x")).toEqual({
+      root: "/home/dev/.local/share/pnpm/store",
+      kind: "package-cache",
+    });
+    expect(classifyArtifactPath("C:\\Users\\dev\\AppData\\Local\\pnpm\\store\\v10\\x")).toEqual({
+      root: "C:\\Users\\dev\\AppData\\Local\\pnpm\\store",
+      kind: "package-cache",
+    });
+    // pnpm's own binary next to the store is not an artifact.
+    expect(classifyArtifactPath("/Users/dev/Library/pnpm/pnpm")).toBeNull();
+  });
+
   it("ignores ordinary documents", () => {
     expect(classifyArtifactPath("C:\\Users\\thoma\\Documents\\tax-2025.pdf")).toBeNull();
   });

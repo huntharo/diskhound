@@ -1,7 +1,8 @@
 //! Hand-rolled NDJSON parse for scan-index lines.
 //!
 //! Inverse of IndexWriter's emitter:
-//!   `{"p":"...","s":N,"m":N}` with optional `,"h":1`
+//!   `{"p":"...","s":N,"m":N}` with optional `,"h":1`, then (macOS APFS)
+//!   optional `,"v":N` (private bytes) and `,"k":1` (shares clone blocks)
 //!   `{"p":"...","t":"d","m":N}`
 //!
 //! Canonical shape first; field scan for odd key order. Avoids
@@ -34,9 +35,21 @@ fn parse_canonical_index_line(line: &[u8]) -> Option<IndexLineRec> {
         if !rest.starts_with(br#","m":"#) {
             return None;
         }
-        let (mtime, rest) = parse_u64_prefix(&rest[5..])?;
-        let extra_hardlink = rest == br#","h":1}"#;
-        if rest != b"}" && !extra_hardlink {
+        let (mtime, mut rest) = parse_u64_prefix(&rest[5..])?;
+        let extra_hardlink = rest.starts_with(br#","h":1"#);
+        if extra_hardlink {
+            rest = &rest[6..];
+        }
+        // APFS clone accounting suffix. Nothing downstream of the
+        // baseline reader needs it, so skip rather than store.
+        if rest.starts_with(br#","v":"#) {
+            let (_private, after) = parse_u64_prefix(&rest[5..])?;
+            rest = after;
+        }
+        if rest.starts_with(br#","k":1"#) {
+            rest = &rest[6..];
+        }
+        if rest != b"}" {
             return None;
         }
         return Some(IndexLineRec {
@@ -209,6 +222,22 @@ mod tests {
         let rec = parse_index_line(line).unwrap();
         assert!(rec.extra_hardlink);
         assert_eq!(rec.size, Some(10));
+    }
+
+    #[test]
+    fn canonical_file_accepts_apfs_clone_suffix() {
+        for line in [
+            r#"{"p":"/u/a.js","s":4096,"m":1,"v":0,"k":1}"#,
+            r#"{"p":"/u/a.js","s":4096,"m":1,"v":12}"#,
+            r#"{"p":"/u/a.js","s":4096,"m":1,"k":1}"#,
+            r#"{"p":"/u/a.js","s":4096,"m":1,"h":1,"v":0,"k":1}"#,
+        ] {
+            assert!(parse_canonical_index_line(line.as_bytes()).is_some(), "{line}");
+            let rec = parse_index_line(line).unwrap();
+            assert_eq!(rec.size, Some(4096));
+            assert_eq!(rec.extra_hardlink, line.contains(r#""h":1"#));
+        }
+        assert!(parse_canonical_index_line(br#"{"p":"/u/a","s":1,"m":1,"k":1,"v":0}"#).is_none());
     }
 
     #[test]

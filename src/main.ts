@@ -59,6 +59,7 @@ import {
   markFullScan,
   startDiskMonitoring,
 } from "./shared/diskMonitor";
+import { getStorageAccounting } from "./shared/macStorageAccounting";
 import { createScanSnapshotStore } from "./shared/scanStore";
 import { createSettingsStore, type SettingsStore } from "./shared/settingsStore";
 import { createUpdaterStateStore } from "./shared/updaterStateStore";
@@ -3359,6 +3360,35 @@ void (async () => {
     };
   });
   ipcMain.handle("diskhound:get-disk-space", () => getDiskSpace());
+  ipcMain.handle(
+    "diskhound:get-storage-accounting",
+    async (_event, targetPath: string, opts?: { fresh?: boolean }) => {
+      if (typeof targetPath !== "string" || !targetPath) return null;
+      try {
+        return await getStorageAccounting(targetPath, { fresh: opts?.fresh === true });
+      } catch (err) {
+        writeCrashLog("storage-accounting", err instanceof Error ? err.message : String(err));
+        return null;
+      }
+    },
+  );
+  ipcMain.handle("diskhound:get-volume-free-bytes", async (_event, targetPath: string) => {
+    if (typeof targetPath !== "string" || !targetPath) return null;
+    // Walk up to the nearest existing ancestor so this also answers
+    // "what is free now" right after `targetPath` itself was deleted.
+    let cursor = Path.resolve(targetPath);
+    for (let i = 0; i < 64; i++) {
+      try {
+        const st = await FS.statfs(cursor);
+        return st.bavail * st.bsize;
+      } catch {
+        const parent = Path.dirname(cursor);
+        if (parent === cursor) return null;
+        cursor = parent;
+      }
+    }
+    return null;
+  });
 
   // ── IPC: Cleanup Analysis ─────────────────────────────────
 

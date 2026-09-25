@@ -371,3 +371,52 @@ describe("rescanDevArtifactSidecar", () => {
     expect(ticks[0]).toBe(0);
   });
 });
+
+describe("APFS clone info in the Dev sidecar", () => {
+  const clone = {
+    cloneSize: 400,
+    clonePrivateSize: 0,
+    cloneInternalSize: 0,
+    cloneSharedSize: 400,
+    sharedRoots: 1,
+    sharedWith: ["/Users/me/Library/pnpm/store"],
+  };
+
+  it("flows from sidecar roots to report rows and back", async () => {
+    const { reportFromSidecar, sidecarFromReport } = await import("../devArtifactSidecar");
+    const report = reportFromSidecar({
+      version: 1,
+      rootPath: "/Users/me",
+      generatedAt: 1,
+      roots: [
+        { path: "/Users/me/app/node_modules", kind: "node-modules", size: 500, files: 3, clone },
+        { path: "/Users/me/app/target", kind: "rust-target", size: 100, files: 1 },
+      ],
+      projects: ["/Users/me/app"],
+    });
+    expect(report.artifacts[0]!.clone).toEqual(clone);
+    expect(report.artifacts[1]!.clone).toBeUndefined();
+    expect(sidecarFromReport(report).roots[0]!.clone).toEqual(clone);
+    expect("clone" in sidecarFromReport(report).roots[1]!).toBe(false);
+  });
+
+  it("rescans keep the last full scan's clone info, scaled to the new size", async () => {
+    const { carryCloneInfo } = await import("../devArtifactSidecar");
+    const previous = {
+      version: 1 as const,
+      rootPath: "/Users/me",
+      generatedAt: 1,
+      roots: [{ path: "/Users/me/app/node_modules", kind: "node-modules" as const, size: 500, files: 3, clone }],
+      projects: [],
+    };
+    const next = carryCloneInfo({
+      ...previous,
+      roots: [
+        { path: "/Users/me/app/node_modules", kind: "node-modules", size: 250, files: 2 },
+        { path: "/Users/me/other/node_modules", kind: "node-modules", size: 10, files: 1 },
+      ],
+    }, previous);
+    expect(next.roots[0]!.clone).toEqual({ ...clone, cloneSize: 200, cloneSharedSize: 200 });
+    expect(next.roots[1]!.clone).toBeUndefined();
+  });
+});

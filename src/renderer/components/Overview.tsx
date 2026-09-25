@@ -25,6 +25,7 @@ import {
 import { nativeApi } from "../nativeApi";
 import { DEV_ARTIFACTS_UPDATED_EVENT } from "../lib/uiEvents";
 import { FileIcon } from "./FileIcon";
+import { StorageAccountingCard } from "./StorageAccountingCard";
 import { toast } from "./Toasts";
 import type { TreemapLayout } from "../lib/treemap";
 import { Treemap } from "./Treemap";
@@ -323,6 +324,7 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
       </div>
 
       {latestDiff && <LatestScanSummary diff={latestDiff} onViewDetails={onViewChanges} />}
+      <StorageAccountingCard snapshot={snapshot} onViewDev={onViewDev} />
 
 
       <div className={`overview-body ${extSidebarCollapsed ? "ext-collapsed" : ""}`}>
@@ -491,7 +493,10 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
                           if (confirmDelete && !confirm(`Permanently delete ${item.file.name}?\n\nThis cannot be undone.`)) {
                             return;
                           }
-                          void runAction(item.file.path, () => nativeApi.permanentlyDeletePath(item.file.path), { deletedAction: "delete" });
+                          void runAction(item.file.path, () => nativeApi.permanentlyDeletePath(item.file.path), {
+                            deletedAction: "delete",
+                            expectedBytes: item.file.size,
+                          });
                         }}
                         onMove={() => void handleEasyMove(item.file.path)}
                       />

@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 
-import type { DevArtifact, DevArtifactKind, DevArtifactReport, DevArtifactsRescanProgress, ScanSnapshot } from "../../shared/contracts";
+import type {
+  DevArtifact,
+  DevArtifactKind,
+  DevArtifactReport,
+  DevArtifactsRescanProgress,
+  ScanSnapshot,
+  StorageAccountingReport,
+} from "../../shared/contracts";
 import {
   DEV_KIND_LABEL,
   DEV_KIND_SHORT,
@@ -11,6 +18,13 @@ import {
 } from "../../shared/devArtifacts";
 import { inFlightDeleteBytes } from "../../shared/deleteProgress";
 import { formatScanRoot, normPath } from "../../shared/pathUtils";
+import {
+  devArtifactSharing,
+  isMeaningfullyShared,
+  summarizeDevSharing,
+  userDataSnapshots,
+  type DevArtifactSharing,
+} from "../../shared/storageSharing";
 import { artifactHeadline, artifactTail } from "../lib/devArtifactDisplay";
 import {
   effectiveDevSort,
@@ -23,8 +37,9 @@ import {
   type DevGroupBy,
   type DevSortBy,
 } from "../lib/devArtifactViewState";
-import { formatBytes, formatCount } from "../lib/format";
-import { dispatchDevArtifactsUpdated } from "../lib/uiEvents";
+import { formatBytes, formatCount, relativeTime } from "../lib/format";
+import { captureFreeBytes, checkFreedSpace, freedSpaceCheckEnabled } from "../lib/freedSpaceCheck";
+import { dispatchDevArtifactsUpdated, STORAGE_ACCOUNTING_STALE_EVENT } from "../lib/uiEvents";
 import { nativeApi } from "../nativeApi";
 import { DEV_FOLDER_TREE_STAGES, DEV_RESCAN_STAGES, DEV_SIDECAR_STAGES, IndexLoadingPanel } from "./IndexLoadingPanel";
 import { toast } from "./Toasts";
@@ -92,12 +107,46 @@ function yieldToUi(): Promise<void> {
   });
 }
 
-function permanentDeleteConfirm(label: string, trees: number, bytes: number): string {
+function permanentDeleteConfirm(label: string, trees: number, bytes: number, freesBytes: number | null): string {
+  // APFS clone accounting: say up front when most of the selection is
+  // shared with trees that stay, instead of promising the full size.
+  const frees = freesBytes !== null && freesBytes < bytes * 0.9
+    ? `\nFrees ≈ ${formatBytes(freesBytes)} — the rest is APFS clones shared with files that stay.\n`
+    : "";
   return (
     `${label}\n\n` +
-    `${formatCount(trees)} trees · ${formatBytes(bytes)}\n\n` +
+    `${formatCount(trees)} trees · ${formatBytes(bytes)}\n${frees}\n` +
     `This permanently deletes the trees from disk. It cannot be undone and does not go to the Recycle Bin. Protected folders are skipped.`
   );
+}
+
+/** Tooltip for a row's "Shared" badge / "frees ≈" line. */
+function sharingTitle(sharing: DevArtifactSharing, size: number): string {
+  if (!sharing.measured) {
+    return `${sharing.hint?.detail ?? ""} Rescan the drive on macOS to measure it.`.trim();
+  }
+  const lines: string[] = [];
+  if (sharing.sharedBytes > 0) {
+    const others = sharing.sharedRoots > 0
+      ? `${formatCount(sharing.sharedRoots)} other tree${sharing.sharedRoots === 1 ? "" : "s"}`
+      : "files outside the Dev list";
+    lines.push(
+      `${formatBytes(sharing.sharedBytes)} of this ${formatBytes(size)} tree is APFS-cloned with ${others}; only deleting every copy frees those blocks.`,
+    );
+  }
+  // Clones of each other inside the tree (Cargo's deps/ vs. final
+  // binaries, for example): counted per copy in `size`, freed once.
+  const internalDup = Math.max(0, size - (sharing.freesBytes ?? size) - sharing.sharedBytes);
+  if (internalDup >= 1024 * 1024) {
+    lines.push(
+      `${formatBytes(internalDup)} is counted more than once because files inside this tree are APFS clones of each other.`,
+    );
+  }
+  lines.push(`Deleting this tree frees ≈ ${formatBytes(sharing.freesBytes ?? 0)} once no local snapshot holds it.`);
+  if (sharing.sharedWith.length > 0) {
+    lines.push(`\nShares blocks with:\n${sharing.sharedWith.map((p) => `  ${p}`).join("\n")}`);
+  }
+  return lines.join(" ");
 }
 
 function seedViewState(
@@ -137,6 +186,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
   const [rescanning, setRescanning] = useState(false);
   const [rescanProgress, setRescanProgress] = useState<DevArtifactsRescanProgress | null>(null);
   const [loadPath, setLoadPath] = useState<"sidecar" | "folder-tree">("sidecar");
+  const [storageReport, setStorageReport] = useState<StorageAccountingReport | null>(null);
   const rescanningRef = useRef(false);
   const rescanGenRef = useRef(0);
   const loadGenRef = useRef(0);
@@ -333,6 +383,33 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     totalFiles: remaining.reduce((sum, a) => sum + a.fileCount, 0),
     projectCount: new Set(remaining.map((a) => a.projectPath).filter(Boolean)).size,
   }), [remaining]);
+  const sharingSummary = useMemo(() => summarizeDevSharing(remaining), [remaining]);
+
+  // Local snapshots (macOS) for the note above the list: deleting any of
+  // these trees frees nothing until the snapshot holding them expires.
+  useEffect(() => {
+    if (nativeApi.platform !== "darwin" || !root) {
+      setStorageReport(null);
+      return;
+    }
+    let cancelled = false;
+    const load = (fresh = false) => {
+      void nativeApi.getStorageAccounting(root, { fresh }).then((next) => {
+        if (!cancelled) setStorageReport(next);
+      }).catch(() => { /* keep last */ });
+    };
+    load();
+    const onStale = () => load(true);
+    window.addEventListener(STORAGE_ACCOUNTING_STALE_EVENT, onStale);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(STORAGE_ACCOUNTING_STALE_EVENT, onStale);
+    };
+  }, [root]);
+  const devSnapshots = userDataSnapshots(storageReport);
+  const newestSnapshotAt = devSnapshots.find((s) => s.createdAt !== null)?.createdAt ?? null;
+  const showSharedNote = sharingSummary.measuredTrees > 0
+    && sharingSummary.sharedBytes >= Math.max(64 * 1024 * 1024, summary.totalBytes * 0.02);
 
   const kindTotals = useMemo(() => {
     const map = new Map<DevArtifactKind, { size: number; count: number }>();
@@ -401,8 +478,18 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     const targets = remaining.filter((artifact) => paths.includes(artifact.path));
     if (targets.length === 0) return;
     const totalBytes = targets.reduce((sum, artifact) => sum + artifact.size, 0);
-    const ok = window.confirm(permanentDeleteConfirm(label, targets.length, totalBytes));
+    const targetSharing = summarizeDevSharing(targets);
+    const ok = window.confirm(permanentDeleteConfirm(
+      label,
+      targets.length,
+      totalBytes,
+      targetSharing.measuredTrees > 0 ? targetSharing.freesBytes : null,
+    ));
     if (!ok) return;
+    // Did free space actually move? (macOS; see freedSpaceCheck.ts)
+    const freeBefore = freedSpaceCheckEnabled(totalBytes) ? await captureFreeBytes(root) : null;
+    let deletedSharedBytes = 0;
+    let deletedMeasured = false;
     setBulkBusy(true);
     let succeeded = 0;
     let failed = 0;
@@ -453,6 +540,9 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
           }
           succeeded += 1;
           deletedBytes += artifact.size;
+          const deletedSharing = devArtifactSharing(artifact);
+          deletedSharedBytes += deletedSharing.sharedBytes;
+          deletedMeasured ||= deletedSharing.measured;
           noteForgotten(scanKey, [artifact.path]);
           live = overlayForgotten(dropArtifactsFromReport(live ?? emptyDevReport(root), [artifact.path]), scanKey);
           setReport(live);
@@ -483,6 +573,14 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
           `Permanently deleted ${formatCount(succeeded)} tree${succeeded === 1 ? "" : "s"}`,
           "This cannot be undone.",
         );
+        if (freeBefore !== null) {
+          void checkFreedSpace({
+            path: root,
+            expectedBytes: deletedBytes,
+            freeBefore,
+            sharedBytes: deletedMeasured ? deletedSharedBytes : undefined,
+          });
+        }
       }
       if (failed > 0 && succeeded === 0) {
         toast("error", "Nothing was deleted", `${failed} failed`);
@@ -687,6 +785,28 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
         </div>
       </div>
 
+      {(showSharedNote || devSnapshots.length > 0) && (
+        <div className="dev-sharing-note" role="note">
+          {showSharedNote && (
+            <div>
+              <strong>{formatBytes(sharingSummary.sharedBytes)}</strong> of these trees is APFS-cloned with
+              files elsewhere, so deleting a tree frees only its own blocks — about{" "}
+              <strong>{formatBytes(sharingSummary.freesBytes)}</strong> if you deleted everything listed.
+              Rows marked <span className="dev-share-badge">Shared</span> say with what.
+            </div>
+          )}
+          {devSnapshots.length > 0 && (
+            <div>
+              {devSnapshots.length === 1 ? "A local snapshot" : `${formatCount(devSnapshots.length)} local snapshots`}
+              {newestSnapshotAt ? ` (newest ${relativeTime(newestSnapshotAt)})` : ""}
+              {devSnapshots.length === 1 ? " still references" : " still reference"} files that existed when
+              {devSnapshots.length === 1 ? " it was" : " they were"} taken. Space from deleting them comes back when
+              the snapshot expires — usually within 24 hours. See Overview for how to thin snapshots now.
+            </div>
+          )}
+        </div>
+      )}
+
       {kindTotals.length > 0 && (
         <KindTape
           totals={kindTotals}
@@ -883,7 +1003,11 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                 <span className="dev-group-size">{formatBytes(group.size)}</span>
               </header>
               )}
-              {group.artifacts.map((artifact) => (
+              {group.artifacts.map((artifact) => {
+                const sharing = devArtifactSharing(artifact);
+                const shared = isMeaningfullyShared(sharing, artifact.size);
+                const freesLess = sharing.freesBytes !== null && sharing.freesBytes < artifact.size * 0.9;
+                return (
                 <div
                   key={artifact.path}
                   className={`dev-row ${selected.has(artifact.path) ? "selected" : ""} ${busyPaths.has(artifact.path) ? "is-busy" : ""}`}
@@ -909,9 +1033,31 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                           {` · ${artifact.deltaBytes > 0 ? "+" : ""}${formatBytes(artifact.deltaBytes)} since last scan`}
                         </span>
                       ) : null}
+                      {shared && (
+                        <>
+                          {" · "}
+                          <span
+                            className={`dev-share-badge ${sharing.measured ? "" : "likely"}`}
+                            title={sharingTitle(sharing, artifact.size)}
+                          >
+                            {!sharing.measured
+                              ? "Likely shared"
+                              : sharing.sharedRoots > 0
+                                ? `Shared with ${formatCount(sharing.sharedRoots)} other tree${sharing.sharedRoots === 1 ? "" : "s"}`
+                                : "Shared"}
+                          </span>
+                        </>
+                      )}
                     </div>
                   </div>
-                  <div className="dev-row-size">{formatBytes(artifact.size)}</div>
+                  <div className="dev-row-size">
+                    {formatBytes(artifact.size)}
+                    {freesLess && (
+                      <span className="dev-row-frees" title={sharingTitle(sharing, artifact.size)}>
+                        frees ≈ {formatBytes(sharing.freesBytes!)}
+                      </span>
+                    )}
+                  </div>
                   <div className="dev-row-actions">
                     <button className="action-btn" onClick={() => void nativeApi.revealPath(artifact.path)}>Reveal</button>
                     <button
@@ -924,7 +1070,8 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                     </button>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </section>
           );
         })}
