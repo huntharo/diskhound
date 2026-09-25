@@ -32,8 +32,9 @@ jobs:
           node /tmp/changelog-guard.mjs
 
   typecheck-and-test:
-    # A body-only edit does not change the build. A title edit does.
-    if: github.event.action != 'edited' || github.event.changes.title
+    # A body-only edit does not change the build. A title edit does,
+    # and so does a new base branch, which changes what would merge.
+    if: github.event.action != 'edited' || github.event.changes.title || github.event.changes.base
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,7 +58,7 @@ jobs:
   # typecheck-and-test runs vitest on Linux. Some tests only do real
   # work on Windows (paths, delete errors) or depend on the local df.
   vitest-cross-os:
-    if: github.event.action != 'edited' || github.event.changes.title
+    if: github.event.action != 'edited' || github.event.changes.title || github.event.changes.base
     strategy:
       fail-fast: false
       matrix:
@@ -79,7 +80,7 @@ jobs:
         run: bun run test
 
   rust-check:
-    if: github.event.action != 'edited' || github.event.changes.title
+    if: github.event.action != 'edited' || github.event.changes.title || github.event.changes.base
     strategy:
       fail-fast: false
       matrix:
