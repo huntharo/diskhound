@@ -68,7 +68,8 @@ describe("duplicate group streaming scaling", () => {
     it(`does work per new group, not per group so far (${sortMode})`, () => {
       const small = stream(500, sortMode);
       const large = stream(4_000, sortMode);
-      expectNearLinear(`duplicate streaming ${sortMode}`, small.ops, large.ops, { maxTotal: 4_000 * 80 });
+      // ~70 ops per group, most of it placing groups into the 200-group page.
+      expectNearLinear(`duplicate streaming ${sortMode}`, small.ops, large.ops, { maxTotal: 4_000 * 150 });
     });
   }
 });

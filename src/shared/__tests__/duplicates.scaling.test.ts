@@ -57,7 +57,7 @@ describe("collectFromIndex scaling", () => {
       expect(ticks[0]).toEqual([5_000, 500]);
       return ops;
     };
-    expectNearLinear("collectFromIndex", await run(20_000), await run(160_000));
+    expectNearLinear("collectFromIndex", await run(20_000), await run(160_000), { maxTotal: 160_000 * 12 });
   });
 });
 
@@ -85,6 +85,6 @@ describe("collectFromWalk scaling", () => {
       expect(ticks.at(-1)).toEqual([count, count / 10]);
       return ops;
     };
-    expectNearLinear("collectFromWalk", await run(500), await run(4_000));
+    expectNearLinear("collectFromWalk", await run(500), await run(4_000), { maxTotal: 4_000 * 6 });
   });
 });
