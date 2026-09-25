@@ -73,6 +73,12 @@ export function groupDevArtifacts(
   })).sort((a, b) => b.size - a.size || a.label.localeCompare(b.label));
 }
 
+/** Rows whose path is one of `paths`, in row order. */
+export function artifactsAtPaths(rows: DevArtifact[], paths: readonly string[]): DevArtifact[] {
+  const wanted = new Set(paths);
+  return rows.filter((artifact) => wanted.has(artifact.path));
+}
+
 export function reportKey(root: string | null, finishedAt: number | null): string {
   return `${root ?? ""}|${finishedAt ?? 0}`;
 }
