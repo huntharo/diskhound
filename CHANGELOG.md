@@ -2,8 +2,10 @@
 
 ## Unreleased
 
-### macOS drive list
+### macOS
 
+- The traffic lights are now vertically centred in the header, in line
+  with the DiskHound name. They used to sit about 3.5pt high.
 - The startup disk shows how full the disk is. `/` is the sealed System
   volume, and `df` counts only the OS there (about 12 GB), so a Mac
   that was 95% full showed "11.8 GB used" and an almost empty bar. `/`
