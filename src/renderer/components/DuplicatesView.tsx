@@ -2,10 +2,12 @@ import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import type {
   DuplicateAnalysis,
+  DuplicateFileEntry,
   DuplicateGroup,
   DuplicateScanProgress,
   ScanSnapshot,
 } from "../../shared/contracts";
+import { duplicateGroupReclaimable, entryReclaimable, groupSharing } from "../../shared/duplicateReclaim";
 import {
   deletedPathLabel,
   deletedPathTitle,
@@ -311,14 +313,12 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
         return [...groups].sort((a, b) => b.size - a.size);
       case "wasted":
       default:
-        return [...groups].sort(
-          (a, b) => (b.files.length - 1) * b.size - (a.files.length - 1) * a.size,
-        );
+        return [...groups].sort((a, b) => duplicateGroupReclaimable(b) - duplicateGroupReclaimable(a));
     }
   }, [analysis, dismissed, sortMode]);
 
   const visibleWasted = useMemo(
-    () => visibleGroups.reduce((sum, g) => sum + (g.files.length - 1) * g.size, 0),
+    () => visibleGroups.reduce((sum, g) => sum + duplicateGroupReclaimable(g), 0),
     [visibleGroups],
   );
 
@@ -681,7 +681,9 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
             onTrash={(p) => void runAction(p, () => nativeApi.trashPath(p), { deletedAction: "trash" })}
             onDelete={(p) => void runAction(p, () => nativeApi.permanentlyDeletePath(p), {
               deletedAction: "delete",
-              expectedBytes: group.size,
+              // A hardlinked name frees nothing and a clone its private
+              // bytes; the freed-space check should expect only that.
+              expectedBytes: fileReclaimable(group, p),
             })}
             onMove={(p) => void handleEasyMove(p)}
             onToggleFileSelected={togglePathSelected}
@@ -747,7 +749,8 @@ function GroupCard({ group, isExpanded, busy, confirmDelete, selectedPaths, find
   onToggleFileSelected: (path: string) => void;
   onToggleGroupSelected: (group: DuplicateGroup, on: boolean) => void;
 }) {
-  const wasted = (group.files.length - 1) * group.size;
+  const wasted = duplicateGroupReclaimable(group);
+  const sharingNote = groupSharingNote(group);
   const name = group.files[0]?.name ?? "unknown";
   const ext = name.includes(".") ? name.slice(name.lastIndexOf(".")) : "";
   const { getDeletedRecord } = useDeletedPaths();
@@ -797,8 +800,16 @@ function GroupCard({ group, isExpanded, busy, confirmDelete, selectedPaths, find
           {ext && <span className="duplicate-group-ext">{ext}</span>}
         </div>
         <span className="duplicate-copies-badge">{group.files.length} copies</span>
+        {sharingNote && (
+          <span className="duplicate-shared-badge" title={sharingNote.title}>{sharingNote.label}</span>
+        )}
         <span className="duplicate-group-size">{formatBytes(group.size)} each</span>
-        <span className="duplicate-wasted">{formatBytes(wasted)} wasted</span>
+        <span
+          className={`duplicate-wasted ${wasted === 0 ? "none" : ""}`}
+          title={sharingNote ? "The most that comes back from keeping one copy and deleting the rest. Hardlinks and APFS clones count at what deleting them really frees, as of the last scan, so keep a copy marked “frees nothing” to get all of it." : undefined}
+        >
+          {wasted === 0 ? "nothing to reclaim" : `${formatBytes(wasted)} wasted`}
+        </span>
         <div className="duplicate-group-actions" onClick={(e) => e.stopPropagation()}>
           <button className="action-btn warn" onClick={onKeepNewest} title="Keep the newest copy, trash the rest">
             Keep newest
@@ -853,6 +864,7 @@ function GroupCard({ group, isExpanded, busy, confirmDelete, selectedPaths, find
                     <span className="duplicate-file-meta">
                       {humanAge(file.modifiedAt)}
                       {idx === 0 && <span className="duplicate-newest-badge">newest</span>}
+                      <FileSharingBadge file={file} size={group.size} />
                       {deletedRecord && <span className={`deleted-path-badge ${deletedRecord.action}`} title={deletedTitle}>{deletedPathLabel(deletedRecord)}</span>}
                       {protectedBy && <span className="protected-path-badge" title={`Protected by ${protectedBy}`}>Protected</span>}
                     </span>
@@ -881,4 +893,55 @@ function GroupCard({ group, isExpanded, busy, confirmDelete, selectedPaths, find
       )}
     </div>
   );
+}
+
+// ── Shared storage (hardlinks / APFS clones) ───────────────
+
+function fileReclaimable(group: DuplicateGroup, path: string): number {
+  const file = group.files.find((f) => f.path === path);
+  return file ? entryReclaimable(file, group.size) : group.size;
+}
+
+/** Header badge when some copies share storage instead of wasting it. */
+function groupSharingNote(group: DuplicateGroup): { label: string; title: string } | null {
+  const { hardlinks, clones } = groupSharing(group);
+  if (hardlinks === 0 && clones === 0) return null;
+  const parts: string[] = [];
+  if (hardlinks > 0) {
+    parts.push(
+      `${hardlinks === 1 ? "1 copy is a hardlinked file" : `${hardlinks} copies are hardlinked files`} — other names keep the data, so deleting ${hardlinks === 1 ? "it" : "one"} frees nothing.`,
+    );
+  }
+  if (clones > 0) {
+    parts.push(
+      `${clones === 1 ? "1 copy is an APFS clone" : `${clones} copies are APFS clones`} — ${clones === 1 ? "it shares" : "they share"} blocks with another file and free only what ${clones === 1 ? "it no longer shares" : "they no longer share"}.`,
+    );
+  }
+  const label = hardlinks > 0 && clones > 0 ? "shared storage" : hardlinks > 0 ? "hardlinked" : "APFS clones";
+  return { label, title: `${parts.join(" ")} From the last scan.` };
+}
+
+function FileSharingBadge({ file, size }: { file: DuplicateFileEntry; size: number }) {
+  if (file.sharing === "hardlink") {
+    return (
+      <span
+        className="duplicate-sharing-badge"
+        title="This file has other names (hardlinks), in this folder or elsewhere. Deleting this name frees nothing while another name remains."
+      >
+        hardlinked · frees nothing
+      </span>
+    );
+  }
+  if (file.sharing === "clone") {
+    const frees = entryReclaimable(file, size);
+    return (
+      <span
+        className="duplicate-sharing-badge"
+        title="APFS clone: shares blocks with another file. Deleting it frees only the blocks it no longer shares."
+      >
+        APFS clone · frees {frees === 0 ? "nothing" : formatBytes(frees)}
+      </span>
+    );
+  }
+  return null;
 }

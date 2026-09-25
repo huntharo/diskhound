@@ -5888,6 +5888,26 @@ button, input, select, textarea { font: inherit; }
   color: var(--amber);
   white-space: nowrap;
 }
+.duplicate-wasted.none {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+/* Copies that share storage (hardlinks / APFS clones) — see duplicateReclaim.ts. */
+.duplicate-shared-badge,
+.duplicate-sharing-badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: rgba(59,130,246,0.1);
+  color: var(--blue);
+  white-space: nowrap;
+}
+.duplicate-sharing-badge {
+  font-size: 9px;
+  padding: 1px 5px;
+  margin-left: 6px;
+}
 .duplicate-group-actions {
   display: flex;
   gap: 4px;

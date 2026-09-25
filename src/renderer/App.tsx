@@ -15,6 +15,7 @@ import {
   type ScanSnapshot,
   type UpdateStatus,
 } from "../shared/contracts";
+import { duplicateGroupReclaimable } from "../shared/duplicateReclaim";
 import { formatScanRoot } from "../shared/pathUtils";
 import { formatBytes } from "./lib/format";
 import { clearDeletedPaths } from "./lib/deletedPaths";
@@ -588,7 +589,7 @@ export function App() {
           // Running totals so the UI header shows live counts;
           // finalised at scan-end via onDuplicateResult.
           const totalWastedBytes = combinedGroups.reduce(
-            (sum, g) => sum + (g.files.length - 1) * g.size,
+            (sum, g) => sum + duplicateGroupReclaimable(g),
             0,
           );
           const totalDuplicateFiles = combinedGroups.reduce(

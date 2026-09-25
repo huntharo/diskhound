@@ -202,6 +202,10 @@ enum IndexWriteMsg {
         size: u64,
         mtime: u64,
         extra_hardlink: bool,
+        /// `(st_dev, st_ino)` when the file has more than one name
+        /// (Unix walker). Written as `"i"` so Duplicates can tell names
+        /// of one file from real copies without a stat.
+        link_id: Option<(u64, u64)>,
         /// APFS private size / clone id (macOS walker only).
         clone: Option<CloneAttrs>,
     },
@@ -248,6 +252,7 @@ impl IndexWriter {
                             size,
                             mtime,
                             extra_hardlink,
+                            link_id,
                             clone,
                         } => {
                             line.clear();
@@ -268,6 +273,20 @@ impl IndexWriter {
                             append_u64_decimal(&mut line, mtime);
                             if extra_hardlink {
                                 line.extend_from_slice(br#","h":1"#);
+                            }
+                            // Every name of a hardlinked file carries the
+                            // same `dev:ino`, owner included: `h` alone
+                            // can't say which names are one file, because
+                            // it marks the owner of *this* scan root and
+                            // Duplicates often reads a wider root's index.
+                            // Compare ids within one index only; APFS can
+                            // renumber st_dev on remount.
+                            if let Some((dev, ino)) = link_id {
+                                line.extend_from_slice(br#","i":""#);
+                                append_u64_decimal(&mut line, dev);
+                                line.push(b':');
+                                append_u64_decimal(&mut line, ino);
+                                line.push(b'"');
                             }
                             // APFS clones: `v` = private bytes (what
                             // deleting this file alone frees; the rest
@@ -352,6 +371,7 @@ impl IndexWriter {
         size: u64,
         mtime: u64,
         extra_hardlink: bool,
+        link_id: Option<(u64, u64)>,
         clone: Option<CloneAttrs>,
     ) -> io::Result<()> {
         if let Some(tx) = self.tx.as_ref() {
@@ -360,6 +380,7 @@ impl IndexWriter {
                 size,
                 mtime,
                 extra_hardlink,
+                link_id,
                 clone,
             })
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "index writer thread exited"))?;
@@ -929,7 +950,7 @@ fn stream_inherited_files_into(
         // Write to new index so the index remains a complete baseline for
         // the NEXT scan.
         if let Some(writer) = state.index_writer.as_mut() {
-            let _ = writer.write_entry(&normalized, size, mtime, extra_hardlink, None);
+            let _ = writer.write_entry(&normalized, size, mtime, extra_hardlink, rec.link_id, None);
         }
 
         // Update top-N + extension aggregates. Note: directory_totals +
@@ -1907,7 +1928,8 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
             modified_at: metadata_modified_at_ms(&metadata),
         };
 
-        record_file_with_link_flag(state, file_record, extra_hardlink, entry.client_state)?;
+        let link_id = (metadata.nlink() > 1).then(|| (metadata.dev(), metadata.ino()));
+        record_file_with_link_flag(state, file_record, extra_hardlink, link_id, entry.client_state)?;
     }
 
     #[cfg(target_os = "linux")]
@@ -2622,6 +2644,7 @@ fn emit_shard(
                     size: rec.size,
                     mtime: rec.mtime_ms,
                     extra_hardlink: rec.extra_hardlink,
+                    link_id: None,
                     clone: None,
                 });
             }
@@ -3890,17 +3913,19 @@ fn record_file(state: &mut ScanState, file_record: ScanFileRecord) -> Result<(),
         .baseline
         .as_ref()
         .is_some_and(|baseline| baseline.extra_hardlink_paths.contains(&file_record.path));
-    record_file_with_link_flag(state, file_record, extra_hardlink, None)
+    record_file_with_link_flag(state, file_record, extra_hardlink, None, None)
 }
 
 /// An extra hardlink still counts as a file in its folder and keeps its
 /// size in the index and folder-tree rows, but adds 0 bytes and stays off
-/// the largest-files and extension lists. `clone` carries APFS clone
-/// attributes from the macOS walker (None elsewhere).
+/// the largest-files and extension lists. `link_id` is `(dev, ino)` for a
+/// file with several names and `clone` its APFS clone attributes; both
+/// come from the Unix walker only (None elsewhere).
 fn record_file_with_link_flag(
     state: &mut ScanState,
     file_record: ScanFileRecord,
     extra_hardlink: bool,
+    link_id: Option<(u64, u64)>,
     clone: Option<CloneAttrs>,
 ) -> Result<(), String> {
     let occupancy = if extra_hardlink { 0 } else { file_record.size };
@@ -3969,7 +3994,14 @@ fn record_file_with_link_flag(
     // snapshot protocol keep working.
     if let Some(writer) = state.index_writer.as_mut() {
         if writer
-            .write_entry(&file_record.path, file_record.size, file_record.modified_at, extra_hardlink, clone)
+            .write_entry(
+                &file_record.path,
+                file_record.size,
+                file_record.modified_at,
+                extra_hardlink,
+                link_id,
+                clone,
+            )
             .is_err()
         {
             state.index_writer = None;
@@ -5176,6 +5208,40 @@ mod unix_hardlink_scan_tests {
                 "scan {run} picked a different owner"
             );
         }
+    }
+
+    #[test]
+    fn every_name_of_a_hardlinked_file_carries_its_link_id() {
+        let tree = TempTree::new("hardlink-ids");
+        let root = tree.path("root");
+        let shared = tree.write("root/a.bin", 8 * 1024);
+        tree.link(&shared, "root/sub/b.bin");
+        tree.write("root/solo.bin", 8 * 1024);
+        // Owner inside the root, other name outside: still linked.
+        let outside = tree.write("elsewhere/lib.so", 8 * 1024);
+        tree.link(&outside, "root/vendor/lib.so");
+        let index = tree.path("index.ndjson.gz");
+
+        let mut state = test_state(&root, &index);
+        scan_generic(&root, &mut state).unwrap();
+        state.index_writer.take().unwrap().finish().0.unwrap();
+
+        let reader = BufReader::new(GzDecoder::new(File::open(&index).unwrap()));
+        let ids: HashMap<String, Option<(u64, u64)>> = reader
+            .lines()
+            .map(|line| line.unwrap())
+            .filter_map(|line| index_line::parse_index_line(&line))
+            .filter(|rec| !rec.is_dir)
+            .map(|rec| (rec.path, rec.link_id))
+            .collect();
+        let root_s = normalize_path(&root);
+        let id_of = |rel: &str| ids[&format!("{root_s}/{rel}")];
+        let meta = fs::metadata(&shared).unwrap();
+        assert_eq!(id_of("a.bin"), Some((meta.dev(), meta.ino())), "the owner carries it too");
+        assert_eq!(id_of("sub/b.bin"), id_of("a.bin"));
+        assert!(id_of("vendor/lib.so").is_some());
+        assert_ne!(id_of("vendor/lib.so"), id_of("a.bin"));
+        assert_eq!(id_of("solo.bin"), None);
     }
 }
 

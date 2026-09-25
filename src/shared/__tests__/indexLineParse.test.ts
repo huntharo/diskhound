@@ -49,6 +49,19 @@ describe("parseIndexLine", () => {
     });
   });
 
+  it("reads the hardlink id between h and the clone suffix", () => {
+    expect(parseIndexLine('{"p":"/s/a.js","s":4096,"m":1,"i":"16777232:4815"}')).toEqual({
+      t: "f", p: "/s/a.js", s: 4096, m: 1, i: "16777232:4815",
+    });
+    expect(parseIndexLine('{"p":"/p/a.js","s":4096,"m":1,"h":1,"i":"16777232:4815","v":0,"k":1}')).toEqual({
+      t: "f", p: "/p/a.js", s: 4096, m: 1, h: 1, i: "16777232:4815", v: 0, k: 1,
+    });
+    // JSON.stringify order from the JS worker (i before h) still parses.
+    expect(parseIndexLine('{"p":"/p/a.js","s":4096,"m":1,"i":"1:2","h":1}')).toEqual({
+      t: "f", p: "/p/a.js", s: 4096, m: 1, h: 1, i: "1:2",
+    });
+  });
+
   it("parses the canonical directory shape", () => {
     const line = JSON.stringify({ p: "C:\\Users", t: "d", m: 99 });
     expect(parseIndexLine(line)).toEqual({ t: "d", p: "C:\\Users" });

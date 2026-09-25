@@ -60,11 +60,12 @@ export async function buildFolderTreeFromIndex(
   // this shape, so pattern-matching it bypasses serde_json's object
   // allocation and the two .indexOf() calls JSON.parse does internally.
   // Format: {"p":"<escapedPath>","s":<size>,"m":<mtime>} plus the
-  // optional `,"h":1` / APFS clone `,"v":N,"k":1` suffix (ignored here —
+  // optional `,"h":1`, link id `,"i":"dev:ino"` and APFS clone
+  // `,"v":N,"k":1` suffixes (ignored here —
   // folder rollups stay allocated size, like `du`).
   // (dir entries use "t":"d" and are skipped cheaply below.)
   const FILE_LINE_RE =
-    /^\{"p":"((?:\\.|[^"\\])*)","s":(\d+),"m":(\d+)(?:,"h":1)?(?:,"v":\d+)?(?:,"k":1)?\}$/;
+    /^\{"p":"((?:\\.|[^"\\])*)","s":(\d+),"m":(\d+)(?:,"h":1)?(?:,"i":"\d+:\d+")?(?:,"v":\d+)?(?:,"k":1)?\}$/;
 
   for await (const line of rl) {
     if (!line) continue;
