@@ -33,13 +33,7 @@ export function createUpdaterStateStore(filePath: string): UpdaterStateStore {
     get: () => state,
     update: (patch) => {
       const next = { ...state, ...patch };
-      if (
-        next.lastCheckedAt === state.lastCheckedAt
-        && next.pendingInstallVersion === state.pendingInstallVersion
-        && next.pendingInstallStartedAt === state.pendingInstallStartedAt
-      ) {
-        return;
-      }
+      if (JSON.stringify(next) === JSON.stringify(state)) return;
       state = next;
       persist();
     },

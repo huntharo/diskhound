@@ -220,17 +220,24 @@ function countedFunction(
     const target = describeTarget(args);
     record(counter, BYTE_COUNTED.has(counter) ? dataBytes(args[1], args[2]) : 0, target);
     const last = args.length - 1;
+    let finish: (() => void) | undefined;
     if (last >= 0 && typeof args[last] === "function") {
       // Callback form: finished when the callback runs.
       const callback = args[last] as (...cbArgs: unknown[]) => unknown;
-      let finish!: () => void;
       track(new Promise<void>((resolve) => { finish = resolve; }), `${label} ${target}`);
       args[last] = function tracked(this: unknown, ...cbArgs: unknown[]) {
-        finish();
+        finish?.();
         return callback.apply(this, cbArgs);
       };
     }
-    const result = original.apply(this, args);
+    let result: unknown;
+    try {
+      result = original.apply(this, args);
+    } catch (error) {
+      // Thrown before the callback was scheduled: it will never run.
+      finish?.();
+      throw error;
+    }
     if (result && typeof (result as Promise<unknown>).then === "function") {
       track(result as Promise<unknown>, `${label} ${target}`);
     }
@@ -249,14 +256,21 @@ function countedStream(original: StreamFactory, counter: IoCounter, label: strin
     const windows = windowsFor(target);
     // No "error" listener: adding one would swallow errors the code
     // under test must see. fs streams emit "close" after an error too.
+    // "finish" / "end" also count, for streams opened with
+    // autoClose or emitClose off, which never close on their own.
     track(
       new Promise<void>((resolve) => {
-        stream.once("close", () => {
+        let settled = false;
+        const done = () => {
+          if (settled) return;
+          settled = true;
           if (counter === "createWriteStream") {
             for (const { io } of windows) io.bytesWritten += stream.bytesWritten ?? 0;
           }
           resolve();
-        });
+        };
+        stream.once("close", done);
+        stream.once(counter === "createWriteStream" ? "finish" : "end", done);
       }),
       `${label} ${target}`,
     );
@@ -504,11 +518,16 @@ function withBudgetsLock(update: () => void): void {
 }
 
 function readBudgets(): BudgetFile {
+  let text: string;
   try {
-    return JSON.parse(realFs.readFileSync(BUDGETS_PATH, "utf8")) as BudgetFile;
-  } catch {
-    return {};
+    text = realFs.readFileSync(BUDGETS_PATH, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw error;
   }
+  // A parse error throws: re-recording over it would keep only the
+  // scenarios that ran and drop every other budget.
+  return JSON.parse(text) as BudgetFile;
 }
 
 function sortScenarios(budgets: BudgetFile): BudgetFile {

@@ -72,6 +72,23 @@ describe("measureFsIo", () => {
     expect(io).toMatchObject({ mkdir: 1, writeFile: 1, bytesWritten: 2 });
     expect(FS.readFileSync(Path.join(dir, "nested", "state.json"), "utf8")).toBe("{}");
   });
+
+  it("does not wait on a callback that a synchronous throw cancelled", async () => {
+    const { io } = await measureFsIo(() => {
+      expect(() => FS.mkdir(Symbol("not a path") as never, () => undefined)).toThrow();
+    });
+    expect(io.mkdir).toBe(1);
+    await measureFsIo(() => undefined);
+  });
+
+  it("treats a stream opened without autoClose as finished when it finishes", async () => {
+    const { io } = await measureFsIo(async () => {
+      const out = FS.createWriteStream(Path.join(dir, "manual"), { autoClose: false });
+      await new Promise<void>((resolve) => out.end(Buffer.alloc(8), resolve));
+      FS.closeSync((out as unknown as { fd: number }).fd);
+    });
+    expect(io).toMatchObject({ createWriteStream: 1, bytesWritten: 8 });
+  });
 });
 
 describe("expectIoBudget", () => {

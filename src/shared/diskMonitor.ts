@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import * as FS_SYNC from "node:fs";
 import * as FS from "node:fs/promises";
 import * as Path from "node:path";
 import { promisify } from "node:util";
@@ -71,9 +72,7 @@ export async function initDiskMonitor(dataDir: string): Promise<void> {
   }
 }
 
-async function persistState(): Promise<void> {
-  if (!persistDir) return;
-  baselineDirty = false;
+function serializeState(): string {
   const state: PersistedState = {
     previousDrives: Object.fromEntries(previousDriveMap),
     lastFullScanAt,
@@ -82,15 +81,18 @@ async function persistState(): Promise<void> {
     lastCheckedAt,
     deltaHistory,
   };
+  return JSON.stringify(state, null, 2);
+}
+
+async function persistState(): Promise<void> {
+  if (!persistDir) return;
+  baselineDirty = false;
   try {
     await FS.mkdir(persistDir, { recursive: true });
-    await FS.writeFile(
-      Path.join(persistDir, BASELINE_FILE),
-      JSON.stringify(state, null, 2),
-      "utf8",
-    );
+    await FS.writeFile(Path.join(persistDir, BASELINE_FILE), serializeState(), "utf8");
   } catch {
-    // Non-fatal — baselines will be lost on restart
+    // Non-fatal — the quit flush tries again.
+    baselineDirty = true;
   }
 }
 
@@ -209,10 +211,20 @@ export function markFullScan(): void {
 /**
  * Writes the baseline if a check moved it since the last write. Call
  * at quit, so the next launch measures its first delta from the last
- * check rather than from the last change.
+ * check rather than from the last change. Synchronous because
+ * before-quit cannot wait, and an async write cut off at exit would
+ * leave the file, history and all, truncated.
  */
-export async function flushDiskMonitor(): Promise<void> {
-  if (baselineDirty) await persistState();
+export function flushDiskMonitor(): void {
+  if (!baselineDirty || !persistDir) return;
+  baselineDirty = false;
+  try {
+    FS_SYNC.mkdirSync(persistDir, { recursive: true });
+    FS_SYNC.writeFileSync(Path.join(persistDir, BASELINE_FILE), serializeState(), "utf8");
+  } catch {
+    // Non-fatal — the next launch measures from the last write.
+    baselineDirty = true;
+  }
 }
 
 export function getLastFullScanAt(): number | null {

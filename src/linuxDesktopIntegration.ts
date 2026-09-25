@@ -73,7 +73,7 @@ import * as Path from "node:path";
  *  96 and 192 added in 0.5.7 because GNOME's dock at default scale
  *  picks an icon size in the 64-96 px range and upscales when no
  *  exact match exists; explicit 96.png removes the upscale step. */
-const ICON_SIZES = [16, 24, 32, 48, 64, 96, 128, 192, 256, 512];
+export const ICON_SIZES = [16, 24, 32, 48, 64, 96, 128, 192, 256, 512];
 
 /** Match the WM class we set via app.commandLine.appendSwitch("class", ...) in main.ts. */
 const APP_WM_CLASS = "diskhound";

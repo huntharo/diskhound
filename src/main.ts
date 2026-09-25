@@ -4740,9 +4740,9 @@ void (async () => {
     void windowStateStore?.flush();
     void widgetWindowStateStore?.flush();
     // Idle monitoring checks leave the latest drive readings in
-    // memory only; write them so the next launch's first delta starts
-    // from this session's last check.
-    void flushDiskMonitor();
+    // memory only; write them (synchronously) so the next launch's
+    // first delta starts from this session's last check.
+    flushDiskMonitor();
   });
 })().catch((err: unknown) => {
   const error = err as { stack?: string; message?: string };
