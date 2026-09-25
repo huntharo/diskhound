@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Dev Artifacts paths
+
+- On macOS and Linux, a row's tail uses the path's own separator, so
+  it reads `target/debug` rather than `target\debug`.
+- Shortening a long path keeps its root. `/Users/dev/…/zebra-crosslink`
+  no longer drops the leading `/`, and `/mnt/c/Users/dev/…` is not
+  rewritten as `/Users/dev/…`. Windows drive paths keep their original
+  case.
+
 ### macOS
 
 - The traffic lights are now vertically centred in the header, in line

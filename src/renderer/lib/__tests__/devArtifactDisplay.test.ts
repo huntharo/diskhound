@@ -152,6 +152,8 @@ describe("artifact display", () => {
       .toBe("/mnt/c/Users/dev/…/zebra-crosslink");
     expect(shortenVisiblePath("\\\\server\\share\\local-experimentation\\crosslink_monolith\\zebra-crosslink", 40))
       .toBe("\\\\server\\…\\zebra-crosslink");
+    expect(shortenVisiblePath("c:\\users\\dev\\local-experimentation\\crosslink_monolith\\zebra-crosslink", 40))
+      .toBe("c:\\users\\dev\\…\\zebra-crosslink");
 
     const row = artifact({
       path: "/Users/dev/local-experimentation/crosslink_monolith/zebra-crosslink/target/debug",
