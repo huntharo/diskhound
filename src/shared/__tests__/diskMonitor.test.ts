@@ -1,10 +1,24 @@
-import { describe, expect, it } from "vitest";
+import { execFile } from "node:child_process";
+import * as FS from "node:fs";
+import * as FSP from "node:fs/promises";
+import * as OS from "node:os";
+import * as Path from "node:path";
+import { promisify } from "node:util";
 
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import type { DiskSpaceInfo } from "../contracts";
 import {
+  getDiskSpace,
+  initDiskMonitor,
   parseLinuxDfOutput,
   parseMacDfOutput,
   parseWindowsCimLogicalDisks,
+  runDf,
+  stdoutOfFailedDf,
 } from "../diskMonitor";
+
+const execFileAsync = promisify(execFile);
 
 describe("parseMacDfOutput", () => {
   it("keeps the startup disk and mounted user volumes", () => {
@@ -252,6 +266,187 @@ describe("parseLinuxDfOutput", () => {
     ].join("\n");
 
     expect(parseLinuxDfOutput(stdout).map((drive) => drive.drive)).toEqual(["/mnt/fine"]);
+  });
+});
+
+describe("stdoutOfFailedDf", () => {
+  // A Node child stands in for df so each case gets the error that
+  // promisified execFile really rejects with.
+  function runFakeDf(script: string, timeout?: number): Promise<unknown> {
+    return execFileAsync(process.execPath, ["-e", script], { timeout }).then(
+      () => {
+        throw new Error("expected the fake df to fail");
+      },
+      (error: unknown) => error,
+    );
+  }
+
+  it("keeps the rows GNU df printed before exiting 1 for a dead mount", async () => {
+    // coreutils prints every mount it could stat, then exits 1 when
+    // statfs failed on one of them with anything but EACCES or ENOENT.
+    const table = [
+      "Filesystem     Type 1024-blocks      Used Available Capacity Mounted on",
+      "/dev/nvme0n1p2 ext4   490617784 412345678  53278906      89% /",
+      "/dev/sdb1      ext4   976490576 400000000 576490576      41% /mnt/backup",
+      "",
+    ].join("\n");
+    const error = await runFakeDf(
+      `process.stdout.write(${JSON.stringify(table)});` +
+        `process.stderr.write("df: /home/me/remote: Transport endpoint is not connected\\n");` +
+        `process.exitCode = 1;`,
+    );
+
+    const stdout = stdoutOfFailedDf(error);
+
+    expect(stdout).toBe(table);
+    expect(parseLinuxDfOutput(stdout ?? "").map((drive) => drive.drive)).toEqual(["/", "/mnt/backup"]);
+  });
+
+  it("returns nothing when df exited with an error and printed no table", async () => {
+    const error = await runFakeDf(`process.stderr.write("df: no file systems processed\\n"); process.exitCode = 1;`);
+
+    expect(error).toMatchObject({ code: 1 });
+    expect(stdoutOfFailedDf(error)).toBeNull();
+  });
+
+  it("drops what a df killed by the timeout had written", async () => {
+    const error = await runFakeDf(
+      `process.stdout.write("Filesystem 1024-blocks Used Available Capacity Mounted on\\n");` +
+        `setTimeout(() => {}, 60_000);`,
+      500,
+    );
+
+    expect(error).toMatchObject({ killed: true, code: null });
+    expect(stdoutOfFailedDf(error)).toBeNull();
+  });
+
+  it("returns nothing when df could not be started", async () => {
+    const error = await execFileAsync("diskhound-no-such-df", ["-P"]).catch((e: unknown) => e);
+
+    expect(error).toMatchObject({ code: "ENOENT" });
+    expect(stdoutOfFailedDf(error)).toBeNull();
+  });
+
+  it("returns nothing for errors that carry no exit status", () => {
+    expect(stdoutOfFailedDf(undefined)).toBeNull();
+    expect(stdoutOfFailedDf(new Error("boom"))).toBeNull();
+    expect(stdoutOfFailedDf({ code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER", stdout: "/dev/sda1" })).toBeNull();
+    expect(stdoutOfFailedDf({ code: 1, stdout: Buffer.from("rows") })).toBeNull();
+  });
+});
+
+describe("runDf", () => {
+  // Node children stand in for df, passed as the command.
+  const table = [
+    "Filesystem   1024-blocks Used Available Capacity Mounted on",
+    "/dev/disk4s1        1000  400       600      40% /Volumes/Data",
+    "",
+  ].join("\n");
+  const printTable = `process.stdout.write(${JSON.stringify(table)});`;
+
+  it("shares one df among the callers that ask while it runs", async () => {
+    const first = runDf(["-e", `setTimeout(() => { ${printTable} }, 200);`], process.execPath);
+    const second = runDf(["-e", `process.stdout.write("another table");`], process.execPath);
+
+    expect(await first).toBe(table);
+    expect(await second).toBe(table);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "gives up on a df that outlives its timeout and starts no other until it exits",
+    async () => {
+      const tempDir = await FSP.mkdtemp(Path.join(OS.tmpdir(), "diskhound-df-"));
+      const pidFile = Path.join(tempDir, "pid");
+      try {
+        // Ignores the timeout's SIGTERM, like a df blocked in FUSE's
+        // request_wait_answer on an sshfs mount whose network is gone.
+        const stuck = runDf(
+          [
+            "-e",
+            `process.on("SIGTERM", () => {});` +
+              `require("fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));` +
+              `setInterval(() => {}, 1000);`,
+          ],
+          process.execPath,
+          1_000,
+        );
+
+        expect(await stuck).toBeNull();
+        // It is still running, so this caller gets its answer too
+        // instead of starting a second df.
+        expect(await runDf(["-e", printTable], process.execPath)).toBeNull();
+      } finally {
+        process.kill(Number(FS.readFileSync(pidFile, "utf8")), "SIGKILL");
+        await FSP.rm(tempDir, { recursive: true, force: true });
+      }
+
+      // Once it exits, the next caller runs a new df.
+      await vi.waitFor(
+        async () => expect(await runDf(["-e", printTable], process.execPath)).toBe(table),
+        { timeout: 5_000 },
+      );
+    },
+  );
+});
+
+describe.skipIf(process.platform === "win32")("getDiskSpace", () => {
+  // A shell script named df, first on PATH, stands in for the real
+  // one. It prints the `-T` layout when asked, so the same row reaches
+  // parseLinuxDfOutput on Linux and parseMacDfOutput on macOS.
+  let tempDir: string;
+  let savedPath: string | undefined;
+
+  beforeEach(async () => {
+    tempDir = await FSP.mkdtemp(Path.join(OS.tmpdir(), "diskhound-df-"));
+    savedPath = process.env.PATH;
+    process.env.PATH = `${tempDir}${Path.delimiter}${savedPath ?? ""}`;
+  });
+
+  afterEach(async () => {
+    process.env.PATH = savedPath;
+    await FSP.rm(tempDir, { recursive: true, force: true });
+  });
+
+  function fakeDf(body: string): void {
+    // Write a new file and rename it over the old one, so Linux never
+    // sees a write to an executable that was just run (ETXTBSY).
+    const next = Path.join(tempDir, "df.next");
+    FS.writeFileSync(next, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+    FS.renameSync(next, Path.join(tempDir, "df"));
+  }
+
+  const printsVolumesData = [
+    `case " $* " in`,
+    `  *" -T "*) printf 'Filesystem Type 1024-blocks Used Available Capacity Mounted on\\n/dev/sdb1 ext4 1000 400 600 40%% /Volumes/Data\\n' ;;`,
+    `  *) printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/disk4s1 1000 400 600 40%% /Volumes/Data\\n' ;;`,
+    `esac`,
+  ].join("\n");
+
+  it("returns the drives df last reported when a run gives no table", async () => {
+    // Before df has answered once, the fallback is the last check
+    // saved before the app quit.
+    const saved: DiskSpaceInfo = {
+      drive: "/Volumes/Saved",
+      totalBytes: 2048,
+      freeBytes: 1024,
+      usedBytes: 1024,
+      usedPercent: 50,
+      timestamp: 1,
+    };
+    await FSP.writeFile(
+      Path.join(tempDir, "disk-baselines.json"),
+      JSON.stringify({ previousDrives: {}, lastFullScanAt: null, lastDrives: [saved] }),
+    );
+    await initDiskMonitor(tempDir);
+    fakeDf("exit 1");
+    expect(await getDiskSpace()).toEqual([saved]);
+
+    fakeDf(printsVolumesData);
+    const fresh = await getDiskSpace();
+    expect(fresh.map((drive) => drive.drive)).toEqual(["/Volumes/Data"]);
+
+    fakeDf("exit 1");
+    expect(await getDiskSpace()).toEqual(fresh);
   });
 });
 
