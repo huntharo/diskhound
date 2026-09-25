@@ -372,11 +372,28 @@ export function parseMacDfOutput(stdout: string, timestamp = Date.now()): DiskSp
 
     const filesystem = parts[0] ?? "";
     const totalKb = parseInt(parts[1] ?? "0", 10);
-    const usedKb = parseInt(parts[2] ?? "0", 10);
     const freeKb = parseInt(parts[3] ?? "0", 10);
     const mount = parts.slice(5).join(" ");
 
     if (!isMacUserStorage(filesystem, mount)) continue;
+
+    // `/` on macOS 10.15+ is the sealed, read-only System volume
+    // snapshot, so its Used column is the OS alone (~12 GB). User data
+    // lives on /System/Volumes/Data in the same APFS container. Every
+    // volume in a container reports the container's size as its total
+    // and the container's free space as its Available, so
+    // total - available is the whole container's usage: System, Data,
+    // VM (swap), Preboot, and the unmounted Recovery volume. That
+    // matches "Capacity In Use By Volumes" in `diskutil apfs list`, and
+    // it keeps used + free = total so the bar and the free figure
+    // agree. The Data row's Used alone would leave out the OS, swap,
+    // Preboot, and Recovery, space the user cannot write into either.
+    // It also needs no Data row, so it holds for HFS+ and pre-Catalina
+    // startup disks. Purgeable space counts as used, as it does in
+    // df's Available.
+    const usedKb = mount === "/"
+      ? Math.max(0, totalKb - freeKb)
+      : parseInt(parts[2] ?? "0", 10);
 
     const disk = diskSpaceFromKb(mount, totalKb, usedKb, freeKb, timestamp);
     if (disk) drives.push(disk);
@@ -385,15 +402,44 @@ export function parseMacDfOutput(stdout: string, timestamp = Date.now()): DiskSp
   return drives;
 }
 
+/**
+ * Mount trees macOS manages itself. None of them is storage the user
+ * can free space on, so none gets a drive card:
+ *   - /System: the startup container's other volumes (Data, VM,
+ *     Preboot, Update), which `/` already accounts for, and the
+ *     iSCPreboot, xarts, and Hardware firmware volumes.
+ *   - /Library/Developer/CoreSimulator: Xcode simulator runtime disk
+ *     images, read-only and nearly full by design.
+ *   - /private/var/run: cryptexd mounts (MetalToolchain and other
+ *     MobileAsset cryptexes), also read-only images.
+ *   - /private/var/folders: per-user temp and cache space, where
+ *     installers and App Translocation mount disk images.
+ *   - /private/var/vm: swap on pre-Catalina systems.
+ * Most are /dev/disk* devices, so the fallback at the end of
+ * isMacUserStorage would admit them without this list.
+ */
+const MAC_SYSTEM_MOUNT_ROOTS = [
+  "/System",
+  "/Library/Developer/CoreSimulator",
+  "/private/var/run",
+  "/private/var/folders",
+  "/private/var/vm",
+];
+
+function isAtOrUnder(root: string, path: string): boolean {
+  return path === root || (path.startsWith(root) && path.charCodeAt(root.length) === 0x2f);
+}
+
 function isMacUserStorage(filesystem: string, mount: string): boolean {
   if (!mount || mount === "/dev") return false;
   // Root is the correct scan target on modern APFS Macs; the paired
   // /System/Volumes/Data mount is deliberately hidden to avoid showing
   // users two cards for what Finder presents as one startup disk.
   if (mount === "/") return true;
-  if (mount.startsWith("/System/Volumes/")) return false;
-  if (mount === "/private/var/vm" || mount.includes("/.MobileBackups")) return false;
-  // External disks and SMB/NFS shares are normally presented here.
+  if (MAC_SYSTEM_MOUNT_ROOTS.some((root) => isAtOrUnder(root, mount))) return false;
+  if (mount.includes("/.MobileBackups")) return false;
+  // External disks, disk images the user opened, and SMB/NFS shares
+  // are normally presented here.
   if (mount.startsWith("/Volumes/")) return true;
   // Conservative fallback for direct device mounts that do not follow
   // the /Volumes convention.

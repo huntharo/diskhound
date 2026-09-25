@@ -7,6 +7,21 @@
 - The traffic lights are now vertically centred in the header, in line
   with the DiskHound name. They used to sit about 3.5pt high.
 
+### macOS drive list
+
+- The startup disk shows how full the disk is. `/` is the sealed System
+  volume, and `df` counts only the OS there (about 12 GB), so a Mac
+  that was 95% full showed "11.8 GB used" and an almost empty bar. `/`
+  now reports the whole APFS container, total minus available, the
+  same figure as "Capacity In Use By Volumes" in `diskutil apfs list`.
+  The drive pills, the picker, the system widget, Settings › Monitoring,
+  and the scan progress estimate all read it.
+- Xcode simulator runtimes, cryptex mounts, and other disk images macOS
+  manages under `/System`, `/Library/Developer/CoreSimulator`,
+  `/private/var/run`, `/private/var/folders`, and `/private/var/vm` are
+  no longer listed as drives. `/Volumes` disks, shares, and other
+  device mounts still are.
+
 ### Drive picker and header
 
 - Long mount paths no longer run out of the drive picker cards or crowd
