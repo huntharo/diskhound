@@ -31,6 +31,17 @@
 - Long Recent Scans paths stay inside the picker the same way, so the
   folder name at the end (`…/node_modules`) stays visible.
 
+### Shares with spaces in their names
+
+- A share whose source name has a space, such as a Linux CIFS mount of
+  `//nas/My Share` or an NFS export like `nas:/export/Family Photos`,
+  now gets a drive card. `df` prints the name with its space, and
+  DiskHound split each row on whitespace, so every later column moved
+  over by one and the share dropped out of the list.
+- A mount point with two spaces in a row, such as
+  `/Volumes/My  Passport`, keeps both. It used to collapse to one
+  space, a path that does not exist.
+
 ## 0.6.2 — 2026-09-23
 
 macOS no longer throws on startup when the theme is applied, and the

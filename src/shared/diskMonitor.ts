@@ -286,50 +286,39 @@ async function getLinuxDiskSpace(): Promise<DiskSpaceInfo[]> {
     // Column layout with -T:
     //   Filesystem  Type  1024-blocks  Used  Available  Capacity  Mounted on
     const { stdout } = await execFileAsync("df", ["-P", "-k", "-T"], { timeout: 10_000 });
-    const lines = stdout.trim().split("\n").slice(1);
-    const drives: DiskSpaceInfo[] = [];
-
-    for (const line of lines) {
-      const parts = line.trim().split(/\s+/);
-      if (parts.length < 7) continue;
-
-      const fsType = (parts[1] ?? "").toLowerCase();
-      const totalKb = parseInt(parts[2] ?? "0", 10);
-      const usedKb = parseInt(parts[3] ?? "0", 10);
-      const freeKb = parseInt(parts[4] ?? "0", 10);
-      const mount = parts.slice(6).join(" ");
-
-      // Skip if zero-sized (empty tmpfs instances, broken mounts)
-      if (totalKb === 0) continue;
-      // Skip snap-specific mount bind points (each installed snap shows
-      // up as a squashfs loopback under /snap/<name>/<rev>).
-      if (mount.startsWith("/snap")) continue;
-      // Skip the EFI boot partition — small, not user-actionable.
-      if (mount.startsWith("/boot")) continue;
-
-      // Allow-list filter: only real user-storage filesystem types pass.
-      // Before 0.5.2 there was no type filter and /run (tmpfs), /dev/shm
-      // (tmpfs), /run/lock (tmpfs), /run/user/1000 (tmpfs) all appeared
-      // in the drive picker — useless entries taking up valuable UI
-      // space. Virtual / pseudo filesystems (tmpfs, devtmpfs, proc,
-      // sysfs, cgroup, overlay, squashfs, fusectl, etc.) are not
-      // user-scannable storage, so we drop them here.
-      if (fsType && !REAL_FILESYSTEM_TYPES.has(fsType)) continue;
-
-      drives.push({
-        drive: mount,
-        totalBytes: totalKb * 1024,
-        freeBytes: freeKb * 1024,
-        usedBytes: usedKb * 1024,
-        usedPercent: totalKb > 0 ? (usedKb / totalKb) * 100 : 0,
-        timestamp: Date.now(),
-      });
-    }
-
-    return drives;
+    return parseLinuxDfOutput(stdout, Date.now());
   } catch {
     return [];
   }
+}
+
+export function parseLinuxDfOutput(stdout: string, timestamp = Date.now()): DiskSpaceInfo[] {
+  const drives: DiskSpaceInfo[] = [];
+
+  for (const row of parseDfRows(stdout, DF_ROW_WITH_TYPE)) {
+    const { fsType, totalKb, usedKb, freeKb, mount } = row;
+    // Skip snap-specific mount bind points (each installed snap shows
+    // up as a squashfs loopback under /snap/<name>/<rev>).
+    if (mount.startsWith("/snap")) continue;
+    // Skip the EFI boot partition — small, not user-actionable.
+    if (mount.startsWith("/boot")) continue;
+
+    // Allow-list filter: only real user-storage filesystem types pass.
+    // Before 0.5.2 there was no type filter and /run (tmpfs), /dev/shm
+    // (tmpfs), /run/lock (tmpfs), /run/user/1000 (tmpfs) all appeared
+    // in the drive picker — useless entries taking up valuable UI
+    // space. Virtual / pseudo filesystems (tmpfs, devtmpfs, proc,
+    // sysfs, cgroup, overlay, squashfs, fusectl, etc.) are not
+    // user-scannable storage, so we drop them here.
+    if (!REAL_FILESYSTEM_TYPES.has(fsType.toLowerCase())) continue;
+
+    // Returns null for zero-sized rows (empty tmpfs instances, broken
+    // mounts).
+    const disk = diskSpaceFromKb(mount, totalKb, usedKb, freeKb, timestamp);
+    if (disk) drives.push(disk);
+  }
+
+  return drives;
 }
 
 async function getMacDiskSpace(): Promise<DiskSpaceInfo[]> {
@@ -352,6 +341,9 @@ function diskSpaceFromKb(
   timestamp: number,
 ): DiskSpaceInfo | null {
   if (!drive || totalKb <= 0) return null;
+  // NaN slips past `<= 0`, and a NaN or Infinity byte count breaks
+  // every bar, percentage, and delta computed from it.
+  if (![totalKb, usedKb, freeKb].every(Number.isFinite)) return null;
   return {
     drive,
     totalBytes: totalKb * 1024,
@@ -362,19 +354,59 @@ function diskSpaceFromKb(
   };
 }
 
+interface DfRow {
+  filesystem: string;
+  /** Empty unless the row came from GNU `df -T`. */
+  fsType: string;
+  totalKb: number;
+  usedKb: number;
+  freeKb: number;
+  mount: string;
+}
+
+/**
+ * `df -P` pads its columns with spaces but does not quote or escape
+ * the Filesystem or Mounted on text. Linux CIFS shares
+ * ("//nas/My Share"), NFS exports on either platform
+ * ("nas:/export/Family Photos"), FUSE mounts, and the "map auto_home"
+ * autofs row every Mac has all print their spaces as-is. (macOS
+ * percent-encodes SMB and WebDAV sources, so those have none.)
+ * Splitting on whitespace shifts every later column, so these
+ * patterns anchor on the numeric columns instead: the filesystem is
+ * the shortest prefix followed by (the type and) three block counts
+ * and a capacity, and the mount point is everything after the
+ * capacity, spaces included. GNU df prints Used or Available with a
+ * minus sign when a filesystem has run into its root reserve, and
+ * "-" as the capacity of a zero-sized one.
+ */
+const DF_ROW =
+  /^(?<filesystem>.+?)\s+(?<total>\d+)\s+(?<used>-?\d+)\s+(?<available>-?\d+)\s+(?:\d+%|-)\s+(?<mount>\/.*)$/;
+const DF_ROW_WITH_TYPE =
+  /^(?<filesystem>.+?)\s+(?<type>\S+)\s+(?<total>\d+)\s+(?<used>-?\d+)\s+(?<available>-?\d+)\s+(?:\d+%|-)\s+(?<mount>\/.*)$/;
+
+/** Parses the data rows of `df -P` output, skipping any that don't fit. */
+function parseDfRows(stdout: string, pattern: RegExp): DfRow[] {
+  const rows: DfRow[] = [];
+  for (const line of stdout.trim().split(/\r?\n/).slice(1)) {
+    const groups = pattern.exec(line.trim())?.groups;
+    if (!groups) continue;
+    rows.push({
+      filesystem: groups.filesystem ?? "",
+      fsType: groups.type ?? "",
+      totalKb: Number(groups.total),
+      usedKb: Number(groups.used),
+      freeKb: Number(groups.available),
+      mount: groups.mount ?? "",
+    });
+  }
+  return rows;
+}
+
 export function parseMacDfOutput(stdout: string, timestamp = Date.now()): DiskSpaceInfo[] {
-  const lines = stdout.trim().split(/\r?\n/).slice(1);
   const drives: DiskSpaceInfo[] = [];
 
-  for (const line of lines) {
-    const parts = line.trim().split(/\s+/);
-    if (parts.length < 6) continue;
-
-    const filesystem = parts[0] ?? "";
-    const totalKb = parseInt(parts[1] ?? "0", 10);
-    const freeKb = parseInt(parts[3] ?? "0", 10);
-    const mount = parts.slice(5).join(" ");
-
+  for (const row of parseDfRows(stdout, DF_ROW)) {
+    const { filesystem, totalKb, freeKb, mount } = row;
     if (!isMacUserStorage(filesystem, mount)) continue;
 
     // `/` on macOS 10.15+ is the sealed, read-only System volume
@@ -393,7 +425,7 @@ export function parseMacDfOutput(stdout: string, timestamp = Date.now()): DiskSp
     // df's Available.
     const usedKb = mount === "/"
       ? Math.max(0, totalKb - freeKb)
-      : parseInt(parts[2] ?? "0", 10);
+      : row.usedKb;
 
     const disk = diskSpaceFromKb(mount, totalKb, usedKb, freeKb, timestamp);
     if (disk) drives.push(disk);

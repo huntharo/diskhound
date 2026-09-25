@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { parseMacDfOutput, parseWindowsCimLogicalDisks } from "../diskMonitor";
+import {
+  parseLinuxDfOutput,
+  parseMacDfOutput,
+  parseWindowsCimLogicalDisks,
+} from "../diskMonitor";
 
 describe("parseMacDfOutput", () => {
   it("keeps the startup disk and mounted user volumes", () => {
@@ -93,6 +97,161 @@ describe("parseMacDfOutput", () => {
     ].join("\n");
 
     expect(parseMacDfOutput(stdout)).toEqual([]);
+  });
+
+  it("reads rows whose filesystem, mount point, or both contain spaces", () => {
+    const stdout = [
+      "Filesystem                1024-blocks       Used  Available Capacity  Mounted on",
+      "/dev/disk3s1s1             1948404040   12347096  108707764    11%    /",
+      // NFS sources are host:path with the path as typed.
+      "nas:/export/Family Photos  3906250000 1000000000 2906250000    26%    /Volumes/nas",
+      "/dev/disk4s1                976490576  400000000  576490576    41%    /Volumes/My  Passport",
+      "nas:/export/Backup 2024    3906250000 2000000000 1906250000    52%    /Volumes/Backup 2024",
+      // SMB sources are URL-encoded, so only the mount point has a space.
+      "//me@nas/Media%20Share     1952981152  500000000 1452981152    26%    /Volumes/Media Share",
+    ].join("\n");
+
+    const drives = parseMacDfOutput(stdout, 7);
+
+    expect(drives.map((drive) => drive.drive)).toEqual([
+      "/",
+      "/Volumes/nas",
+      // Runs of spaces in a mount point survive; it must stay a real path.
+      "/Volumes/My  Passport",
+      // A source ending in a number is not mistaken for the size column.
+      "/Volumes/Backup 2024",
+      "/Volumes/Media Share",
+    ]);
+    expect(drives[1]).toEqual({
+      drive: "/Volumes/nas",
+      totalBytes: 3906250000 * 1024,
+      usedBytes: 1000000000 * 1024,
+      freeBytes: 2906250000 * 1024,
+      usedPercent: (1000000000 / 3906250000) * 100,
+      timestamp: 7,
+    });
+    expect(drives[3]).toMatchObject({
+      totalBytes: 3906250000 * 1024,
+      usedBytes: 2000000000 * 1024,
+      freeBytes: 1906250000 * 1024,
+    });
+  });
+
+  it("still hides autofs triggers whose map name has a space", () => {
+    // `map auto_home` is on every Mac. A direct map under /Volumes
+    // prints a zero-sized trigger until something walks into it.
+    const stdout = [
+      "Filesystem     1024-blocks Used Available Capacity  Mounted on",
+      "map auto_home            0    0         0   100%    /System/Volumes/Data/home",
+      "map -hosts               0    0         0   100%    /net",
+      "map auto_nas             0    0         0   100%    /Volumes/nas",
+    ].join("\n");
+
+    expect(parseMacDfOutput(stdout)).toEqual([]);
+  });
+
+  it("drops rows with sizes that are not finite numbers", () => {
+    const huge = "9".repeat(400);
+    const stdout = [
+      "Filesystem   1024-blocks Used Available Capacity Mounted on",
+      `/dev/disk9s1 ${huge} 500 500 50% /Volumes/Broken`,
+      "/dev/disk9s2 - - - - /Volumes/Unknown",
+      "/dev/disk9s3 1000 500 500 50% /Volumes/Fine",
+    ].join("\n");
+
+    const drives = parseMacDfOutput(stdout);
+
+    expect(drives.map((drive) => drive.drive)).toEqual(["/Volumes/Fine"]);
+  });
+});
+
+describe("parseLinuxDfOutput", () => {
+  // `df -P -k -T` from coreutils. GNU df prints spaces in the source
+  // and mount point as-is (it undoes /proc/self/mountinfo's \040).
+  const header =
+    "Filesystem                Type       1024-blocks       Used  Available Capacity Mounted on";
+
+  it("reads rows whose filesystem, mount point, or both contain spaces", () => {
+    const stdout = [
+      header,
+      "/dev/nvme0n1p2            ext4         490617784  412345678   53278906      89% /",
+      "//nas/My Share            cifs        1952981152  500000000 1452981152      26% /mnt/nas",
+      "/dev/sdb1                 exfat        976490576  400000000  576490576      41% /media/me/My Passport",
+      "nas:/export/Family Photos nfs4        3906250000 1000000000 2906250000      26% /mnt/Family Photos",
+    ].join("\n");
+
+    const drives = parseLinuxDfOutput(stdout, 5);
+
+    expect(drives.map((drive) => drive.drive)).toEqual([
+      "/",
+      "/mnt/nas",
+      "/media/me/My Passport",
+      "/mnt/Family Photos",
+    ]);
+    expect(drives[1]).toEqual({
+      drive: "/mnt/nas",
+      totalBytes: 1952981152 * 1024,
+      usedBytes: 500000000 * 1024,
+      freeBytes: 1452981152 * 1024,
+      usedPercent: (500000000 / 1952981152) * 100,
+      timestamp: 5,
+    });
+    expect(drives[3]).toMatchObject({
+      totalBytes: 3906250000 * 1024,
+      usedBytes: 1000000000 * 1024,
+      freeBytes: 2906250000 * 1024,
+    });
+  });
+
+  it("keeps the type filter and the snap, boot, and zero-size skips", () => {
+    const stdout = [
+      header,
+      "udev                      devtmpfs       8123456          0    8123456       0% /dev",
+      "tmpfs                     tmpfs          1629876       2140    1627736       1% /run",
+      "/dev/nvme0n1p2            ext4         490617784  412345678   53278906      89% /",
+      "/dev/loop3                squashfs         64896      64896          0     100% /snap/core20/2318",
+      "/dev/nvme0n1p1            vfat            523248       6220     517028       2% /boot/efi",
+      // The source's space must not push "fuse.sshfs" out of the type column.
+      "me@host:/srv/My Files     fuse.sshfs     1000000     500000     500000      50% /home/me/remote",
+      "/dev/sdd1                 ext4                 0          0          0        - /mnt/empty",
+      "tank/My Data              ZFS            2000000    1000000    1000000      50% /tank/My Data",
+    ].join("\n");
+
+    expect(parseLinuxDfOutput(stdout).map((drive) => drive.drive)).toEqual([
+      "/",
+      "/tank/My Data",
+    ]);
+  });
+
+  it("keeps a filesystem that has run into its root reserve", () => {
+    // GNU df prints a negative Available once root's reserved blocks
+    // are in use.
+    const stdout = [
+      header,
+      "/dev/sdc1                 ext4           1000000     990000     -40000     105% /srv/full",
+    ].join("\n");
+
+    expect(parseLinuxDfOutput(stdout, 1)).toEqual([
+      {
+        drive: "/srv/full",
+        totalBytes: 1000000 * 1024,
+        usedBytes: 990000 * 1024,
+        freeBytes: -40000 * 1024,
+        usedPercent: (990000 / 1000000) * 100,
+        timestamp: 1,
+      },
+    ]);
+  });
+
+  it("drops rows with sizes that are not finite numbers", () => {
+    const stdout = [
+      header,
+      `/dev/sde1 ext4 ${"9".repeat(400)} 500 500 50% /mnt/broken`,
+      "/dev/sde2 ext4 - - - - /mnt/unknown",
+      "/dev/sde3 ext4 1000 500 500 50% /mnt/fine",
+    ].join("\n");
+
+    expect(parseLinuxDfOutput(stdout).map((drive) => drive.drive)).toEqual(["/mnt/fine"]);
   });
 });
 
