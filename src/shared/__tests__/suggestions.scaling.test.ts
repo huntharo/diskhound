@@ -72,7 +72,7 @@ describe("analyzeCleanupFromIndex scaling", () => {
     expectNearLinear("analyzeCleanupFromIndex", await run(count), await run(count * 8), {
       maxTotal: count * 8 * 120,
     });
-  });
+  }, 60_000);
 });
 
 describe("analyzeForCleanup scaling", () => {

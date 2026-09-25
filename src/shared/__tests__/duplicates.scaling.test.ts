@@ -99,5 +99,6 @@ describe("collectFromWalk scaling", () => {
     const dir = Path.join(tmp.dir, "walk-root-500", "d0");
     const nodeOps = totalOps((await measureOps(() => FS.promises.stat(Path.join(dir, "f0.bin")))).ops);
     expectNearLinear("collectFromWalk", small, large, { maxTotal: 4_000 * 6 + 4_020 * nodeOps });
-  });
+    // Creating and statting 4,500 files takes about 7 s on a Windows runner.
+  }, 60_000);
 });
