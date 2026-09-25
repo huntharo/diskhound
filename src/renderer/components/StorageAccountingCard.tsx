@@ -7,6 +7,7 @@ import {
   userDataSnapshots,
 } from "../../shared/storageSharing";
 import { formatBytes, formatCount, relativeTime } from "../lib/format";
+import { saveLocalPreference } from "../lib/localPreference";
 import { STORAGE_ACCOUNTING_STALE_EVENT } from "../lib/uiEvents";
 import { nativeApi } from "../nativeApi";
 import { toast } from "./Toasts";
@@ -42,7 +43,7 @@ export function StorageAccountingCard({ snapshot, onViewDev }: {
   const toggleCollapsed = () => {
     setCollapsed((prev) => {
       const next = !prev;
-      try { window.localStorage.setItem(COLLAPSED_KEY, next ? "1" : "0"); } catch { /* ignore */ }
+      saveLocalPreference(COLLAPSED_KEY, next ? "1" : "0");
       return next;
     });
   };
