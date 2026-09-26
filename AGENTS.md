@@ -18,6 +18,23 @@ DiskHound keeps its state in JSON and gzipped NDJSON files under Electron's user
 - Write only when something changed. Compare against what is on disk, keep a dirty flag, debounce bursts, and flush at quit.
 - If a design projects badly, report the numbers to the user and ask before shipping it. Thousands of writes a day, or tens of MB a day of rewritten content, projects badly.
 
+## Read budgets for IPC and UI
+
+The same harness budgets reads. A UI action on data the app already holds (sort, filter, group, hover, drill-in, a tab remount, a poll) should read nothing. Its budget locks that at 0.
+
+- **IPC handlers.** `src/test/mainProcessHarness.ts` boots the real `src/main.ts` against a fake `electron` and a temp profile. `invoke()` calls the handlers the app ships, so there is no need to move a handler out of main.ts to test it.
+  - `src/test/mainProfileFixture.ts` seeds the profile: scan history, indexes, folder-tree and Dev sidecars at realistic sizes.
+  - Boot once per test file. main.ts keeps its caches in module state, so a scenario that needs a cold process needs its own file.
+  - Bundled workers are not built under vitest, so a worker always fails there. Budget the failure path with that. The success path belongs in E2E.
+  - crash.log buffers its lines and appends them on a 2 s timer. The harness's `vi.mock("../shared/crashLog")` line turns that timer off, and the harness flushes whenever a measurement settles. A scenario's lines then count as one append in its own window, and boot refuses to start without that line.
+  - See `src/__tests__/main.*.ioBudget.test.ts`.
+- **Renderer views.** `src/test/rendererHarness.ts` loads the real preload on top of that main process and mounts views in happy-dom. Every `nativeApi` call runs the real handler.
+  - Settle the mount, then budget the clicks.
+  - Assert `takeIpc()` too, where the answer should be no IPC at all.
+  - See `src/__tests__/renderer.views.ioBudget.test.ts`.
+- **Polls.** Pass `{ countProcesses: true }` to `measureFsIo` to also count child processes and workers. A poll that runs `df`, PowerShell or a sampler per tick needs that.
+  - Renderer pollers use `startVisiblePoll` or `useVisibleInterval` from `src/renderer/lib/visiblePoll.ts`, so they stop while the window is hidden to the tray. `e2e/tray.spec.ts` checks that no process starts while hidden.
+
 ## E2E
 
 `bun run test:e2e` runs the Playwright suite in `e2e/` against the built app and the native scanner. CI runs it on Linux, Windows and macOS. Read `e2e/AGENTS.md` before adding a spec.

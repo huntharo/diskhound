@@ -1,7 +1,7 @@
 import * as FS from "node:fs/promises";
 
 import type { FullDiffResult, ScanSnapshot } from "./contracts";
-import { readFullDiffCache, writeFullDiffCache } from "./fullDiffCacheStore";
+import { hasFullDiffCache, readFullDiffCache, writeFullDiffCache } from "./fullDiffCacheStore";
 import type { FullDiffWorkerInput } from "./fullDiffWorkerProtocol";
 import { getLatestPair } from "./scanHistory";
 import { indexFilePath } from "./scanIndex";
@@ -34,13 +34,20 @@ export interface FullDiffLoader {
     limit?: number,
     options?: FullDiffLoadOptions,
   ) => Promise<FullDiffResult | null>;
+  /** Whether a full diff for this pair is on disk; asks the disk once per pair. */
+  hasOnDisk: (baselineId: string, currentId: string, limit: number) => Promise<boolean>;
   /** Computes the latest pair's diff in the background, after a scan. */
   warmLatest: (rootPath: string) => Promise<FullDiffResult | null> | null;
+  /** Drops what the loader holds for a scan that is pruned or cleared. */
+  forgetScan: (id: string) => void;
   /** Memory-cache entries, for the memory diagnostics line. */
   memoryEntries: () => number;
 }
 
-const FULL_DIFF_CACHE_LIMIT = 8;
+// Full diffs are capped at the requested limit (1,000 changes from
+// Changes, ~200 KB), so 32 of them hold a drive's whole 30-scan
+// history at ~6 MB.
+const FULL_DIFF_CACHE_LIMIT = 32;
 
 /** Size and mtime of a scan's index, or "missing". */
 async function indexSignature(id: string): Promise<string> {
@@ -70,6 +77,15 @@ export function createFullDiffLoader(deps: FullDiffLoaderDeps): FullDiffLoader {
    * restarts, or the user asks again (`retryFailed`).
    */
   const failedDiffs = new Map<string, string>();
+  /**
+   * get-full-diff-status answers: which pairs have a full diff in
+   * full-diff-cache/. Only this loader writes there, and main calls
+   * forgetScan when it deletes a scan's diffs, so an answer holds until
+   * the loader writes that pair.
+   */
+  const fullDiffOnDisk = new Map<string, boolean>();
+  const cacheKeyFor = (baselineId: string, currentId: string, limit: number) =>
+    `${baselineId}::${currentId}::${limit}`;
 
   const readFullDiffMemoryCache = (key: string) => {
     const cached = fullDiffCache.get(key);
@@ -97,7 +113,7 @@ export function createFullDiffLoader(deps: FullDiffLoaderDeps): FullDiffLoader {
     options?: FullDiffLoadOptions,
   ): Promise<FullDiffResult | null> => {
     const normalizedLimit = normalizeDiffLimit(limit);
-    const cacheKey = `${baselineId}::${currentId}::${normalizedLimit}`;
+    const cacheKey = cacheKeyFor(baselineId, currentId, normalizedLimit);
     const memoryCached = readFullDiffMemoryCache(cacheKey);
     if (memoryCached !== undefined) {
       return memoryCached;
@@ -114,7 +130,12 @@ export function createFullDiffLoader(deps: FullDiffLoaderDeps): FullDiffLoader {
         return null;
       }
 
-      const diskCached = await readFullDiffCache(baselineId, currentId, normalizedLimit);
+      // A miss the status check just saw is still a miss: don't look
+      // for the file twice.
+      const diskCached = fullDiffOnDisk.get(cacheKey) === false
+        ? null
+        : await readFullDiffCache(baselineId, currentId, normalizedLimit);
+      fullDiffOnDisk.set(cacheKey, diskCached !== null);
       if (diskCached !== null) {
         writeFullDiffMemoryCache(cacheKey, diskCached);
         return diskCached;
@@ -151,6 +172,7 @@ export function createFullDiffLoader(deps: FullDiffLoaderDeps): FullDiffLoader {
         };
         writeFullDiffMemoryCache(cacheKey, emptyResult);
         await writeFullDiffCache(emptyResult, normalizedLimit);
+        fullDiffOnDisk.delete(cacheKey);
         return emptyResult;
       }
 
@@ -192,6 +214,7 @@ export function createFullDiffLoader(deps: FullDiffLoaderDeps): FullDiffLoader {
         failedDiffs.delete(cacheKey);
         writeFullDiffMemoryCache(cacheKey, result);
         await writeFullDiffCache(result, normalizedLimit);
+        fullDiffOnDisk.delete(cacheKey);
       } else {
         failedDiffs.delete(cacheKey);
         failedDiffs.set(cacheKey, signature);
@@ -210,6 +233,27 @@ export function createFullDiffLoader(deps: FullDiffLoaderDeps): FullDiffLoader {
     return pending;
   };
 
+  const hasOnDisk = async (baselineId: string, currentId: string, limit: number): Promise<boolean> => {
+    const key = cacheKeyFor(baselineId, currentId, limit);
+    if (fullDiffCache.get(key)) return true;
+    const known = fullDiffOnDisk.get(key);
+    if (known !== undefined) return known;
+    const onDisk = await hasFullDiffCache(baselineId, currentId, limit);
+    fullDiffOnDisk.set(key, onDisk);
+    return onDisk;
+  };
+
+  const forgetScan = (id: string) => {
+    for (const key of [...fullDiffCache.keys(), ...fullDiffOnDisk.keys(), ...failedDiffs.keys()]) {
+      const [baselineId, currentId] = key.split("::");
+      if (baselineId === id || currentId === id) {
+        fullDiffCache.delete(key);
+        fullDiffOnDisk.delete(key);
+        failedDiffs.delete(key);
+      }
+    }
+  };
+
   const warmLatest = (rootPath: string) => {
     const latestPair = getLatestPair(rootPath);
     if (!latestPair) return null;
@@ -219,5 +263,5 @@ export function createFullDiffLoader(deps: FullDiffLoaderDeps): FullDiffLoader {
     });
   };
 
-  return { load, warmLatest, memoryEntries: () => fullDiffCache.size };
+  return { load, hasOnDisk, warmLatest, forgetScan, memoryEntries: () => fullDiffCache.size };
 }

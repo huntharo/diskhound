@@ -24,13 +24,13 @@ export function EasyMoveView() {
   /**
    * Run lstat on every record's source + dest so the UI can badge
    * broken links, missing destinations, etc. Kicked off
-   * automatically when the tab mounts; user can re-run any time
-   * via the Verify button. Cheap — typically <100 ms for 20
-   * records.
+   * automatically when the tab mounts, where main reuses a check up
+   * to 10 minutes old; the Verify button always checks the disk.
+   * Cheap — typically <100 ms for 20 records.
    */
-  const verify = async () => {
+  const verify = async (force = false) => {
     setVerifying(true);
-    const results = await nativeApi.verifyEasyMoves().catch(() => null);
+    const results = await nativeApi.verifyEasyMoves({ force }).catch(() => null);
     setVerifying(false);
     if (!results) {
       toast("error", "Couldn't verify Easy Moves");
@@ -90,7 +90,7 @@ export function EasyMoveView() {
             </span>
             <button
               className="action-btn"
-              onClick={() => void verify()}
+              onClick={() => void verify(true)}
               disabled={verifying}
               title="Re-check every move's link + destination on disk"
             >

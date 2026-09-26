@@ -6,6 +6,7 @@ import { formatBytes, formatCount } from "../lib/format";
 import { saveLocalPreference } from "../lib/localPreference";
 import { reportPollFailure } from "../lib/pollFailure";
 import { processMetadataParts, processSearchText } from "../lib/processMetadata";
+import { useVisibleInterval } from "../lib/visiblePoll";
 import { nativeApi } from "../nativeApi";
 import { GpuView } from "./GpuView";
 import {
@@ -99,17 +100,11 @@ export function MemoryView() {
   // matches a rule, and the context menu uses it to decide between
   // "Pin rule…" and "Edit rule…".
   const [affinityRules, setAffinityRules] = useState<AffinityRule[]>([]);
-  useEffect(() => {
-    const refresh = () => {
-      nativeApi.getAffinityRules()
-        .then((rules) => setAffinityRules(rules))
-        .catch((error: unknown) => reportPollFailure("MemoryView affinity rules", error));
-    };
-    refresh();
-    const id = window.setInterval(refresh, 5000);
-    return () => window.clearInterval(id);
-  }, []);
-  const timerRef = useRef<number | null>(null);
+  useVisibleInterval(() => {
+    nativeApi.getAffinityRules()
+      .then((rules) => setAffinityRules(rules))
+      .catch((error: unknown) => reportPollFailure("MemoryView affinity rules", error));
+  }, 5000, { immediate: true });
 
   // Shared context menu used by both ProcessTreemap and ProcessHeatmap —
   // lifted here so either view can open it, and a single Escape handler
@@ -234,20 +229,9 @@ export function MemoryView() {
     }
   }, []);
 
-  useEffect(() => {
-    if (paused) return;
-    timerRef.current = window.setInterval(() => void refresh(), refreshMs);
-    return () => {
-      if (timerRef.current !== null) window.clearInterval(timerRef.current);
-    };
-  }, [paused, refresh, refreshMs]);
-
-  // Pause polling when tab/window hidden (saves CPU)
-  useEffect(() => {
-    const onVis = () => setPaused(document.hidden);
-    document.addEventListener("visibilitychange", onVis);
-    return () => document.removeEventListener("visibilitychange", onVis);
-  }, []);
+  // Each sample runs the process sampler in main. It stops while the
+  // window is hidden without touching the user's own pause.
+  useVisibleInterval(() => void refresh(), paused ? null : refreshMs);
 
   // Pre-warm the process appearance cache as soon as a snapshot arrives,
   // regardless of which view is active. This fixes the "treemap shows
@@ -2279,14 +2263,10 @@ function AffinityRulesView({ cpuCount }: { cpuCount: number }) {
     }
   };
 
-  useEffect(() => {
-    void reload();
-    // Light polling so "lastAppliedAt" / "appliedCount" update
-    // reactively as the engine fires rules in the background. 3 s is
-    // fast enough to feel live without hammering settings reads.
-    const id = window.setInterval(() => { void reload(); }, 3000);
-    return () => window.clearInterval(id);
-  }, []);
+  // Light polling so "lastAppliedAt" / "appliedCount" update
+  // reactively as the engine fires rules in the background. 3 s is
+  // fast enough to feel live without hammering settings reads.
+  useVisibleInterval(() => void reload(), 3000, { immediate: true });
 
   const toggleEnabled = async (rule: AffinityRule) => {
     const next: AffinityRule = { ...rule, enabled: !rule.enabled };

@@ -112,6 +112,32 @@ export async function getDiskSpace(): Promise<DiskSpaceInfo[]> {
   return drives;
 }
 
+/**
+ * How old a reading `getRecentDiskSpace` may hand out. App's header,
+ * the drive picker and the System widget each poll every 10 s, out of
+ * phase, from two renderers; each poll ran df (PowerShell on Windows).
+ */
+export const SHARED_DISK_SPACE_MAX_AGE_MS = 5_000;
+
+let sharedDiskSpace: { at: number; drives: Promise<DiskSpaceInfo[]> } | null = null;
+
+/**
+ * getDiskSpace for the renderer's pollers: calls that arrive while a
+ * read is running, or within SHARED_DISK_SPACE_MAX_AGE_MS of its start,
+ * share it. The monitoring check still reads fresh.
+ */
+export function getRecentDiskSpace(read: () => Promise<DiskSpaceInfo[]> = getDiskSpace): Promise<DiskSpaceInfo[]> {
+  const shared = sharedDiskSpace;
+  if (shared && Date.now() - shared.at < SHARED_DISK_SPACE_MAX_AGE_MS) return shared.drives;
+  const drives = read();
+  const entry = { at: Date.now(), drives };
+  sharedDiskSpace = entry;
+  drives.catch(() => {
+    if (sharedDiskSpace === entry) sharedDiskSpace = null;
+  });
+  return drives;
+}
+
 /** `readDrives` is for tests. */
 export async function checkDiskDeltas(
   readDrives: () => Promise<DiskSpaceInfo[]> = getDiskSpace,

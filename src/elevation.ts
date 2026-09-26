@@ -182,9 +182,25 @@ export async function relaunchAsAdmin(exePath: string): Promise<boolean> {
 
 const SCHEDULED_TASK_NAME = "DiskHound-FastScan";
 
+/**
+ * The last definite answer from schtasks. App asks on mount and
+ * Settings on every open, and each ask spawned schtasks. Registering
+ * or deleting the task here updates it; a task deleted by hand in
+ * Task Scheduler still shows as registered until the next launch.
+ */
+let cachedHasScheduledTask: boolean | null = null;
+
 export async function hasScheduledTask(): Promise<boolean> {
   if (process.platform !== "win32") return false;
-  return await new Promise<boolean>((resolve) => {
+  if (cachedHasScheduledTask !== null) return cachedHasScheduledTask;
+  const answer = await queryScheduledTask();
+  // A timeout or spawn error is not an answer: ask again next time.
+  if (answer !== null) cachedHasScheduledTask = answer;
+  return answer ?? false;
+}
+
+async function queryScheduledTask(): Promise<boolean | null> {
+  return await new Promise<boolean | null>((resolve) => {
     const child = spawn("schtasks", ["/query", "/tn", SCHEDULED_TASK_NAME], {
       // Capture stderr so we can distinguish "ERROR: The system cannot
       // find the file specified." (task genuinely doesn't exist, exit 1)
@@ -200,11 +216,11 @@ export async function hasScheduledTask(): Promise<boolean> {
     child.stderr?.on("data", (chunk) => { stderrBuf += String(chunk); });
     const timeout = setTimeout(() => {
       try { child.kill(); } catch { /* noop */ }
-      resolve(false);
+      resolve(null);
     }, 2000);
     child.on("error", () => {
       clearTimeout(timeout);
-      resolve(false);
+      resolve(null);
     });
     child.on("exit", (code) => {
       clearTimeout(timeout);
@@ -302,6 +318,7 @@ export async function registerScheduledTask(exePath: string): Promise<boolean> {
         resolve(code === 0);
       });
     });
+    if (success) cachedHasScheduledTask = true;
     return success;
   } finally {
     try { await fs.unlink(tempPath); } catch { /* best-effort cleanup */ }
@@ -310,7 +327,7 @@ export async function registerScheduledTask(exePath: string): Promise<boolean> {
 
 export async function unregisterScheduledTask(): Promise<boolean> {
   if (process.platform !== "win32") return false;
-  return await new Promise<boolean>((resolve) => {
+  const removed = await new Promise<boolean>((resolve) => {
     const cmd = `Start-Process -FilePath schtasks -ArgumentList '/delete', '/tn', '${SCHEDULED_TASK_NAME}', '/f' -Verb RunAs -Wait -WindowStyle Hidden`;
     const child = spawn(
       "powershell.exe",
@@ -330,6 +347,13 @@ export async function unregisterScheduledTask(): Promise<boolean> {
       resolve(code === 0);
     });
   });
+  if (removed) cachedHasScheduledTask = false;
+  return removed;
+}
+
+/** Tests only: forget the cached schtasks answer, as a restart does. */
+export function __resetScheduledTaskCacheForTests(): void {
+  cachedHasScheduledTask = null;
 }
 
 /**
