@@ -47,6 +47,13 @@ wrap the command in `xvfb-run --auto-servernum`.
 - **Folder dialog.** `dialog.showOpenDialog` is stubbed in main.
   `handle.setPickDirectory(dir)` sets what "Browse for folder..."
   returns.
+- **Agent port.** Each launch sets `DISKHOUND_AGENT_PORT` to a free
+  port, so the MCP server never takes 51733 from a DiskHound the
+  developer runs with AI agents on. `handle.agentPort` is the port;
+  pass `launch({ agentPort })` to keep it across a restart.
+- **Agent Trash.** `stubTrash(handle, dir)` answers the agent's Trash
+  confirmation with the button the spec picks, and moves items into
+  `dir` rather than the developer's real Trash or Recycle Bin.
 - **Scan tree.** The `scanTree` fixture writes five random-content
   files with known, distinct sizes under the test's output dir, not the
   OS temp dir. macOS temp resolves under `/private`, which is in
@@ -71,6 +78,10 @@ wrap the command in `xvfb-run --auto-servernum`.
   run, even when the retry passes.
 - `fixtures/steps.ts` has the shared UI steps: `scanFolderFromPicker`,
   `waitForScanComplete` and `openTab`.
+- `fixtures/agent.ts` plays an MCP agent. `signIn` runs the login
+  `claude mcp login` does: it registers, opens `/authorize`, answers the
+  real approval window, and exchanges the code for a token.
+  `connectAgent` returns an MCP SDK client for that token.
 - The Playwright page is named `page`, not `window`. Inside
   `page.evaluate(() => window.diskhound...)`, a variable named `window`
   would shadow the browser global for TypeScript.
