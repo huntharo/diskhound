@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runIncrementalRescan, type IncrementalRescanDeps } from "../incrementalRescan";
 import { commitCompletedScan, settingsWithRecentScan } from "../scanCommit";
 import type { DiskDelta, ScanSnapshot } from "../shared/contracts";
-import { __resetDiskMonitorForTests, initDiskMonitor, markFullScan } from "../shared/diskMonitor";
+import { __resetDiskMonitorForTests, flushDiskMonitor, initDiskMonitor, markFullScan } from "../shared/diskMonitor";
 import { createFullDiffLoader } from "../shared/fullDiffLoader";
 import { initFullDiffCacheStore, writeFullDiffCache } from "../shared/fullDiffCacheStore";
 import { computeFullDiffFromIndexFiles } from "../shared/fullDiffWorkerRuntime";
@@ -27,7 +27,13 @@ import {
 } from "../shared/scanIndex";
 import { createScanSnapshotStore, type ScanSnapshotStore } from "../shared/scanStore";
 import { createSettingsStore } from "../shared/settingsStore";
-import { __resetStoreForTests as resetCursors, initUsnCursorStore, setCursor } from "../shared/usnCursorStore";
+import {
+  __resetStoreForTests as resetCursors,
+  flushUsnCursorStore,
+  getCursor,
+  initUsnCursorStore,
+  setCursor,
+} from "../shared/usnCursorStore";
 import { expectIoBudget, measureFsIo } from "../test/ioBudget";
 import { completedScanSnapshot } from "../test/scanSnapshotFixture";
 import {
@@ -245,11 +251,12 @@ function incrementalDeps(overrides: Partial<IncrementalRescanDeps> = {}) {
   const calls = { warmFullDiff: 0, onCommitted: 0, published: [] as ScanSnapshot[] };
   const deps: IncrementalRescanDeps = {
     scannerPath: "diskhound-native-scanner",
-    publishSnapshot: async (snapshot) => {
+    publishSnapshot: async (snapshot, options) => {
       calls.published.push(snapshot);
-      await scanStore.set(snapshot);
+      await scanStore.set(snapshot, options);
     },
     markFullScan,
+    loadSnapshot: loadHistoricalSnapshot,
     warmFullDiff: () => { calls.warmFullDiff += 1; },
     onCommitted: () => { calls.onCommitted += 1; },
     onPruned: () => {},
@@ -297,13 +304,75 @@ describe("scheduled full scan", () => {
 });
 
 describe("scheduled USN rescan (Windows)", () => {
+  /** Activity elsewhere on the volume, and a close under the root with no change. */
+  function quietJournal(): string[] {
+    const first = baseTree.files[0]!;
+    return [
+      journalRecord(Path.resolve(Path.sep, "elsewhere", "pagefile.sys"), "modify", 8_589_934_592, now),
+      journalRecord(first.path, "close", first.size, first.mtime),
+      journalCursor(2),
+    ];
+  }
+
   it("costs nothing when the journal has no changes under the root", async () => {
     const ids = await seedHistoryAtCap();
     await saveCursor();
-    // Activity elsewhere on the volume, and a close with no change.
+    journal.lines = quietJournal();
+    const { deps, calls } = incrementalDeps();
+
+    const { io, result } = await measureFsIo(() => runIncrementalRescan(ROOT, deps));
+
+    expectIoBudget({
+      scenario: "usn-tick-no-changes",
+      note: "a USN tick with no changes under the root: 0 writes, 1 read of the latest snapshot to restamp it in memory; last-scan.json, disk-baselines.json and the cursor wait for the quit flush. Was a whole-index rewrite (~330 MB at 7M files), a new history entry and last-scan.json (~2.3 MB each), both sidecars copied (~50 MB), disk-baselines.json and the cursor, and a real scan pruned from history: ~385 MB per no-op tick, ~1.5 GB/day at the 6 h default and ~555 GB/day at the 1-minute minimum",
+      io,
+    });
+    expect(result).toMatchObject({ changed: false });
+    expect(getScanHistory(ROOT).map((entry) => entry.id)).toEqual([...ids].reverse());
+    expect(FS.readdirSync(Path.join(dataDir, "scan-indexes")).filter((name) => name.startsWith("pending-"))).toEqual([]);
+    expect(calls).toMatchObject({ warmFullDiff: 0, onCommitted: 0 });
+    // The UI still hears about the check, restamped.
+    expect(calls.published).toHaveLength(1);
+    expect(calls.published[0]!.finishedAt).toBeGreaterThanOrEqual(now);
+    expect((await scanStore.get()).finishedAt).toBe(calls.published[0]!.finishedAt);
+    expect(getCursor("C:")?.cursor).toBe(2_000_000);
+  });
+
+  it("writes an hour of no-op ticks once, at quit", async () => {
+    await seedHistoryAtCap();
+    await saveCursor();
+    journal.lines = quietJournal();
+    const { deps, calls } = incrementalDeps();
+
+    // The 1-minute minimum interval, then before-quit's flushes.
+    const { io } = await measureFsIo(async () => {
+      for (let tick = 0; tick < 60; tick++) await runIncrementalRescan(ROOT, deps);
+      flushDiskMonitor();
+      scanStore.flush();
+      flushUsnCursorStore();
+    });
+
+    expectIoBudget({
+      scenario: "usn-ticks-hour-min-interval-then-quit",
+      note: "60 no-op USN ticks at the 1-minute minimum, then before-quit's flushes: 3 writes per session (last-scan.json ~2.7 MB, disk-baselines.json ~113 KB, usn-cursors.json). Was 60 × ~385 MB at 7M files, ~23 GB an hour",
+      io,
+    });
+    expect(calls.published).toHaveLength(60);
+    const saved = JSON.parse(FS.readFileSync(Path.join(dataDir, "last-scan.json"), "utf8")) as ScanSnapshot;
+    expect(saved.finishedAt).toBe(calls.published.at(-1)!.finishedAt);
+    const cursors = JSON.parse(FS.readFileSync(Path.join(dataDir, "usn-cursors.json"), "utf8"));
+    expect(cursors.cursors["C:"].cursor).toBe(2_000_000);
+  });
+
+  it("keeps the old index when the journal's records match nothing in it", async () => {
+    const ids = await seedHistoryAtCap();
+    await saveCursor();
+    const same = baseTree.files[1]!;
     journal.lines = [
-      journalRecord(Path.resolve(Path.sep, "elsewhere", "pagefile.sys"), "modify", 8_589_934_592, now),
-      journalRecord(baseTree.files[0]!.path, "close", baseTree.files[0]!.size, baseTree.files[0]!.mtime),
+      // A write that left size and mtime as the index has them.
+      journalRecord(same.path, "modify", same.size, same.mtime),
+      // A file the index never listed, gone again.
+      journalRecord(Path.join(ROOT, "Users", "someone", "AppData", "Local", "Temp", "~tmp1.tmp"), "delete", null, now),
       journalCursor(2),
     ];
     const { deps } = incrementalDeps();
@@ -311,12 +380,13 @@ describe("scheduled USN rescan (Windows)", () => {
     const { io, result } = await measureFsIo(() => runIncrementalRescan(ROOT, deps));
 
     expectIoBudget({
-      scenario: "usn-tick-no-changes",
-      note: "a USN tick with no changes under the root: rewrites the whole index (~330 MB at 7M files), saves a new history snapshot and last-scan.json (~2.3 MB each), copies both sidecars (~50 MB at 7M) and prunes a real scan out of the 7-scan history. ~390 MB per no-op tick: ~1.6 GB/day at the 6 h default, ~560 GB/day at the 1-minute minimum",
+      scenario: "usn-tick-records-match-nothing",
+      note: "journal records under the root that leave the index as it was (a write that kept size and mtime, a delete of a file it never listed): the new index is streamed, found identical and deleted, so 1 index write (~330 MB at 7M files) and nothing committed. Used to save a history entry, copy both sidecars and prune a real scan too",
       io,
     });
-    expect(result).not.toBeNull();
-    expect(getScanHistory(ROOT).map((entry) => entry.id)).not.toContain(ids[0]);
+    expect(result).toMatchObject({ changed: false });
+    expect(getScanHistory(ROOT).map((entry) => entry.id)).toEqual([...ids].reverse());
+    expect(FS.readdirSync(Path.join(dataDir, "scan-indexes")).filter((name) => name.startsWith("pending-"))).toEqual([]);
   });
 
   it("rewrites the index when files under the root changed", async () => {
@@ -336,10 +406,10 @@ describe("scheduled USN rescan (Windows)", () => {
 
     expectIoBudget({
       scenario: "usn-tick-small-change",
-      note: "a USN tick with 4 changed files: the same ~390 MB as a no-op tick (whole-index rewrite, snapshot twice, both sidecars copied, a real scan pruned)",
+      note: "a USN tick with 4 changed files: the whole index rewritten (~330 MB at 7M files), the history snapshot and last-scan.json (~2.3 MB each), both sidecars copied (~50 MB at 7M), disk-baselines.json and the cursor, and a real scan pruned from history: ~385 MB per tick, ~1.5 GB/day at the 6 h default and ~555 GB/day at the 1-minute minimum if every tick finds a change",
       io,
     });
-    expect(result?.stats).toMatchObject({ additions: 1, modifications: 2, deletions: 1 });
+    expect(result).toMatchObject({ changed: true, stats: { additions: 1, modifications: 2, deletions: 1 } });
   });
 });
 

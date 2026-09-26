@@ -80,19 +80,27 @@ type AnyLine =
   | JournalErrorLine
   | CursorQueryLine;
 
-export interface IncrementalResult {
-  snapshot: ScanSnapshot;
-  newIndexPath: string;
-  newCursor: VolumeCursor;
-  stats: {
-    recordsRead: number;
-    recordsDropped: number;
-    additions: number;
-    modifications: number;
-    deletions: number;
-    elapsedMs: number;
-  };
+export interface IncrementalStats {
+  recordsRead: number;
+  recordsDropped: number;
+  additions: number;
+  modifications: number;
+  deletions: number;
+  elapsedMs: number;
 }
+
+/**
+ * `changed: false` means no file under the root changed since the
+ * cursor: no new index was written, and the previous scan still
+ * describes the tree.
+ */
+export type IncrementalResult = {
+  newCursor: VolumeCursor;
+  stats: IncrementalStats;
+} & (
+  | { changed: true; snapshot: ScanSnapshot; newIndexPath: string }
+  | { changed: false }
+);
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
@@ -204,8 +212,29 @@ export async function runIncrementalScan(params: {
     }
   }
 
+  const newCursor: VolumeCursor = {
+    volume: params.cursor.volume,
+    cursor: cursorEnd.cursor,
+    journalId: cursorEnd.journalId,
+    capturedAt: Date.now(),
+    rootPath: params.rootPath,
+  };
+  const statsFor = (counts: { additions: number; modifications: number; deletions: number }): IncrementalStats => ({
+    recordsRead: records.length,
+    recordsDropped: cursorEnd.recordsDropped,
+    ...counts,
+    elapsedMs: Date.now() - startedAt,
+  });
+  const unchanged = { additions: 0, modifications: 0, deletions: 0 };
+
+  // Nothing under the root to apply: the previous index still holds.
+  // Rewriting it would cost the whole index (~330 MB at 7M files).
+  if (deletes.size === 0 && freshEntries.size === 0) {
+    return { changed: false, newCursor, stats: statsFor(unchanged) };
+  }
+
   // Stream the previous index → new index, applying the deltas.
-  const additions = await applyDeltasToIndex(
+  const counts = await applyDeltasToIndex(
     params.previousIndexPath,
     params.newIndexPath,
     {
@@ -213,6 +242,14 @@ export async function runIncrementalScan(params: {
       updates: freshEntries,
     },
   );
+
+  // Records that matched nothing in the index (a delete of a file it
+  // never listed, a write that left size and mtime as they were): the
+  // new index is the old one again, so keep the old one.
+  if (counts.additions + counts.modifications + counts.deletions === 0) {
+    await FSP.unlink(params.newIndexPath).catch(() => undefined);
+    return { changed: false, newCursor, stats: statsFor(unchanged) };
+  }
 
   // Build the snapshot from the new index. This is a full re-read of the
   // new index, but since the index is gzipped NDJSON it's fast — single-
@@ -226,23 +263,11 @@ export async function runIncrementalScan(params: {
   });
 
   return {
+    changed: true,
     snapshot,
     newIndexPath: params.newIndexPath,
-    newCursor: {
-      volume: params.cursor.volume,
-      cursor: cursorEnd.cursor,
-      journalId: cursorEnd.journalId,
-      capturedAt: Date.now(),
-      rootPath: params.rootPath,
-    },
-    stats: {
-      recordsRead: records.length,
-      recordsDropped: cursorEnd.recordsDropped,
-      additions: additions.additions,
-      modifications: additions.modifications,
-      deletions: additions.deletions,
-      elapsedMs: Date.now() - startedAt,
-    },
+    newCursor,
+    stats: statsFor(counts),
   };
 }
 
@@ -413,7 +438,9 @@ async function spawnJson(
       clearTimeout(timer);
       reject(err);
     });
-    child.once("exit", (code) => {
+    // "close", not "exit": stdout can still hold the last lines when
+    // the process exits, and the last line is the journal cursor.
+    child.once("close", (code) => {
       clearTimeout(timer);
       rl.close();
       resolve({ lines, exitCode: code });
@@ -471,9 +498,16 @@ async function applyDeltasToIndex(
   const writeStream = createWriteStream(newPath);
   // Attach error listeners BEFORE pipe() — pipe() doesn't propagate
   // errors, so an EPERM/ENOSPC on writeStream or a gzip error becomes
-  // an uncaught main-process exception otherwise.
-  gzOut.on("error", () => { /* swallowed */ });
-  writeStream.on("error", () => { /* swallowed */ });
+  // an uncaught main-process exception otherwise. The first one is
+  // rethrown once the file closes, so a truncated index never becomes
+  // a history entry.
+  let writeError: unknown = null;
+  const closed = new Promise<void>((resolve) => writeStream.once("close", () => resolve()));
+  gzOut.on("error", (error) => {
+    writeError ??= error;
+    writeStream.destroy();
+  });
+  writeStream.on("error", (error) => { writeError ??= error; });
   gzOut.pipe(writeStream);
 
   const writeLine = (obj: unknown) => {
@@ -512,7 +546,7 @@ async function applyDeltasToIndex(
     if (update) {
       writeLine({ p: rec.p, s: update.size, m: update.mtime, ...(rec.h === 1 ? { h: 1 } : {}) });
       pendingAdds.delete(norm);
-      modifications += 1;
+      if (update.size !== (rec.s ?? 0) || update.mtime !== (rec.m ?? 0)) modifications += 1;
       continue;
     }
 
@@ -527,9 +561,11 @@ async function applyDeltasToIndex(
     additions += 1;
   }
 
-  await new Promise<void>((resolve) => {
-    gzOut.end(() => resolve());
-  });
+  // Wait for the file, not just gzip: the caller reads the new index
+  // back as soon as this returns.
+  gzOut.end();
+  await closed;
+  if (writeError) throw writeError;
 
   return { additions, modifications, deletions };
 }

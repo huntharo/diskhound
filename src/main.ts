@@ -62,7 +62,7 @@ import {
   startDiskMonitoring,
 } from "./shared/diskMonitor";
 import { readDevBranch } from "./shared/devBranch";
-import { createScanSnapshotStore } from "./shared/scanStore";
+import { createScanSnapshotStore, type SnapshotWriteOptions } from "./shared/scanStore";
 import { createAffinityEnforcer, upsertAffinityRule } from "./shared/affinityEnforcer";
 import { createSettingsStore, type SettingsStore } from "./shared/settingsStore";
 import { createUpdaterStateStore } from "./shared/updaterStateStore";
@@ -151,7 +151,7 @@ import {
   initFullDiffCacheStore,
 } from "./shared/fullDiffCacheStore";
 import { createTreemapCache } from "./shared/treemapCache";
-import { initUsnCursorStore } from "./shared/usnCursorStore";
+import { flushUsnCursorStore, initUsnCursorStore } from "./shared/usnCursorStore";
 import {
   captureCursorAfterScan,
   checkUsnForAnyChanges,
@@ -988,8 +988,8 @@ void (async () => {
 
   // ── Scan helpers ──────────────────────────────────────────
 
-  const broadcastSnapshot = async (nextSnapshot: ScanSnapshot) => {
-    await scanStore.set(nextSnapshot);
+  const broadcastSnapshot = async (nextSnapshot: ScanSnapshot, options?: SnapshotWriteOptions) => {
+    await scanStore.set(nextSnapshot, options);
     mainWindow?.webContents.send(SCAN_SNAPSHOT_CHANNEL, nextSnapshot);
   };
 
@@ -3849,6 +3849,7 @@ void (async () => {
       scannerPath: resolveNativeScannerBinary(projectRoot),
       publishSnapshot: broadcastSnapshot,
       markFullScan,
+      loadSnapshot: loadHistoricalSnapshotCached,
       warmFullDiff: warmLatestFullDiff,
       onCommitted: afterScanCommitted,
       onPruned: forgetPrunedScan,
@@ -4559,6 +4560,10 @@ void (async () => {
     // memory only; write them (synchronously) so the next launch's
     // first delta starts from this session's last check.
     flushDiskMonitor();
+    // Likewise a USN tick that found nothing changed: its restamped
+    // snapshot and its cursor wait for quit.
+    scanStore.flush();
+    flushUsnCursorStore();
   });
 })().catch((err: unknown) => {
   const error = err as { stack?: string; message?: string };
