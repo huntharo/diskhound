@@ -53,8 +53,11 @@ process can leave its own synthetic temp fixture behind; it cannot affect
 an existing developer file.
 
 The integration suite calls the scanner and `runIncrementalScan` directly.
-It does not launch Electron, use an installed DiskHound profile, or touch
-startup registration. The volume handle is read-only. Like any filesystem
+Baseline and comparison scans pass `DISKHOUND_NO_MFT=1` only to those child
+processes so they walk the tiny fixture instead of enumerating the entire
+volume's MFT. The incremental step still reads the real USN journal.
+The suite does not launch Electron, use an installed DiskHound profile, or
+touch startup registration. The volume handle is read-only. Like any filesystem
 test, creating fixture files generates ordinary journal entries; the tests
 do not alter journal configuration or other volume data.
 

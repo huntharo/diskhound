@@ -18,6 +18,17 @@ const scanner = process.env.DISKHOUND_NATIVE_SCANNER_PATH || fileURLToPath(new U
 ));
 const required = process.env.DISKHOUND_REQUIRE_USN_TESTS === "1";
 
+// Elevated Windows scans default to enumerating the entire volume's MFT,
+// even for a tiny root. Keep baseline/comparison reads inside the fixture;
+// the journal calls below still use the real volume's USN reader.
+async function scanFixture(root: string, index: string): Promise<void> {
+  await exec(scanner, ["--root", root, "--index-output", index], {
+    timeout: 30_000,
+    windowsHide: true,
+    env: { ...process.env, DISKHOUND_NO_MFT: "1" },
+  });
+}
+
 async function indexedEntries(index: string): Promise<{ path: string; size: number }[]> {
   const text = gunzipSync(await FS.readFile(index)).toString("utf8");
   return text.trim().split("\n")
@@ -65,7 +76,7 @@ describe.skipIf(process.platform !== "win32")("real Windows USN to saved index",
       await FS.writeFile(gone, Buffer.alloc(8192, 2));
       await FS.writeFile(old, Buffer.alloc(8192, 3));
       const baseline = Path.join(dir, "baseline.ndjson.gz");
-      await exec(scanner, ["--root", root, "--index-output", baseline], { timeout: 30_000, windowsHide: true });
+      await scanFixture(root, baseline);
       expect(await indexedFiles(baseline)).toEqual([keep, gone, old].map((path) => normPath(path)).sort());
       const originalIndex = await FS.readFile(baseline);
       const start = await queryCurrentCursor(scanner, volume);
@@ -117,7 +128,7 @@ describe.skipIf(process.platform !== "win32")("real Windows USN to saved index",
       expect(existsSync(replayPath)).toBe(false);
       // Compare against a fresh native walk of the same tiny fixture.
       const full = Path.join(dir, "full.ndjson.gz");
-      await exec(scanner, ["--root", root, "--index-output", full], { timeout: 30_000, windowsHide: true });
+      await scanFixture(root, full);
       expect(await indexedEntries(updated)).toEqual(await indexedEntries(full));
     } finally {
       await FS.rm(owned, { recursive: true, force: true });
