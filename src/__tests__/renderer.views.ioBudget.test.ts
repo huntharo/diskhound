@@ -39,6 +39,8 @@ vi.mock("node:worker_threads", async (importOriginal) =>
   (await import("../test/ioBudget")).instrumentWorkerThreads(await importOriginal()));
 vi.mock("electron", async () =>
   (await import("../test/mainProcessHarness")).fakeElectron());
+vi.mock("../shared/crashLog", async (importOriginal) =>
+  (await import("../test/mainProcessHarness")).settledCrashLog(await importOriginal()));
 
 // Sorting, filtering, grouping, hovering and drilling into a view the
 // app has already loaded should never touch the disk. Each test mounts
@@ -304,7 +306,7 @@ describe("Changes tab", () => {
     ui.takeIpc();
     expectIoBudget({
       scenario: "renderer-changes-browse-first",
-      note: "first Changes visit over 3 scans: mount, both diff modes, every range pill and baseline, both tabs and the full-diff filter; the full diffs stream both indexes of each new pair (a worker in the app; it fails under vitest, which has no bundled worker, and main falls back in-process) and write the diff cache",
+      note: "first Changes visit over 3 scans: mount, both diff modes, every range pill and baseline, both tabs and the full-diff filter; the full diffs stream both indexes of each new pair (a worker in the app; it fails under vitest, which has no bundled worker, and main falls back in-process) and write the diff cache, after both indexes are stat'd for the failed-diff check; the worker failures' crash.log lines go out in one append",
       io: first.io,
     });
 

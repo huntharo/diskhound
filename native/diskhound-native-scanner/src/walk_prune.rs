@@ -1,7 +1,7 @@
 //! Which directories the Unix walker leaves out.
 //!
 //! `scan_generic` asks `PrunePlan::skip_reason` about every child before
-//! jwalk descends into it. Three rules:
+//! dua-core descends into it. Three rules:
 //!
 //! 1. Pseudo filesystems by path (`LINUX_SKIP_PREFIXES`): /proc, /sys, /dev
 //!    and the rest. Walking them is meaningless and can hang.
@@ -79,7 +79,7 @@ pub struct PrunePlan {
 
 impl PrunePlan {
     /// Why the walk must not enter `child`, or `None` to keep it. `child`
-    /// is the absolute path jwalk hands the read-dir callback.
+    /// is the absolute path of an entry the walker found.
     pub fn skip_reason(&self, child: &str, is_dir: bool) -> Option<Prune> {
         if is_pseudo_fs_path(child) {
             return Some(Prune::PseudoFs);
@@ -100,7 +100,7 @@ impl PrunePlan {
     }
 }
 
-/// What the walk actually skipped. Written from jwalk's worker threads.
+/// What the walk actually skipped. Written from dua-core's worker threads.
 #[derive(Default)]
 pub struct PruneLog {
     other_mounts: Mutex<Vec<String>>,

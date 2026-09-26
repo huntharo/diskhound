@@ -41,10 +41,13 @@ interface PersistedState {
 
 let persistDir: string | null = null;
 let cache: Map<string, VolumeCursor> = new Map();
+/** A deferred setCursor moved a cursor that usn-cursors.json does not have yet. */
+let dirty = false;
 
 export async function initUsnCursorStore(dataDir: string): Promise<void> {
   persistDir = dataDir;
   cache = new Map();
+  dirty = false;
 
   const path = Path.join(dataDir, FILE_NAME);
   try {
@@ -75,18 +78,20 @@ function isValidCursor(value: unknown): value is VolumeCursor {
   );
 }
 
-async function persist(): Promise<void> {
-  if (!persistDir) return;
+function serializeState(): string {
   const state: PersistedState = {
     cursors: Object.fromEntries(cache),
   };
+  return JSON.stringify(state, null, 2);
+}
+
+async function persist(): Promise<void> {
+  if (!persistDir) return;
+  dirty = false;
+  const text = serializeState();
   try {
     await FSP.mkdir(persistDir, { recursive: true });
-    await FSP.writeFile(
-      Path.join(persistDir, FILE_NAME),
-      JSON.stringify(state, null, 2),
-      "utf8",
-    );
+    await FSP.writeFile(Path.join(persistDir, FILE_NAME), text, "utf8");
   } catch {
     // Non-fatal — we'll re-capture the cursor on the next full scan.
   }
@@ -108,11 +113,33 @@ export function getCursor(volume: string): VolumeCursor | null {
   return cache.get(normalizeVolume(volume)) ?? null;
 }
 
-export async function setCursor(entry: VolumeCursor): Promise<void> {
+/**
+ * Saves the cursor a scan ended at. With `deferWrite`, for a rescan that
+ * found nothing changed, the file waits for flushUsnCursorStore() at
+ * quit. Losing that write is safe: the next tick rereads the same
+ * records from the older cursor and finds the same nothing.
+ */
+export async function setCursor(entry: VolumeCursor, options?: { deferWrite?: boolean }): Promise<void> {
   const key = normalizeVolume(entry.volume);
   if (!key) return;
   cache.set(key, { ...entry, volume: key });
+  if (options?.deferWrite) {
+    dirty = true;
+    return;
+  }
   await persist();
+}
+
+/** Writes cursors a deferred setCursor moved. Synchronous, for before-quit. */
+export function flushUsnCursorStore(): void {
+  if (!dirty || !persistDir) return;
+  dirty = false;
+  try {
+    FS.mkdirSync(persistDir, { recursive: true });
+    FS.writeFileSync(Path.join(persistDir, FILE_NAME), serializeState(), "utf8");
+  } catch {
+    // Non-fatal — the next tick rereads from the last written cursor.
+  }
 }
 
 export async function invalidateVolume(volume: string): Promise<void> {
@@ -131,6 +158,7 @@ export function listCursors(): VolumeCursor[] {
 export function __resetStoreForTests(): void {
   persistDir = null;
   cache = new Map();
+  dirty = false;
 }
 
 // Re-export sync FS existence check for test convenience

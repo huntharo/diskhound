@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 import type { DiskIoProcessInfo, DiskIoSnapshot } from "../../shared/contracts";
 import { formatBytes, relativeTime } from "../lib/format";
 import { saveLocalPreference } from "../lib/localPreference";
+import { reportPollFailure } from "../lib/pollFailure";
 import { processMetadataParts, processSearchText } from "../lib/processMetadata";
 import { useVisibleInterval } from "../lib/visiblePoll";
 import { nativeApi } from "../nativeApi";
@@ -34,7 +35,10 @@ export function DiskIoView() {
   }, [showMetadata]);
 
   const refresh = useCallback(async () => {
-    const snap = await nativeApi.getDiskIoSnapshot();
+    const snap = await nativeApi.getDiskIoSnapshot().catch((error: unknown) => {
+      reportPollFailure("DiskIoView", error);
+      return null;
+    });
     // Guard against null: nativeApi's lazy proxy resolves null
     // when the preload bridge isn't ready (Vite HMR window, first
     // paint before contextBridge completes). Setting state to null

@@ -17,6 +17,8 @@ vi.mock("node:worker_threads", async (importOriginal) =>
   (await import("../test/ioBudget")).instrumentWorkerThreads(await importOriginal()));
 vi.mock("electron", async () =>
   (await import("../test/mainProcessHarness")).fakeElectron());
+vi.mock("../shared/crashLog", async (importOriginal) =>
+  (await import("../test/mainProcessHarness")).settledCrashLog(await importOriginal()));
 
 const ROOT = hostRoot("/Volumes/Data");
 

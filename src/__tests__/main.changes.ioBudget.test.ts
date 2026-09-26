@@ -18,6 +18,8 @@ vi.mock("node:worker_threads", async (importOriginal) =>
   (await import("../test/ioBudget")).instrumentWorkerThreads(await importOriginal()));
 vi.mock("electron", async () =>
   (await import("../test/mainProcessHarness")).fakeElectron());
+vi.mock("../shared/crashLog", async (importOriginal) =>
+  (await import("../test/mainProcessHarness")).settledCrashLog(await importOriginal()));
 
 const ROOT = hostRoot("/Volumes/Data");
 /** The Settings maximum for "Scan history per drive". */
@@ -70,7 +72,7 @@ describe("Changes tab", () => {
     const first = await measureFsIo(mountChanges, { countProcesses: true });
     expectIoBudget({
       scenario: "main-changes-first-mount",
-      note: "first Changes mount: the latest two snapshots (~2.8 MB each) once, and the full diff of that pair (equal totals, so the empty result is computed without a worker and cached to disk once)",
+      note: "first Changes mount: the latest two snapshots (~2.8 MB each) once, and the full diff of that pair (equal totals, so the empty result is computed without a worker and cached to disk once, after both indexes are stat'd for the failed-diff check)",
       io: first.io,
     });
 
@@ -91,7 +93,7 @@ describe("Changes tab", () => {
     const first = await measureFsIo(() => browseBaselines(history), { countProcesses: true });
     expectIoBudget({
       scenario: "main-changes-browse-history-first",
-      note: "clicking each of the 29 older scans once (the mount loaded the first): per new pair, the baseline snapshot is read and its index size stat'd once, the full-diff cache is checked once (it was checked twice before), and the empty full diff is written to it once",
+      note: "clicking each of the 29 older scans once (the mount loaded the first): per new pair, the baseline snapshot is read and its index size stat'd once, both indexes are stat'd for the failed-diff check, the full-diff cache is checked once (it was checked twice before), and the empty full diff is written to it once",
       io: first.io,
     });
 

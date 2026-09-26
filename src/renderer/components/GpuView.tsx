@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import type { GpuAdapter, GpuProcessInfo, GpuSnapshot } from "../../shared/contracts";
 import { formatBytes } from "../lib/format";
+import { reportPollFailure } from "../lib/pollFailure";
 import { startVisiblePoll } from "../lib/visiblePoll";
 import { nativeApi } from "../nativeApi";
 import { ProcessIcon } from "./ProcessIcon";
@@ -77,11 +78,11 @@ export function GpuView({ refreshMs = REFRESH_MS }: Props) {
       }
     });
     const refresh = () => {
-      void nativeApi.getGpuSnapshot().then((snap) => {
+      nativeApi.getGpuSnapshot().then((snap) => {
         if (!mountedRef.current) return;
         setSnapshot(snap);
         setLoading(false);
-      });
+      }).catch((error: unknown) => reportPollFailure("GpuView", error));
     };
     return startVisiblePoll(refresh, refreshMs, { immediate: true });
   }, [refreshMs]);

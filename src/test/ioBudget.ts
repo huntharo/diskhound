@@ -37,7 +37,8 @@ import { expect } from "vitest";
  * Every call, sync, callback or promise, counts once under the name of
  * its async form: `writeFileSync` and `fs.promises.writeFile` both count
  * as `writeFile`. `bytesWritten` adds the data passed to writeFile and
- * appendFile and the bytes a write stream flushed.
+ * appendFile, the size of each file copyFile copies, and the bytes a
+ * write stream flushed.
  *
  * ## Counting processes and workers
  *
@@ -85,7 +86,9 @@ import { expect } from "vitest";
  *
  * To record or change a budget, run
  * `UPDATE_IO_BUDGETS=1 bun run test <file>` and commit the diff, so the
- * write cost change shows up as a reviewable line in the PR. Parallel
+ * write cost change shows up as a reviewable line in the PR. Add
+ * `IO_BUDGET_TRACE=1` to print each counted call, its path and its
+ * bytes, for the note's per-file breakdown. Parallel
  * test workers take turns on the JSON file through a lock file next to
  * it, so re-recording the whole suite at once is safe.
  */
@@ -95,6 +98,7 @@ export const IO_WRITE_COUNTERS = [
   "appendFile",
   "rename",
   "copyFile",
+  "link",
   "mkdir",
   "createWriteStream",
   "unlink",
@@ -136,6 +140,8 @@ const FS_FUNCTIONS: Record<string, IoCounter> = {
   renameSync: "rename",
   copyFile: "copyFile",
   copyFileSync: "copyFile",
+  link: "link",
+  linkSync: "link",
   mkdir: "mkdir",
   mkdirSync: "mkdir",
   unlink: "unlink",
@@ -161,6 +167,7 @@ const FS_PROMISES_FUNCTIONS: Record<string, IoCounter> = {
   appendFile: "appendFile",
   rename: "rename",
   copyFile: "copyFile",
+  link: "link",
   mkdir: "mkdir",
   unlink: "unlink",
   readFile: "readFile",
@@ -207,12 +214,21 @@ function windowsFor(target: string): Window[] {
 }
 
 function record(counter: IoCounter | ProcessCounter, bytes: number, target: string): void {
+  let counted = false;
   for (const { io } of windowsFor(target)) {
     // A window that is not counting processes has no key for them.
     if (io[counter] === undefined) continue;
     io[counter] += 1;
     io.bytesWritten += bytes;
+    counted = true;
   }
+  if (counted) trace(counter, target, bytes);
+}
+
+/** `IO_BUDGET_TRACE=1` prints every counted call, for writing a budget's note. */
+function trace(counter: string, target: string, bytes: number): void {
+  if (!process.env.IO_BUDGET_TRACE) return;
+  process.stderr.write(`[io] ${counter} ${target}${bytes ? ` ${bytes} B` : ""}\n`);
 }
 
 function track(work: Promise<unknown>, label: string): void {
@@ -237,6 +253,15 @@ function dataBytes(data: unknown, options: unknown): number {
   return 0;
 }
 
+/** A copy writes the whole source file. Read before the copy starts. */
+function copiedBytes(source: unknown): number {
+  try {
+    return realFs.statSync(source as string).size;
+  } catch {
+    return 0;
+  }
+}
+
 function describeTarget(args: unknown[]): string {
   const target = args[0];
   return typeof target === "string" ? target : String(target);
@@ -249,7 +274,10 @@ function countedFunction(
 ): (...args: unknown[]) => unknown {
   return function counted(this: unknown, ...args: unknown[]) {
     const target = describeTarget(args);
-    record(counter, BYTE_COUNTED.has(counter) ? dataBytes(args[1], args[2]) : 0, target);
+    const bytes = BYTE_COUNTED.has(counter)
+      ? dataBytes(args[1], args[2])
+      : counter === "copyFile" ? copiedBytes(args[0]) : 0;
+    record(counter, bytes, target);
     const last = args.length - 1;
     let finish: (() => void) | undefined;
     if (last >= 0 && typeof args[last] === "function") {
@@ -297,6 +325,7 @@ function countedStream(original: StreamFactory, counter: IoCounter, label: strin
           settled = true;
           if (counter === "createWriteStream") {
             for (const { io } of windows) io.bytesWritten += stream.bytesWritten ?? 0;
+            if (windows.length > 0) trace("createWriteStream (closed)", target, stream.bytesWritten ?? 0);
           }
           resolve();
         };
@@ -459,11 +488,31 @@ function realDelay(ms: number): Promise<void> {
   return new Promise((resolve) => realSetTimeout(resolve, ms));
 }
 
+const settleHooks = new Set<() => void>();
+
+/**
+ * Runs `hook` each time a measurement settles, once no fs work is in
+ * flight: before its window opens and again before it closes. It is
+ * for writes the app defers on a timer, such as main's buffered
+ * crash.log lines. Flushed here, they land in the window that caused
+ * them, not in whichever window is open when the timer fires. Returns
+ * a function that removes the hook.
+ */
+export function onSettle(hook: () => void): () => void {
+  settleHooks.add(hook);
+  return () => settleHooks.delete(hook);
+}
+
 async function settle(): Promise<void> {
   const startedAt = realNow();
   while (true) {
     await nextMacrotask();
-    if (inflight.size === 0) return;
+    if (inflight.size === 0) {
+      // Only now, so lines logged as that work finished go out in
+      // the same flush.
+      for (const hook of settleHooks) hook();
+      if (inflight.size === 0) return;
+    }
     if (realNow() - startedAt > SETTLE_TIMEOUT_MS) {
       throw new Error(
         `measureFsIo waited ${SETTLE_TIMEOUT_MS} ms for fs work that is still running:\n  `

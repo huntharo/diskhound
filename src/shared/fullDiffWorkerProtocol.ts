@@ -11,6 +11,11 @@ export interface FullDiffWorkerInput {
    * case-insensitive on Windows, case-sensitive elsewhere.
    */
   caseSensitive?: boolean;
+  /**
+   * Records per sorted run the external sort spills. Defaults to
+   * 120,000; tests lower it to get several runs from a small index.
+   */
+  sortChunkRecords?: number;
 }
 
 export interface FullDiffWorkerRequest {

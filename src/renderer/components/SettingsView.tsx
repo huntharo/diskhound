@@ -9,6 +9,7 @@ import {
   type UpdateStatus,
 } from "../../shared/contracts";
 import { formatBytes } from "../lib/format";
+import { reportPollFailure } from "../lib/pollFailure";
 import { nativeApi } from "../nativeApi";
 import { dispatchSettingsUpdated } from "../lib/uiEvents";
 import { startVisiblePoll } from "../lib/visiblePoll";
@@ -38,7 +39,10 @@ export function SettingsView() {
     let cancelled = false;
 
     const refreshMonitoring = async () => {
-      const snapshot = await nativeApi.getMonitoringSnapshot();
+      const snapshot = await nativeApi.getMonitoringSnapshot().catch((error: unknown) => {
+        reportPollFailure("SettingsView monitoring", error);
+        return null;
+      });
       if (!cancelled && snapshot) {
         setMonitoringSnapshot(snapshot);
       }

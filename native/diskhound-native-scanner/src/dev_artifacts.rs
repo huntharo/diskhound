@@ -24,6 +24,7 @@ enum Kind {
     Dotnet,
     CompilerCache,
     CmakeBuild,
+    Terraform,
     DiagLogs,
 }
 
@@ -42,6 +43,7 @@ impl Kind {
             Kind::Dotnet => "dotnet",
             Kind::CompilerCache => "compiler-cache",
             Kind::CmakeBuild => "cmake-build",
+            Kind::Terraform => "terraform",
             Kind::DiagLogs => "diag-logs",
         }
     }
@@ -162,6 +164,7 @@ fn is_project_marker(name: &str) -> bool {
             | "gemfile"
             | "mix.exs"
             | "package.swift"
+            | ".terraform.lock.hcl"
     )
 }
 
@@ -195,6 +198,23 @@ fn classify(path: &str) -> Option<(String, Kind)> {
                 };
                 return Some((join_segments(path, &parts, i + 2), kind));
             }
+        }
+        // Only the provider downloads, which `terraform init` puts back
+        // from the lock file. The rest of .terraform records the selected
+        // workspace and the last backend config, so it stays.
+        if lower == ".terraform" && i + 1 < parts.len() {
+            let next = parts[i + 1].to_ascii_lowercase();
+            if matches!(next.as_str(), "providers" | "plugins") {
+                return Some((join_segments(path, &parts, i + 2), Kind::Terraform));
+            }
+        }
+        // The documented plugin_cache_dir. `.terraform.d/plugins` holds
+        // providers installed by hand, so it stays.
+        if lower == ".terraform.d"
+            && i + 1 < parts.len()
+            && parts[i + 1].eq_ignore_ascii_case("plugin-cache")
+        {
+            return Some((join_segments(path, &parts, i + 2), Kind::Terraform));
         }
         if let Some(kind) = mapped_kind(&lower) {
             let depth = if matches!(kind, Kind::Worktree) && i + 1 < parts.len() {
@@ -303,6 +323,63 @@ mod tests {
         let (root, kind) = classify("/home/dev/diskhound/target/debug/diskhound").unwrap();
         assert_eq!(root, "/home/dev/diskhound/target/debug");
         assert!(matches!(kind, Kind::RustTarget));
+    }
+
+    #[test]
+    fn classifies_terraform_providers() {
+        let (root, kind) = classify(
+            "/Users/dev/infra/env/prod/.terraform/providers/registry.terraform.io/hashicorp/aws/6.54.0/darwin_arm64/terraform-provider-aws_v6.54.0_x5",
+        )
+        .unwrap();
+        assert_eq!(root, "/Users/dev/infra/env/prod/.terraform/providers");
+        assert!(matches!(kind, Kind::Terraform));
+
+        let (root, kind) = classify(
+            r"C:\infra\old\.terraform\plugins\windows_amd64\terraform-provider-aws_v2.70.0_x4.exe",
+        )
+        .unwrap();
+        assert_eq!(root, r"C:\infra\old\.terraform\plugins");
+        assert!(matches!(kind, Kind::Terraform));
+
+        let (root, kind) = classify(
+            "/home/dev/.terraform.d/plugin-cache/registry.terraform.io/hashicorp/aws/6.54.0/linux_amd64/terraform-provider-aws_v6.54.0_x5",
+        )
+        .unwrap();
+        assert_eq!(root, "/home/dev/.terraform.d/plugin-cache");
+        assert!(matches!(kind, Kind::Terraform));
+    }
+
+    #[test]
+    fn leaves_terraform_state_and_hand_installed_plugins_alone() {
+        for path in [
+            "/Users/dev/infra/env/prod/.terraform/terraform.tfstate",
+            "/Users/dev/infra/env/prod/.terraform/environment",
+            "/Users/dev/infra/env/prod/.terraform/modules/modules.json",
+            "/home/dev/.terraform.d/plugins/example.com/me/thing/1.0.0/linux_amd64/terraform-provider-thing",
+        ] {
+            assert!(classify(path).is_none(), "{path}");
+        }
+    }
+
+    #[test]
+    fn terraform_lock_file_marks_a_project() {
+        let mut acc = DevArtifactAcc::new();
+        acc.add("/Users/dev/infra/prod/.terraform.lock.hcl", 1_000, false);
+        acc.add(
+            "/Users/dev/infra/prod/.terraform/providers/registry.terraform.io/hashicorp/aws/6.54.0/darwin_arm64/terraform-provider-aws_v6.54.0_x5",
+            800_000_000,
+            false,
+        );
+        let roots = vec![SidecarRoot {
+            path: "/Users/dev/infra/prod/.terraform/providers".to_string(),
+            kind: "terraform".to_string(),
+            size: 800_000_000,
+            files: 1,
+        }];
+        assert_eq!(
+            projects_for_roots(&acc.projects, &roots),
+            vec!["/Users/dev/infra/prod".to_string()]
+        );
     }
 
     #[test]

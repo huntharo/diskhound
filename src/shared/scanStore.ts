@@ -6,10 +6,25 @@ import { createIdleScanSnapshot, type ScanSnapshot } from "./contracts";
 
 const STORE_FILENAME = "last-scan.json";
 
+export interface SnapshotWriteOptions {
+  /**
+   * Keep a completed snapshot in memory and write it at quit (`flush`)
+   * instead of now. For a snapshot that only restamps the one on disk,
+   * such as a rescan that found nothing changed.
+   */
+  deferWrite?: boolean;
+}
+
 export interface ScanSnapshotStore {
   get: () => Promise<ScanSnapshot>;
-  set: (nextSnapshot: ScanSnapshot) => Promise<void>;
+  set: (nextSnapshot: ScanSnapshot, options?: SnapshotWriteOptions) => Promise<void>;
   update: (transform: (current: ScanSnapshot) => ScanSnapshot) => Promise<ScanSnapshot>;
+  /**
+   * Writes the completed snapshot a deferred `set` kept in memory, if a
+   * later write has not replaced it. Synchronous, because before-quit
+   * cannot wait for an async write.
+   */
+  flush: () => void;
 }
 
 /**
@@ -52,9 +67,13 @@ export async function createScanSnapshotStore(dataDir: string): Promise<ScanSnap
     // Corrupt file — start fresh
   }
 
+  /** A completed snapshot newer than last-scan.json, written at quit. */
+  let deferred: ScanSnapshot | null = null;
+
   const persist = async (snapshot: ScanSnapshot) => {
     // Only persist completed scans — no point saving running/idle/error
     if (snapshot.status !== "done") return;
+    deferred = null;
     try {
       await FSP.mkdir(dataDir, { recursive: true });
       await FSP.writeFile(filePath, JSON.stringify(floorDirectoriesVisited(snapshot)), "utf-8");
@@ -65,14 +84,29 @@ export async function createScanSnapshotStore(dataDir: string): Promise<ScanSnap
 
   return {
     get: async () => current,
-    set: async (nextSnapshot) => {
+    set: async (nextSnapshot, options) => {
       current = nextSnapshot;
+      if (options?.deferWrite && nextSnapshot.status === "done") {
+        deferred = nextSnapshot;
+        return;
+      }
       await persist(current);
     },
     update: async (transform) => {
       current = transform(current);
       await persist(current);
       return current;
+    },
+    flush: () => {
+      if (!deferred) return;
+      const snapshot = deferred;
+      deferred = null;
+      try {
+        FS.mkdirSync(dataDir, { recursive: true });
+        FS.writeFileSync(filePath, JSON.stringify(floorDirectoriesVisited(snapshot)), "utf-8");
+      } catch {
+        // Best effort — the next launch restores the last written scan.
+      }
     },
   };
 }

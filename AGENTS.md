@@ -26,6 +26,7 @@ The same harness budgets reads. A UI action on data the app already holds (sort,
   - `src/test/mainProfileFixture.ts` seeds the profile: scan history, indexes, folder-tree and Dev sidecars at realistic sizes.
   - Boot once per test file. main.ts keeps its caches in module state, so a scenario that needs a cold process needs its own file.
   - Bundled workers are not built under vitest, so a worker always fails there. Budget the failure path with that. The success path belongs in E2E.
+  - crash.log buffers its lines and appends them on a 2 s timer. The harness's `vi.mock("../shared/crashLog")` line turns that timer off, and the harness flushes whenever a measurement settles. A scenario's lines then count as one append in its own window, and boot refuses to start without that line.
   - See `src/__tests__/main.*.ioBudget.test.ts`.
 - **Renderer views.** `src/test/rendererHarness.ts` loads the real preload on top of that main process and mounts views in happy-dom. Every `nativeApi` call runs the real handler.
   - Settle the mount, then budget the clicks.

@@ -5,6 +5,8 @@ import * as Path from "node:path";
 
 import { vi } from "vitest";
 
+import { onSettle } from "./ioBudget";
+
 /**
  * Boots the real `src/main.ts` against a fake `electron`, so a test
  * can call its IPC handlers the way the renderer does and budget the
@@ -25,6 +27,8 @@ import { vi } from "vitest";
  *
  *     vi.mock("electron", async () =>
  *       (await import("../../test/mainProcessHarness")).fakeElectron());
+ *     vi.mock("../../shared/crashLog", async (importOriginal) =>
+ *       (await import("../../test/mainProcessHarness")).settledCrashLog(await importOriginal()));
  *
  * ## What is faked
  *
@@ -46,6 +50,10 @@ import { vi } from "vitest";
  * Real: every DiskHound module, fs, child processes and workers. Use
  * the `ioBudget.ts` mocks to count them. Startup still runs `df` (or
  * PowerShell on Windows) once for the disk monitor.
+ *
+ * One change: main's crash log appends its buffered lines when a
+ * measurement settles, not 2 s after the first one. See
+ * `settledCrashLog`.
  */
 
 type Handler = (event: unknown, ...args: unknown[]) => unknown;
@@ -389,6 +397,32 @@ export function fakeElectron(): Record<string, unknown> {
 }
 
 /** The preload's side of the fake IPC, for rendererHarness.ts. */
+/** setTimeout's largest delay, ~24.8 days. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+let crashLogSettled = false;
+
+/**
+ * crash.log with its 2 s flush timer pushed out of any test's reach.
+ * Its buffered lines reach disk each time a measurement settles
+ * (`onSettle`), so a scenario's lines count as one append in its own
+ * window, as they would in the app, instead of in whichever window is
+ * open when the timer fires. Lines logged outside a measurement, by
+ * startup or a test's setup, flush before the next window opens.
+ */
+export function settledCrashLog(
+  original: typeof import("../shared/crashLog"),
+): typeof import("../shared/crashLog") {
+  return {
+    ...original,
+    createCrashLog: (options) => {
+      const log = original.createCrashLog({ ...options, flushDelayMs: MAX_TIMER_MS });
+      onSettle(() => log.flush());
+      crashLogSettled = true;
+      return log;
+    },
+  };
+}
+
 export function rendererIpcState(): Pick<HarnessState, "rendererIpc" | "rendererInflight"> {
   return current();
 }
@@ -434,6 +468,13 @@ export async function bootMainProcess(options: BootOptions = {}): Promise<MainPr
   await options.seed?.(userData);
   // Imported for its side effects: the startup IIFE registers the handlers.
   await import("../main");
+  if (!crashLogSettled) {
+    throw new Error(
+      "main.ts's crash log still flushes on its own timer, so its lines would land in random "
+        + "measurements.\nAdd the vi.mock(\"../shared/crashLog\") line from this harness's doc "
+        + "comment to the test file.",
+    );
+  }
 
   const startedAt = Date.now();
   while (!harness.listeners.has(READY_CHANNEL)) {
@@ -458,8 +499,8 @@ export async function bootMainProcess(options: BootOptions = {}): Promise<MainPr
 
   // Startup pre-warms the folder tree of the scan last-scan.json
   // restored, without awaiting it. Wait for that load here, or its
-  // crash.log lines can land in a test's first measurement on a slow
-  // machine. Asking for the root's folders joins the load in flight.
+  // reads can land in a test's first measurement on a slow machine.
+  // Asking for the root's folders joins the load in flight.
   const restored = await booted.invoke<{ status?: string; rootPath?: string | null } | null>("diskhound:get-current-snapshot");
   if (restored?.status === "done" && restored.rootPath) {
     await booted.invoke("diskhound:get-folder-children", restored.rootPath, restored.rootPath);

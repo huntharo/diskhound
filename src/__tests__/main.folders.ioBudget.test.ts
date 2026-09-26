@@ -17,6 +17,8 @@ vi.mock("node:worker_threads", async (importOriginal) =>
   (await import("../test/ioBudget")).instrumentWorkerThreads(await importOriginal()));
 vi.mock("electron", async () =>
   (await import("../test/mainProcessHarness")).fakeElectron());
+vi.mock("../shared/crashLog", async (importOriginal) =>
+  (await import("../test/mainProcessHarness")).settledCrashLog(await importOriginal()));
 
 const DATA = hostRoot("/Volumes/Data");
 const BACKUP = hostRoot("/Volumes/Backup");
@@ -75,7 +77,7 @@ describe("Folders tab", () => {
     const first = await measureFsIo(() => browse(BACKUP, 5), { countProcesses: true });
     expectIoBudget({
       scenario: "main-folders-second-drive-first-visit",
-      note: "first Folders visit to a second drive: its folder-tree sidecar is planned (stat, exists) and streamed once, with 3 crash.log lines",
+      note: "first Folders visit to a second drive: its folder-tree sidecar is planned (stat, exists) and streamed once, with 3 crash.log lines in one append",
       io: first.io,
     });
 
@@ -115,7 +117,7 @@ describe("Folders tab", () => {
     expect(first.result.dirs).toEqual([]);
     expectIoBudget({
       scenario: "main-folders-build-failure-first",
-      note: "Folders on a scan with no folder-tree sidecar whose rebuild fails: 1 worker is started to rebuild from the index (it fails under vitest, which has no bundled worker), and the failure is logged in 3 crash.log lines",
+      note: "Folders on a scan with no folder-tree sidecar whose rebuild fails: 1 worker is started to rebuild from the index (it fails under vitest, which has no bundled worker), and the failure is logged in 3 crash.log lines, appended at once",
       io: first.io,
     });
 
@@ -126,7 +128,7 @@ describe("Folders tab", () => {
     }, { countProcesses: true });
     expectIoBudget({
       scenario: "main-folders-build-failure-repeat",
-      note: "10 more clicks on that drive within 10 minutes of the failure: the failure is remembered, so 0 workers and 0 crash.log lines (was 1 worker streaming the whole index and 3 log writes per click)",
+      note: "10 more clicks on that drive within 10 minutes of the failure: the failure is remembered, so 0 workers and 0 crash.log lines (was 1 worker streaming the whole index and 3 crash.log lines per click)",
       io: again.io,
     });
   });
