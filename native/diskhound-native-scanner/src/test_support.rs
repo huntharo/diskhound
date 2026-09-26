@@ -104,6 +104,25 @@ pub fn finish_index(state: &mut ScanState, index_output: &Path) -> Vec<IndexLine
         .collect()
 }
 
+/// Every folder the scan has totals for, as path → (size, file count,
+/// depth). The folder-tree sidecar's subfolder lists come from these.
+pub fn folder_rows(state: &ScanState) -> BTreeMap<String, (u64, u64, usize)> {
+    state
+        .directory_totals
+        .values()
+        .map(|d| (d.path.clone(), (d.size, d.file_count, d.depth)))
+        .collect()
+}
+
+/// The ranked hottest folders, as (path, size, file count).
+pub fn hottest_rows(state: &ScanState) -> Vec<(String, u64, u64)> {
+    state
+        .hottest_directories
+        .iter()
+        .map(|d| (d.path.clone(), d.size, d.file_count))
+        .collect()
+}
+
 /// Each directory and each file appears once in the index. Returns the
 /// directory and file paths.
 pub fn assert_listed_once(index: &[IndexLineRec]) -> (HashSet<String>, HashSet<String>) {
