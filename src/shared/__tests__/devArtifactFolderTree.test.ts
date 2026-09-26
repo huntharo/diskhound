@@ -7,6 +7,7 @@ import { pipeline } from "node:stream/promises";
 import { createGzip } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { ARTIFACT_SEGMENT_NAMES } from "../devArtifacts";
 import { sidecarFromFolderTreeFile, type FolderTreeClassifyStats } from "../devArtifactFolderTree";
 import {
   compactDevArtifactSidecar,
@@ -202,6 +203,56 @@ describe("sidecarFromFolderTreeFile", () => {
       `${line("/Users/me/crlf", [["/Users/me/crlf/.gradle", 80, 8]])}\r`,
       line("/srv/mixed", [["/srv/mixed/a/node_modules", 10, 1], ["/srv/mixed/node_modules/", 11, 1]]),
     ].join("\n"), "/");
+  });
+
+  it("matches the old reader on random paths built from artifact names", async () => {
+    // Guards the reader's shortcut: only rows whose last two segments
+    // name an artifact are decoded. Any classifyArtifactPath rule whose
+    // root reaches further would show up here as a missing root.
+    let seed = 7;
+    const random = () => {
+      seed = (seed * 1_103_515_245 + 12_345) % 2 ** 31;
+      return seed / 2 ** 31;
+    };
+    const artifactNames = [...ARTIFACT_SEGMENT_NAMES, "Node_Modules", "TARGET"];
+    // Names that only matter after an artifact name, and plain ones.
+    const otherNames = [
+      "debug", "release", "doc", "incremental", "registry", "mod", "ccache", "sccache", "yarn", "pnpm",
+      "src", "lib", "feat", "a", "b",
+    ];
+    const pickName = () => {
+      const pool = random() < 0.3 ? artifactNames : otherNames;
+      return pool[Math.floor(random() * pool.length)]!;
+    };
+    const lines: string[] = [];
+    for (let i = 0; i < 1_000; i++) {
+      const windows = random() < 0.5;
+      const sep = windows ? "\\" : "/";
+      const rows: Row[] = [];
+      for (let r = 0; r < 8; r++) {
+        const depth = 1 + Math.floor(random() * 5);
+        const segments = Array.from({ length: depth }, pickName);
+        rows.push([(windows ? "C:" : "") + sep + ["r", ...segments].join(sep), 1 + Math.floor(random() * 1_000), 1]);
+      }
+      const files: Row[] = random() < 0.3 ? [["package.json", 1, 1]] : [["x.txt", 1, 1]];
+      lines.push(line(`${windows ? "C:" : ""}${sep}r${sep}p${i}`, rows, files));
+    }
+    const after = await expectSameAsLegacy(lines.join("\n"), "/");
+    expect(after.roots.length).toBeGreaterThan(100);
+  });
+
+  it("skips a line longer than the cap and reads the rest", async () => {
+    const files: Row[] = Array.from({ length: 40_000 }, (_, i) => [`file-${i}.txt`, i, 1]);
+    const treePath = await writeTree([
+      `${line("/huge", [["/huge/node_modules", 5, 1]], files)}\n`,
+      `${line("/ok", [["/ok/node_modules", 7, 1]], [["package.json", 1, 1]])}\n`,
+      `${line("/huge2", [["/huge2/target", 9, 1]], files)}`,
+    ]);
+    const stats = {} as FolderTreeClassifyStats;
+    const sidecar = await sidecarFromFolderTreeFile(treePath, "/", stats, 1 << 20);
+    expect(stats.skippedLines).toBe(2);
+    expect(sidecar!.roots.map((r) => r.path)).toEqual(["/ok/node_modules"]);
+    expect(sidecar!.projects).toEqual(["/ok"]);
   });
 
   it("reads a line longer than a gzip chunk", async () => {

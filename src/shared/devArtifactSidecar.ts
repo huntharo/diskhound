@@ -170,22 +170,6 @@ export function dropNestedRoots(acc: DevAcc): number {
   return lookups;
 }
 
-/**
- * Build a sidecar from folder-tree directory rollups. Used when a scan
- * predates the Dev sidecar so we never stream the 7M-file index.
- */
-export function sidecarFromDirectoryRoots(
-  rootPath: string,
-  dirs: Array<{ path: string; size: number; files: number }>,
-  projectPaths: Iterable<string> = [],
-): DevArtifactSidecar {
-  const acc = createDevAcc();
-  for (const project of projectPaths) acc.projects.add(project);
-  for (const dir of dirs) noteDirectoryRoot(acc, dir.path, dir.size, dir.files);
-  dropNestedRoots(acc);
-  return sidecarFromAcc(acc, rootPath);
-}
-
 export function sidecarFromAcc(acc: DevAcc, rootPath: string): DevArtifactSidecar {
   const roots: DevArtifactRootRec[] = [];
   for (const [path, rec] of acc.artifacts) {

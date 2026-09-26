@@ -45,6 +45,8 @@ export interface FolderTreeClassifyStats {
   /** Non-empty lines read, and how many went through JSON.parse. */
   lines: number;
   parsedLines: number;
+  /** Lines longer than the line cap, dropped unread. */
+  skippedLines: number;
   /** `d` and `f` rows looked at. A line the scanner gives up on is looked at again by JSON.parse. */
   rows: number;
   /** Rows turned into strings: likely artifact paths and odd names. */
@@ -63,6 +65,12 @@ export interface FolderTreeClassifyStats {
 }
 
 const NEWLINE = 0x0a;
+/**
+ * Longest line read. A longer one (a corrupt file with no newlines) would
+ * be held whole in Buffers the worker's heap limit doesn't cover, and the
+ * JSON.parse fallback can't make a string that long anyway.
+ */
+export const MAX_FOLDER_TREE_LINE_BYTES = 256 * 1024 * 1024;
 
 /** Lowercase ASCII names grouped by length, to match raw bytes without a string. */
 function namesByLength(names: Iterable<string>): Buffer[][] {
@@ -206,12 +214,14 @@ export async function sidecarFromFolderTreeFile(
   filePath: string,
   treeRoot: string,
   stats?: FolderTreeClassifyStats,
+  maxLineBytes = MAX_FOLDER_TREE_LINE_BYTES,
 ): Promise<DevArtifactSidecar | null> {
   if (!FS.existsSync(filePath)) return null;
 
   const counts: FolderTreeClassifyStats = {
     lines: 0,
     parsedLines: 0,
+    skippedLines: 0,
     rows: 0,
     decodedRows: 0,
     retainedRoots: 0,
@@ -251,30 +261,56 @@ export async function sidecarFromFolderTreeFile(
 
   try {
     // A line split across chunks. Joined once its newline arrives, so a
-    // long line costs one copy, not one per chunk.
+    // long line costs one copy, not one per chunk. Past maxLineBytes it is
+    // dropped and the rest of it skipped up to the next newline.
     let pending: Buffer[] = [];
+    let pendingBytes = 0;
+    let skipping = false;
     for await (const chunk of gunzip as AsyncIterable<Buffer>) {
       let start = 0;
       let nl = chunk.indexOf(NEWLINE);
-      if (pending.length > 0) {
+      if (pending.length > 0 || skipping) {
         if (nl === -1) {
-          pending.push(chunk);
+          if (!skipping) {
+            pending.push(chunk);
+            pendingBytes += chunk.length;
+          }
+          if (!skipping && pendingBytes > maxLineBytes) {
+            skipping = true;
+            pending = [];
+            counts.skippedLines += 1;
+          }
           continue;
         }
-        pending.push(chunk.subarray(0, nl));
-        const line = Buffer.concat(pending);
+        if (!skipping && pendingBytes + nl <= maxLineBytes) {
+          pending.push(chunk.subarray(0, nl));
+          const line = Buffer.concat(pending);
+          onLine(line, 0, line.length);
+        } else if (!skipping) {
+          counts.skippedLines += 1;
+        }
         pending = [];
-        onLine(line, 0, line.length);
+        pendingBytes = 0;
+        skipping = false;
         start = nl + 1;
         nl = chunk.indexOf(NEWLINE, start);
       }
       for (; nl !== -1; nl = chunk.indexOf(NEWLINE, start)) {
-        onLine(chunk, start, nl);
+        if (nl - start <= maxLineBytes) onLine(chunk, start, nl);
+        else counts.skippedLines += 1;
         start = nl + 1;
       }
-      if (start < chunk.length) pending.push(Buffer.from(chunk.subarray(start)));
+      if (start < chunk.length) {
+        pending.push(Buffer.from(chunk.subarray(start)));
+        pendingBytes = chunk.length - start;
+        if (pendingBytes > maxLineBytes) {
+          skipping = true;
+          pending = [];
+          counts.skippedLines += 1;
+        }
+      }
     }
-    if (pending.length > 0) {
+    if (pending.length > 0 && !skipping) {
       const line = Buffer.concat(pending);
       onLine(line, 0, line.length);
     }

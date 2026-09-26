@@ -105,6 +105,12 @@ function joinSegments(original: string, count: number): string {
   return parts.join(sep);
 }
 
+/**
+ * Every root ends at the matched segment or one past it. The folder-tree
+ * fallback (devArtifactFolderTree.ts) relies on that to skip rows whose
+ * last two segments aren't in ARTIFACT_SEGMENT_NAMES, so a rule that
+ * reaches further needs that reader changed too.
+ */
 export function classifyArtifactPath(filePath: string): { root: string; kind: DevArtifactKind } | null {
   const parts = splitSegments(filePath);
   for (let i = 0; i < parts.length; i++) {

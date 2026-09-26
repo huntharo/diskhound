@@ -27,16 +27,18 @@ describe("noteDevFile", () => {
   });
 });
 
-describe("sidecarFromDirectoryRoots", () => {
+describe("noteDirectoryRoot", () => {
   it("keeps the outer target folder and skips target/debug", async () => {
-    const { sidecarFromDirectoryRoots, reportFromSidecar } = await import("../devArtifactSidecar");
-    const sidecar = sidecarFromDirectoryRoots("C:\\", [
-      { path: "C:\\proj\\target", size: 80_000_000, files: 400 },
-      { path: "C:\\proj\\target\\debug", size: 50_000_000, files: 300 },
-      { path: "C:\\proj\\node_modules", size: 20_000_000, files: 100 },
-      { path: "C:\\proj\\node_modules\\preact", size: 1_000_000, files: 10 },
-    ], ["C:\\proj"]);
-    const report = reportFromSidecar(sidecar);
+    const { createDevAcc, dropNestedRoots, noteDirectoryRoot, reportFromSidecar, sidecarFromAcc } =
+      await import("../devArtifactSidecar");
+    const acc = createDevAcc();
+    acc.projects.add("C:\\proj");
+    noteDirectoryRoot(acc, "C:\\proj\\target", 80_000_000, 400);
+    noteDirectoryRoot(acc, "C:\\proj\\target\\debug", 50_000_000, 300);
+    noteDirectoryRoot(acc, "C:\\proj\\node_modules", 20_000_000, 100);
+    noteDirectoryRoot(acc, "C:\\proj\\node_modules\\preact", 1_000_000, 10);
+    dropNestedRoots(acc);
+    const report = reportFromSidecar(sidecarFromAcc(acc, "C:\\"));
     expect(report.totalBytes).toBe(100_000_000);
     expect(report.artifacts.map((a) => a.path).sort()).toEqual([
       "C:\\proj\\node_modules",
