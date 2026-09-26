@@ -40,6 +40,7 @@ const UNAMBIGUOUS_CACHE_KINDS = new Set<DevArtifactKind>([
   "dotnet",
   "compiler-cache",
   "cmake-build",
+  "terraform",
 ]);
 
 const BROWSER_CACHE_PATHS = [

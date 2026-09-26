@@ -45,6 +45,31 @@ describe("classifyArtifactPath", () => {
     });
   });
 
+  it("detects Terraform provider downloads", () => {
+    expect(classifyArtifactPath(
+      "/Users/me/infra/env/prod/.terraform/providers/registry.terraform.io/hashicorp/aws/6.54.0/darwin_arm64/terraform-provider-aws_v6.54.0_x5",
+    )).toEqual({ root: "/Users/me/infra/env/prod/.terraform/providers", kind: "terraform" });
+    // Terraform 0.13 and older put them under .terraform/plugins.
+    expect(classifyArtifactPath(
+      "C:\\infra\\old\\.terraform\\plugins\\windows_amd64\\terraform-provider-aws_v2.70.0_x4.exe",
+    )).toEqual({ root: "C:\\infra\\old\\.terraform\\plugins", kind: "terraform" });
+    expect(classifyArtifactPath(
+      "/home/me/.terraform.d/plugin-cache/registry.terraform.io/hashicorp/aws/6.54.0/linux_amd64/terraform-provider-aws_v6.54.0_x5",
+    )).toEqual({ root: "/home/me/.terraform.d/plugin-cache", kind: "terraform" });
+  });
+
+  it("leaves Terraform state, modules and hand-installed providers alone", () => {
+    for (const path of [
+      "/Users/me/infra/env/prod/.terraform/terraform.tfstate",
+      "/Users/me/infra/env/prod/.terraform/environment",
+      "/Users/me/infra/env/prod/.terraform/modules/modules.json",
+      "/Users/me/infra/env/prod/.terraform",
+      "/home/me/.terraform.d/plugins/example.com/me/thing/1.0.0/linux_amd64/terraform-provider-thing",
+    ]) {
+      expect(classifyArtifactPath(path), path).toBeNull();
+    }
+  });
+
   it("ignores ordinary documents", () => {
     expect(classifyArtifactPath("C:\\Users\\thoma\\Documents\\tax-2025.pdf")).toBeNull();
   });
@@ -62,7 +87,8 @@ describe("classifyArtifactPath", () => {
       expect(name, name).toMatch(/^[\x21-\x7e]+$/);
       expect(name.toLowerCase(), name).toBe(name);
       const inside = classifyArtifactPath(`/p/${name}/debug/x`) ?? classifyArtifactPath(`/p/${name}/registry/x`)
-        ?? classifyArtifactPath(`/p/${name}/mod/x`) ?? classifyArtifactPath(`/p/${name}/ccache/x`);
+        ?? classifyArtifactPath(`/p/${name}/mod/x`) ?? classifyArtifactPath(`/p/${name}/ccache/x`)
+        ?? classifyArtifactPath(`/p/${name}/providers/x`) ?? classifyArtifactPath(`/p/${name}/plugin-cache/x`);
       expect(inside, name).not.toBeNull();
     }
   });
