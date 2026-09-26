@@ -25,6 +25,7 @@ import {
   DIAGNOSTICS_SESSION_RE,
   DiagnosticsSession,
   SESSION_BOOKKEEPING_FILES,
+  type DiagnosticsLog,
   type DiagnosticsVersions,
 } from "./diagnosticsSession";
 import { HeapMonitor, type HeapReading } from "./heapMonitor";
@@ -48,7 +49,7 @@ export interface DiagnosticsManagerOptions {
   versions: DiagnosticsVersions;
   env?: Record<string, string | undefined>;
   /** writeCrashLog in main. */
-  log?: (tag: string, message: string) => void;
+  log?: DiagnosticsLog;
   retention?: RetentionLimits;
   // Seams for tests.
   createInspector?: () => InspectorTarget;
@@ -71,7 +72,7 @@ export class DiagnosticsManager {
   readonly rootPath: string;
 
   private readonly options: DiagnosticsManagerOptions;
-  private readonly log: (tag: string, message: string) => void;
+  private readonly log: DiagnosticsLog;
   private readonly now: () => number;
   private config: DiagnosticsConfig;
   private readonly heapSession: DiagnosticsSession;
@@ -144,6 +145,8 @@ export class DiagnosticsManager {
     if (this.stopped) return;
     this.stopped = true;
     this.heap.stop();
+    // A gate capture that already started finishes writing.
+    await this.heap.whenIdle().catch(() => undefined);
     const profiler = this.profiler;
     this.profiler = null;
     await this.profilerQueue.catch(() => undefined);

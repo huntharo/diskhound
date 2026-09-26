@@ -117,7 +117,9 @@ describe("DiagnosticsManager", () => {
     const [session] = status.sessions;
     expect(session.artifacts.map((artifact) => artifact.filename)).toEqual(["main-hot-0001.cpuprofile"]);
     expect(session.path.startsWith(root)).toBe(true);
-    expect(log).toHaveBeenCalledWith("hot-cpu", expect.stringMatching(/^saved .*main-hot-0001\.cpuprofile \(\d+ KB\): /));
+    // "capped" counts the commit; the saved line follows it.
+    await vi.waitUntil(() => log.mock.calls.some(([tag, message]) =>
+      tag === "hot-cpu" && /^saved .*main-hot-0001\.cpuprofile \(\d+ KB\): /.test(String(message))), { timeout: 5_000 });
   });
 
   it("only reveals the diagnostics folder or a session in it", async () => {
