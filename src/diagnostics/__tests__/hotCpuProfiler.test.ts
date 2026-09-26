@@ -21,6 +21,23 @@ import {
 // so the fakes below drive `readCpu` instead.
 
 /** CPU readings where each hot sample used `percent` of the wall time since the last. */
+/**
+ * Resolves as each profile is written. The writes are real disk I/O
+ * under fake timers, and vi.waitUntil would move fake time while it
+ * waits for them, by however long the disk takes.
+ */
+function profileWrites() {
+  let next = deferred();
+  return {
+    onProfileWritten: () => {
+      next.resolve();
+      next = deferred();
+    },
+    /** Take this before the step that triggers the capture. */
+    next: () => next.promise,
+  };
+}
+
 function cpuSource(clock: () => number) {
   let micros = 0;
   let processMicros = 0;
@@ -220,6 +237,7 @@ describe("HotCpuProfiler", () => {
     const { inspector, calls } = fakeInspector();
     const cpu = cpuSource(Date.now);
     const samples = sampleTracker();
+    const writes = profileWrites();
     const log = vi.fn();
     const config = hotCpuConfig({
       startDelayMs: 0, intervalMs: 1_000, consecutiveSamples: 2, profileDurationMs: 500, cooldownMs: 10_000, maxProfiles: 2,
@@ -227,6 +245,7 @@ describe("HotCpuProfiler", () => {
     const profiler = track(new HotCpuProfiler({
       config, session, inspector, readCpu: cpu.read, now: Date.now, monotonicNow: Date.now, log,
       onSampleCaptured: samples.onSampleCaptured,
+      onProfileWritten: writes.onProfileWritten,
     }));
     await profiler.start();
     const step = async (ms: number) => {
@@ -236,14 +255,20 @@ describe("HotCpuProfiler", () => {
     cpu.state.threadPercent = 90;
     await step(1_000); // one hot sample: not yet
     expect(session.writtenCount("cpuprofile")).toBe(0);
+    const first = writes.next();
     await step(1_000); // second: trigger
     await step(500); // post-trigger duration
-    await vi.waitUntil(() => session.writtenCount("cpuprofile") === 1);
+    await first;
+    await step(0); // the capture's tail: detach, then sample again
+    expect(session.writtenCount("cpuprofile")).toBe(1);
     // Still hot, but inside the cooldown.
     await step(5_000);
     expect(session.writtenCount("cpuprofile")).toBe(1);
+    const second = writes.next();
     await step(6_000);
-    await vi.waitUntil(() => session.writtenCount("cpuprofile") === 2);
+    await second;
+    await step(0);
+    expect(session.writtenCount("cpuprofile")).toBe(2);
     expect(profiler.status().state).toBe("capped");
     const startsAtCap = calls("Profiler.start");
     const samplesAtCap = samples.count();
@@ -256,7 +281,7 @@ describe("HotCpuProfiler", () => {
     expect((await FS.readdir(session.directoryPath)).sort()).toEqual([
       "events.ndjson", "main-hot-0001.cpuprofile", "main-hot-0002.cpuprofile", "samples.ndjson", "session.json",
     ]);
-  });
+  }, 15_000); // two captures' real writes on a slow CI disk
 
   it("triggers on the main thread's CPU only, not on busy workers", async () => {
     const dir = await tempDir();
@@ -266,10 +291,12 @@ describe("HotCpuProfiler", () => {
     const { inspector } = fakeInspector();
     const cpu = cpuSource(Date.now);
     const samples = sampleTracker();
+    const writes = profileWrites();
     const profiler = track(new HotCpuProfiler({
       config: hotCpuConfig({ startDelayMs: 0, intervalMs: 1_000, profileDurationMs: 500 }),
       session, inspector, readCpu: cpu.read, now: Date.now, monotonicNow: Date.now,
       onSampleCaptured: samples.onSampleCaptured,
+      onProfileWritten: writes.onProfileWritten,
     }));
     await profiler.start();
     await vi.advanceTimersByTimeAsync(0);
@@ -281,8 +308,10 @@ describe("HotCpuProfiler", () => {
     expect(profiler.status().lastCpuPercent).toBe(0);
 
     cpu.state.threadPercent = 95;
+    const written = writes.next();
     await vi.advanceTimersByTimeAsync(2_500);
-    await vi.waitUntil(() => session.writtenCount("cpuprofile") === 1);
+    await written;
+    expect(session.writtenCount("cpuprofile")).toBe(1);
     const lines = (await FS.readFile(session.artifactPath("samples.ndjson"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     expect(lines.some((sample) => sample.processCpuPercent === 180 && sample.cpuPercent === 0)).toBe(true);
     expect(lines.at(-1)).toMatchObject({ cpuPercent: 95, consecutiveHotSamples: 2 });
