@@ -1,4 +1,6 @@
 appId: com.diskhound.app
+afterPack: scripts/macos-packaging.mjs
+afterSign: scripts/macos-packaging.mjs
 productName: DiskHound
 copyright: Copyright © 2026 DiskHound
 
@@ -76,6 +78,9 @@ nsis:
   include: installer.nsh
 
 mac:
+  # Re-sign the personalized launcher and bundle even without a Developer ID.
+  # Replace with the Developer ID identity when certificate signing is enabled.
+  identity: "-"
   # Single universal .dmg containing native code for both Apple
   # Silicon and Intel Macs (lipo'd Rust scanner +
   # @electron/universal-merged Electron framework). One artifact
