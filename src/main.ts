@@ -35,6 +35,7 @@ import {
   type PermanentDeleteProgress,
   type ScanEngine,
   type ScanFileRecord,
+  type ScanDiffResult,
   type ScanOptions,
   type ScanSnapshot,
   ALLOCATED_SIZE_SEMANTICS,
@@ -150,7 +151,6 @@ import {
 } from "./shared/devArtifactsWorkerRuntime";
 import {
   deleteFullDiffCachesForScan,
-  hasFullDiffCache,
   initFullDiffCacheStore,
 } from "./shared/fullDiffCacheStore";
 import { createTreemapCache } from "./shared/treemapCache";
@@ -1698,7 +1698,9 @@ void (async () => {
     const history = getScanHistory(rootPath);
     const latest = history[0];
     if (!latest) return null;
-    return await loadHistoricalSnapshot(latest.id);
+    // Through the snapshot cache: a drive switch re-reads nothing, and
+    // Overview's treemap and latest diff reuse this read.
+    return await loadHistoricalSnapshotCached(latest.id);
   });
 
   // File icon cache keyed by extension (case-insensitive). Most files share
@@ -2302,7 +2304,21 @@ void (async () => {
   // time. We keep up to 8 parsed snapshots in memory (~8-16 MB worst case)
   // — older entries get evicted on insert.
   const snapshotCache = new Map<string, ScanSnapshot>();
+  const snapshotInflight = new Map<string, Promise<ScanSnapshot | null>>();
   const SNAPSHOT_CACHE_LIMIT = 8;
+  // compute-scan-diff results, so a remounted Changes tab can click
+  // back through a 30-scan history without re-reading snapshots the
+  // 8-entry cache above let go. Bounded by delta rows too: a diff of
+  // two top-N lists is at most ~15k rows (~3 MB).
+  const scanDiffCache = new Map<string, ScanDiffResult>();
+  const SCAN_DIFF_CACHE_LIMIT = 32;
+  const SCAN_DIFF_CACHE_MAX_ROWS = 200_000;
+  let scanDiffCacheRows = 0;
+  const scanDiffRows = (diff: ScanDiffResult) =>
+    diff.fileDeltas.length + diff.directoryDeltas.length + diff.extensionDeltas.length;
+  // get-full-diff-status answers each scan's index size. An index never
+  // changes once written, so its size is kept until the scan is pruned.
+  const indexBytesCache = new Map<string, number>();
   const loadHistoricalSnapshotCached = async (id: string): Promise<ScanSnapshot | null> => {
     const cached = snapshotCache.get(id);
     if (cached) {
@@ -2311,20 +2327,72 @@ void (async () => {
       snapshotCache.set(id, cached);
       return cached;
     }
-    const snap = await loadHistoricalSnapshot(id);
-    if (snap) {
-      if (snapshotCache.size >= SNAPSHOT_CACHE_LIMIT) {
-        const firstKey = snapshotCache.keys().next().value;
-        if (firstKey) snapshotCache.delete(firstKey);
+    // Overview asks for the treemap and the latest diff at once, and
+    // both start from the latest snapshot: read it once.
+    const inflight = snapshotInflight.get(id);
+    if (inflight) return inflight;
+    const pending = loadHistoricalSnapshot(id).then((snap) => {
+      if (snap) {
+        if (snapshotCache.size >= SNAPSHOT_CACHE_LIMIT) {
+          const firstKey = snapshotCache.keys().next().value;
+          if (firstKey) snapshotCache.delete(firstKey);
+        }
+        snapshotCache.set(id, snap);
       }
-      snapshotCache.set(id, snap);
+      return snap;
+    }).finally(() => {
+      snapshotInflight.delete(id);
+    });
+    snapshotInflight.set(id, pending);
+    return pending;
+  };
+  const computeScanDiffCached = async (baselineId: string, currentId: string): Promise<ScanDiffResult | null> => {
+    const key = `${baselineId}::${currentId}`;
+    const cached = scanDiffCache.get(key);
+    if (cached) {
+      scanDiffCache.delete(key);
+      scanDiffCache.set(key, cached);
+      return cached;
     }
-    return snap;
+    const [baseline, current] = await Promise.all([
+      loadHistoricalSnapshotCached(baselineId),
+      loadHistoricalSnapshotCached(currentId),
+    ]);
+    if (!baseline || !current) return null;
+    const diff = computeDiff(baseline, current, baselineId, currentId);
+    scanDiffCache.set(key, diff);
+    scanDiffCacheRows += scanDiffRows(diff);
+    while (
+      scanDiffCache.size > 1
+      && (scanDiffCache.size > SCAN_DIFF_CACHE_LIMIT || scanDiffCacheRows > SCAN_DIFF_CACHE_MAX_ROWS)
+    ) {
+      const [oldestKey, oldest] = scanDiffCache.entries().next().value!;
+      scanDiffCache.delete(oldestKey);
+      scanDiffCacheRows -= scanDiffRows(oldest);
+    }
+    return diff;
+  };
+  /** Drops what the Changes caches hold for a scan that is pruned or cleared. */
+  const forgetScanDiffs = (id: string) => {
+    snapshotCache.delete(id);
+    indexBytesCache.delete(id);
+    for (const [key, diff] of scanDiffCache) {
+      if (diff.baselineId === id || diff.currentId === id) {
+        scanDiffCache.delete(key);
+        scanDiffCacheRows -= scanDiffRows(diff);
+      }
+    }
+    fullDiffLoader.forgetScan(id);
   };
   const getIndexBytes = async (id: string): Promise<number | null> => {
+    const cached = indexBytesCache.get(id);
+    if (cached !== undefined) return cached;
     try {
       const stat = await FS.stat(indexFilePath(id));
-      return stat.isFile() ? stat.size : null;
+      if (!stat.isFile()) return null;
+      // Only a size is kept: a missing index may still be renamed into place.
+      indexBytesCache.set(id, stat.size);
+      return stat.size;
     } catch {
       return null;
     }
@@ -2339,14 +2407,8 @@ void (async () => {
     void fullDiffLoader.warmLatest(rootPath);
   };
 
-  ipcMain.handle("diskhound:compute-scan-diff", async (_event, baselineId: string, currentId: string) => {
-    const [baseline, current] = await Promise.all([
-      loadHistoricalSnapshotCached(baselineId),
-      loadHistoricalSnapshotCached(currentId),
-    ]);
-    if (!baseline || !current) return null;
-    return computeDiff(baseline, current, baselineId, currentId);
-  });
+  ipcMain.handle("diskhound:compute-scan-diff", (_event, baselineId: string, currentId: string) =>
+    computeScanDiffCached(baselineId, currentId));
 
   ipcMain.handle("diskhound:get-full-diff-status", async (
     _event,
@@ -2356,7 +2418,7 @@ void (async () => {
   ): Promise<FullDiffStatus> => {
     const normalizedLimit = normalizeDiffLimit(limit);
     const [cached, baselineIndexBytes, currentIndexBytes] = await Promise.all([
-      hasFullDiffCache(baselineId, currentId, normalizedLimit),
+      fullDiffLoader.hasOnDisk(baselineId, currentId, normalizedLimit),
       getIndexBytes(baselineId),
       getIndexBytes(currentId),
     ]);
@@ -3082,12 +3144,7 @@ void (async () => {
   ipcMain.handle("diskhound:get-latest-diff", async (_event, rootPath: string) => {
     const pair = getLatestPair(rootPath);
     if (!pair) return null;
-    const [baseline, current] = await Promise.all([
-      loadHistoricalSnapshotCached(pair.baseline.id),
-      loadHistoricalSnapshotCached(pair.current.id),
-    ]);
-    if (!baseline || !current) return null;
-    return computeDiff(baseline, current, pair.baseline.id, pair.current.id);
+    return computeScanDiffCached(pair.baseline.id, pair.current.id);
   });
 
   // ── IPC: Monitoring ───────────────────────────────────────
@@ -3621,6 +3678,7 @@ void (async () => {
 
   /** Drops what main caches in memory about a scan that was pruned or cleared. */
   const forgetScanCaches = (id: string) => {
+    forgetScanDiffs(id);
     devArtifactCache.delete(id);
     devSidecarMissingAt.delete(id);
     devFullLoadEmptyAt.delete(id);
