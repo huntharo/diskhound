@@ -633,8 +633,12 @@ pub fn query_cursor(drive_letter: char) -> Result<(), String> {
 }
 
 #[cfg(test)]
+mod test_support;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use super::test_support::Fixture;
 
     fn record(size: Option<u64>) -> OutputLine {
         OutputLine::JournalRecord {
@@ -671,41 +675,21 @@ mod tests {
     fn a_file_written_in_several_sessions_comes_back_as_one_line() {
         use std::io::Write;
 
-        let dir = std::env::temp_dir().join(format!("diskhound-usn-fold-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let name = format!("fold-{}.bin", std::process::id());
-        let file = dir.join(&name);
-        let dir_text = dir.to_string_lossy().to_string();
-        let drive = dir_text.split(':').next().and_then(|head| head.chars().last()).unwrap();
-
-        let volume = match open_volume(drive) {
-            Ok(volume) => volume,
-            Err(err) => {
-                eprintln!("skipped: cannot open volume {drive}: ({err})");
-                return;
-            }
-        };
-        let before = match query_journal(volume) {
-            Ok(info) => info,
-            Err(err) => {
-                eprintln!("skipped: no USN journal on {drive}: ({err})");
-                unsafe { CloseHandle(volume) };
-                return;
-            }
-        };
+        let Some(fixture) = Fixture::new() else { return };
+        let name = "fold.bin";
+        let file = fixture.root().join(name);
+        let before = fixture.cursor();
         // Five write sessions: create, then an extend and a close each.
         for session in 0..5u8 {
             let mut out = std::fs::OpenOptions::new().create(true).append(true).open(&file).unwrap();
             out.write_all(&[session; 8192]).unwrap();
         }
-        let after = query_journal(volume).unwrap();
-        let lines = collect_changes(volume, before.journal_id, before.next_usn, after.next_usn).unwrap();
-        unsafe { CloseHandle(volume) };
-        let _ = std::fs::remove_dir_all(&dir);
+        let after = fixture.cursor();
+        let lines = fixture.changes(before);
 
         let mine: Vec<&OutputLine> = lines
             .iter()
-            .filter(|line| matches!(line, OutputLine::JournalRecord { path, .. } if path.ends_with(&name)))
+            .filter(|line| matches!(line, OutputLine::JournalRecord { path, .. } if path.eq_ignore_ascii_case(&file.to_string_lossy())))
             .collect();
         assert_eq!(mine.len(), 1, "one line for the file, not one per record: {mine:?}");
         let OutputLine::JournalRecord { op, reason_mask, size, .. } = mine[0] else { unreachable!() };
@@ -723,16 +707,8 @@ mod tests {
 
     #[test]
     fn deleted_and_renamed_files_keep_their_recorded_paths() {
-        let dir = std::env::temp_dir().join(format!("diskhound-usn-remove-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        // Windows runners can supply an 8.3 TEMP path (RUNNER~1), while
-        // OpenFileById resolves long names. Normalize the existing parent
-        // before any files disappear, using the reader's prefix convention.
-        let canonical_dir = std::fs::canonicalize(&dir).unwrap();
-        let canonical_text = canonical_dir.to_str().unwrap();
-        let dir = std::path::PathBuf::from(
-            canonical_text.strip_prefix(r"\\?\").unwrap_or(canonical_text),
-        );
+        let Some(fixture) = Fixture::new() else { return };
+        let dir = fixture.root();
         let dest = dir.join("destination");
         std::fs::create_dir_all(&dest).unwrap();
         let deleted = dir.join("deleted.bin");
@@ -741,33 +717,13 @@ mod tests {
         let new = dest.join("new-名前.bin");
         std::fs::write(&deleted, [1; 8192]).unwrap();
         std::fs::write(&old, [2; 8192]).unwrap();
-        let drive = dir.to_string_lossy().split(':').next().unwrap().chars().last().unwrap();
-        let volume = match open_volume(drive) {
-            Ok(volume) => volume,
-            Err(err) => {
-                eprintln!("skipped: cannot open volume {drive}: ({err})");
-                let _ = std::fs::remove_dir_all(&dir);
-                return;
-            }
-        };
-        let before = match query_journal(volume) {
-            Ok(info) => info,
-            Err(err) => {
-                eprintln!("skipped: no USN journal on {drive}: ({err})");
-                unsafe { CloseHandle(volume) };
-                let _ = std::fs::remove_dir_all(&dir);
-                return;
-            }
-        };
+        let before = fixture.cursor();
         std::fs::remove_file(&deleted).unwrap();
         std::fs::rename(&old, &middle).unwrap();
         std::fs::rename(&middle, &new).unwrap();
         let created = dir.join("created.bin");
         std::fs::write(&created, [3; 8192]).unwrap();
-        let after = query_journal(volume).unwrap();
-        let lines = collect_changes(volume, before.journal_id, before.next_usn, after.next_usn).unwrap();
-        unsafe { CloseHandle(volume) };
-        let _ = std::fs::remove_dir_all(&dir);
+        let lines = fixture.changes(before);
 
         for (path, expected) in [
             (&deleted, "delete"), (&old, "delete"), (&middle, "delete"),
@@ -781,6 +737,70 @@ mod tests {
             let json = serde_json::to_value(mine[0]).unwrap();
             assert_eq!(json["op"], expected, "{path_text}: {json}");
         }
+    }
+
+    #[test]
+    fn real_access_denied_is_dropped_and_the_live_file_survives() {
+        let Some(fixture) = Fixture::new() else { return };
+        let before = fixture.cursor();
+        let mut denied = fixture.deny_attributes_on_new_file();
+        let after = fixture.cursor();
+        let mut file_refs = std::collections::HashSet::new();
+        let mut path_buffer = vec![0u16; MAX_PATH_UNITS];
+        read_journal(fixture.volume(), before.journal_id, before.next_usn, after.next_usn, |record, name| {
+            if name == "permission.bin" {
+                if let Some(parent) = resolve_file(fixture.volume(), record.ParentFileReferenceNumber, &mut path_buffer) {
+                    if parent.path.eq_ignore_ascii_case(&fixture.root().to_string_lossy()) {
+                        file_refs.insert(record.FileReferenceNumber);
+                    }
+                }
+            }
+        }).unwrap();
+        assert_eq!(file_refs.len(), 1, "must observe the real fixture's journal record");
+        let file_ref = *file_refs.iter().next().unwrap();
+        assert!(resolve_file(fixture.volume(), file_ref, &mut path_buffer).is_none(),
+            "fixture DACL must actually prevent OpenFileById attribute access");
+        let lines = fixture.changes(before);
+        assert!(!lines.iter().any(|line| matches!(line,
+            OutputLine::JournalRecord { file_ref: seen, .. } if *seen == file_ref
+        )), "an inaccessible live file must not emit a delete or fabricated metadata");
+        assert!(matches!(lines.last(), Some(OutputLine::JournalCursor { records_dropped, .. }) if *records_dropped >= 1));
+        denied.restore().unwrap();
+        assert_eq!(std::fs::read(&denied.path).unwrap(), b"owned USN permission fixture");
+        assert!(resolve_file(fixture.volume(), file_ref, &mut path_buffer).is_some());
+    }
+
+    #[test]
+    fn permission_fixture_restores_its_acl_during_unwind() {
+        let Some(fixture) = Fixture::new() else { return };
+        let path = fixture.root().join("permission.bin");
+        let panic = std::panic::catch_unwind(|| {
+            let _denied = fixture.deny_attributes_on_new_file();
+            panic!("intentional fixture unwind");
+        }).unwrap_err();
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"intentional fixture unwind"));
+        assert_eq!(std::fs::read(path).unwrap(), b"owned USN permission fixture");
+    }
+
+    #[test]
+    fn deleting_a_parent_reports_its_unresolvable_child_as_dropped() {
+        let Some(fixture) = Fixture::new() else { return };
+        let parent = fixture.root().join("removed-parent");
+        std::fs::create_dir(&parent).unwrap();
+        let child = parent.join("child.bin");
+        std::fs::write(&child, [1; 8192]).unwrap();
+        let before = fixture.cursor();
+        std::fs::remove_file(&child).unwrap();
+        std::fs::remove_dir(&parent).unwrap();
+        let lines = fixture.changes(before);
+        assert!(lines.iter().any(|line| matches!(line,
+            OutputLine::JournalRecord { op: JournalOp::Delete, path, is_directory: true, .. }
+                if path.eq_ignore_ascii_case(&parent.to_string_lossy())
+        )));
+        assert!(matches!(lines.last(), Some(OutputLine::JournalCursor { records_dropped, .. }) if *records_dropped >= 1));
+        assert!(!lines.iter().any(|line| matches!(line,
+            OutputLine::JournalRecord { path, .. } if path.eq_ignore_ascii_case(&child.to_string_lossy())
+        )), "without the deleted parent there is no resolved child path to emit");
     }
 
     #[test]
