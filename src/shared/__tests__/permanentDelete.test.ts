@@ -23,7 +23,7 @@ afterEach(async () => {
   await FSP.rm(tempDir, { recursive: true, force: true });
 });
 
-describe("permanentlyDeleteOnDisk", () => {
+describe.each(["walk", "recursive"] as const)("permanentlyDeleteOnDisk (%s)", (method) => {
   it("recursively unlinks a nested tree", async () => {
     const tree = Path.join(tempDir, "node_modules");
     const nested = Path.join(tree, "pkg", "dist");
@@ -31,14 +31,14 @@ describe("permanentlyDeleteOnDisk", () => {
     await FSP.writeFile(Path.join(nested, "index.js"), "module.exports = 1\n");
     await FSP.writeFile(Path.join(tree, "readme"), "keep me not");
 
-    await permanentlyDeleteOnDisk(tree);
+    await permanentlyDeleteOnDisk(tree, undefined, method);
 
     expect(FS.existsSync(tree)).toBe(false);
     expect(FS.existsSync(nested)).toBe(false);
   });
 
   it("treats an already-missing path as success", async () => {
-    await expect(permanentlyDeleteOnDisk(Path.join(tempDir, "gone"))).resolves.toBeUndefined();
+    await expect(permanentlyDeleteOnDisk(Path.join(tempDir, "gone"), undefined, method)).resolves.toBeUndefined();
   });
 
   it("unlinks a symlink without deleting the target", async () => {
@@ -52,7 +52,7 @@ describe("permanentlyDeleteOnDisk", () => {
       return;
     }
 
-    await permanentlyDeleteOnDisk(link);
+    await permanentlyDeleteOnDisk(link, undefined, method);
 
     expect(FS.existsSync(link)).toBe(false);
     expect(await FSP.readFile(target, "utf8")).toBe("keep");
@@ -73,7 +73,7 @@ describe("permanentlyDeleteOnDisk", () => {
       return;
     }
 
-    await permanentlyDeleteOnDisk(junction);
+    await permanentlyDeleteOnDisk(junction, undefined, method);
 
     expect(FS.existsSync(junction)).toBe(false);
     expect(await FSP.readFile(Path.join(real, "pkg.json"), "utf8")).toBe("{\"ok\":true}");
@@ -90,12 +90,13 @@ describe("permanentlyDeleteOnDisk", () => {
     await permanentlyDeleteOnDisk(tree, (progress) => {
       seen.push(progress.path);
       lastWalked = progress.filesWalked;
-    });
+    }, method);
 
     expect(FS.existsSync(tree)).toBe(false);
     expect(seen[0]).toBe(Path.resolve(tree));
     expect(seen.length).toBeGreaterThanOrEqual(2);
-    expect(lastWalked).toBeGreaterThanOrEqual(2);
+    if (method === "walk") expect(lastWalked).toBeGreaterThanOrEqual(2);
+    else expect(lastWalked).toBe(0); // rm has no per-file progress; never fabricate it.
   });
 
   it("removes a read-only file in a tree", async () => {
@@ -105,9 +106,62 @@ describe("permanentlyDeleteOnDisk", () => {
     await FSP.writeFile(file, "ro");
     await FSP.chmod(file, 0o444);
 
-    await permanentlyDeleteOnDisk(tree);
+    await permanentlyDeleteOnDisk(tree, undefined, method);
 
     expect(FS.existsSync(tree)).toBe(false);
+  });
+
+  it("removes nested directory links without touching an outside tree", async () => {
+    const tree = Path.join(tempDir, "target");
+    const outside = Path.join(tempDir, "outside");
+    await FSP.mkdir(tree);
+    await FSP.mkdir(outside);
+    const sentinel = Path.join(outside, "keep.txt");
+    await FSP.writeFile(sentinel, "keep outside data");
+    // Junction creation does not need Windows Developer Mode.
+    await FSP.symlink(outside, Path.join(tree, "link"), process.platform === "win32" ? "junction" : "dir");
+
+    await permanentlyDeleteOnDisk(tree, undefined, method);
+
+    expect(FS.existsSync(tree)).toBe(false);
+    expect(await FSP.readFile(sentinel, "utf8")).toBe("keep outside data");
+  });
+
+  it("removes a root directory link without touching the target", async () => {
+    const outside = Path.join(tempDir, "outside");
+    const link = Path.join(tempDir, "link");
+    await FSP.mkdir(outside);
+    await FSP.writeFile(Path.join(outside, "keep.txt"), "keep");
+    await FSP.symlink(outside, link, process.platform === "win32" ? "junction" : "dir");
+
+    await permanentlyDeleteOnDisk(link, undefined, method);
+
+    await expect(FSP.lstat(link)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await FSP.readFile(Path.join(outside, "keep.txt"), "utf8")).toBe("keep");
+  });
+
+  it("removes a dangling directory link", async () => {
+    const target = Path.join(tempDir, "outside");
+    const link = Path.join(tempDir, "dangling");
+    await FSP.mkdir(target);
+    await FSP.symlink(target, link, process.platform === "win32" ? "junction" : "dir");
+    await FSP.rmdir(target);
+
+    await permanentlyDeleteOnDisk(link, undefined, method);
+
+    await expect(FSP.lstat(link)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("leaves other names of hard-linked files intact", async () => {
+    const outside = Path.join(tempDir, "keep.txt");
+    const tree = Path.join(tempDir, "target");
+    await FSP.mkdir(tree);
+    await FSP.writeFile(outside, "keep");
+    await FSP.link(outside, Path.join(tree, "linked.txt"));
+
+    await permanentlyDeleteOnDisk(tree, undefined, method);
+
+    expect(await FSP.readFile(outside, "utf8")).toBe("keep");
   });
 });
 

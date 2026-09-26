@@ -1,9 +1,11 @@
 import type { PermanentDeleteProgress } from "./contracts";
+import type { PermanentDeleteMethod } from "./permanentDelete";
 
 export interface PermanentDeleteWorkerRequest {
   type: "delete";
   requestId: string;
   targetPath: string;
+  method?: PermanentDeleteMethod;
 }
 
 export type PermanentDeleteWorkerResponse =
@@ -20,4 +22,5 @@ export type PermanentDeleteWorkerResponse =
       type: "error";
       requestId: string;
       message: string;
+      code?: string;
     };

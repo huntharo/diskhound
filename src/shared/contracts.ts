@@ -365,6 +365,8 @@ export interface CleanupSettings {
    * boolean polarity (true = safer / show confirm).
    */
   confirmPermanentDelete: boolean;
+  /** Opt-in recursive removal; tree/elapsed progress instead of per-file progress. */
+  fastPermanentDelete: boolean;
 }
 
 export interface StorageSettings {
@@ -1478,6 +1480,7 @@ export function defaultSettings(): AppSettings {
       autoDetectOldDownloads: true,
       oldFileThresholdDays: 90,
       confirmPermanentDelete: true,
+      fastPermanentDelete: false,
     },
     storage: {
       // 7 = one week of daily scans, or two weeks of every-other-day.
@@ -1622,6 +1625,7 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
     },
     cleanup: {
       autoDetectTempFiles: Boolean(merged.cleanup.autoDetectTempFiles),
+      fastPermanentDelete: merged.cleanup.fastPermanentDelete === true,
       autoDetectCaches: Boolean(merged.cleanup.autoDetectCaches),
       autoDetectOldDownloads: Boolean(merged.cleanup.autoDetectOldDownloads),
       oldFileThresholdDays: clampInteger(
