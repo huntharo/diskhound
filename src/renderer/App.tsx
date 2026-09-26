@@ -262,11 +262,13 @@ export function App() {
       if (snap.status !== "running" || !snap.rootPath) {
         return null;
       }
-      // Finalizing phase: scanner has stopped walking, is now writing
-      // the folder-tree sidecar + flushing the index. Return null so
-      // the drive pill / stripe go indeterminate instead of sitting at
-      // the misleading "98%" the previous run ended on.
-      if (snap.scanPhase === "finalizing") {
+      // Preparation, metadata loading, and index finalization have no
+      // meaningful denominator. Keep every progress surface indeterminate.
+      if (
+        snap.scanPhase === "starting"
+        || snap.scanPhase === "reading_metadata"
+        || snap.scanPhase === "finalizing"
+      ) {
         return null;
       }
       // During the indexing phase the scanner pre-sorts records
@@ -921,6 +923,8 @@ export function App() {
         // hit 100%, which looked stuck to the user.
         if (snapshot.scanPhase === "finalizing") return "Finalizing";
         if (snapshot.scanPhase === "reading_metadata") return "Reading metadata";
+        if (snapshot.scanPhase === "starting") return "Preparing";
+        if (snapshot.scanPhase === "indexing") return "Indexing";
         return "Scanning";
       case "done": return "Complete";
       case "cancelled": return "Stopped";
@@ -1286,9 +1290,7 @@ export function App() {
               <>
                 <span>&middot;</span>
                 <span className="scan-progress-ticker">
-                  {snapshot.filesVisited > 0
-                    ? `${snapshot.filesVisited.toLocaleString()} files · ${formatBytes(snapshot.bytesSeen)}${currentScanPercent !== null ? ` · ${currentScanPercent}%` : ""}`
-                    : "preparing…"}
+                  {`${snapshot.filesVisited.toLocaleString()} files · ${formatBytes(snapshot.bytesSeen)}${currentScanPercent !== null ? ` · ${currentScanPercent}%` : ""}`}
                 </span>
               </>
             )}

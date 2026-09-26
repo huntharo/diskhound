@@ -37,6 +37,7 @@ export interface ScanOptions {
 
 export type ScanPhase =
   | "starting"
+  | "walking"
   | "reading_metadata"
   | "indexing"
   | "finalizing"

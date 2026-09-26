@@ -11,6 +11,7 @@ import {
   type DirectoryHotspot,
   type ExtensionBucket,
   type MainToWorkerMessage,
+  type ScanPhase,
   type ScanFileRecord,
   type ScanSnapshot,
   type WorkerToMainMessage,
@@ -152,6 +153,8 @@ export async function runScan(
     }
   };
   const finalizeIndex = async () => {
+    scanPhase = "finalizing";
+    emitSnapshot("running");
     if (indexGzip) {
       // Wait for the file, not just gzip: "done" lets main read or rename it.
       const file = indexFile;
@@ -233,11 +236,15 @@ export async function runScan(
     depth: 0,
   });
 
+  // Main supplies the starting snapshot while the baseline loads. Once that
+  // finishes, report walking even before the first file is found.
+  let scanPhase: ScanPhase = "walking";
   const emitSnapshot = (status: ScanSnapshot["status"], errorMessage: string | null = null) => {
     const now = Date.now();
     const snapshot: ScanSnapshot = {
       ...createIdleScanSnapshot(),
       status,
+      scanPhase: status === "done" ? "complete" : scanPhase,
       engine: "js-worker",
       rootPath,
       scanOptions,
@@ -264,6 +271,7 @@ export async function runScan(
     });
   };
 
+  emitSnapshot("running");
   while (directoryStack.length > 0) {
     if (cancelled) {
       await finalizeIndex();
