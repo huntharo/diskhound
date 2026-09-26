@@ -2,6 +2,7 @@ import { Worker } from "node:worker_threads";
 
 import { resolveBundledWorkerScript } from "./bundledWorkerPath";
 import type { PermanentDeleteProgress } from "./contracts";
+import type { PermanentDeleteMethod } from "./permanentDelete";
 import type {
   PermanentDeleteWorkerRequest,
   PermanentDeleteWorkerResponse,
@@ -13,6 +14,7 @@ export function resolveBundledPermanentDeleteWorkerPath(baseDir: string): string
 
 export interface RunPermanentDeleteWorkerOptions {
   workerPath: string;
+  method?: PermanentDeleteMethod;
   onProgress?: (progress: PermanentDeleteProgress) => void;
 }
 
@@ -25,6 +27,7 @@ export async function runPermanentDeleteWorker(
     type: "delete",
     requestId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     targetPath,
+    method: options.method,
   };
 
   await new Promise<void>((resolve, reject) => {
@@ -49,7 +52,7 @@ export async function runPermanentDeleteWorker(
         settle(() => resolve());
         return;
       }
-      settle(() => reject(new Error(message.message)));
+      settle(() => reject(Object.assign(new Error(message.message), { code: message.code })));
     };
 
     const onError = (error: Error) => {

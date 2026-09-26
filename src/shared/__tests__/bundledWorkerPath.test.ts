@@ -65,21 +65,37 @@ describe("packaged scan workers", () => {
     expect(source).not.toMatch(/require\(\s*['"]\.\.\//);
   });
 
-  it("loads the bundled delete worker and removes a tree", async () => {
+  it.each(["walk", "recursive"] as const)("loads the bundled delete worker and removes a tree (%s)", async (method) => {
     const worker = Path.join(repoRoot, "dist-electron", "scan", "permanentDeleteWorker.cjs");
     if (!FS.existsSync(worker)) return;
     const tree = Path.join(tempDir, "node_modules");
     await FSP.mkdir(tree);
     await FSP.writeFile(Path.join(tree, "lock"), "x");
     const seen: string[] = [];
+    let filesWalked = 0;
     await runPermanentDeleteWorker(tree, {
       workerPath: worker,
+      method,
       onProgress: (progress) => {
         seen.push(progress.path);
+        filesWalked = progress.filesWalked;
       },
     });
     expect(FS.existsSync(tree)).toBe(false);
     expect(seen[0]).toBe(Path.resolve(tree));
     expect(seen.length).toBeGreaterThanOrEqual(2);
+    expect(filesWalked).toBe(method === "walk" ? 2 : 0);
+  });
+
+  it("preserves filesystem error codes for the Windows elevation decision", async () => {
+    const worker = Path.join(tempDir, "denied.cjs");
+    await FSP.writeFile(worker, `
+      const { parentPort } = require('node:worker_threads');
+      parentPort.on('message', request => parentPort.postMessage({
+        type: 'error', requestId: request.requestId, message: 'denied', code: 'EACCES'
+      }));
+    `);
+    await expect(runPermanentDeleteWorker(tempDir, { workerPath: worker }))
+      .rejects.toMatchObject({ message: "denied", code: "EACCES" });
   });
 });

@@ -27,6 +27,23 @@ afterEach(async () => {
 const settingsPath = () => Path.join(paths.userData, "settings.json");
 
 describe("settings store", () => {
+  it("persists the fast delete opt-in once and retains it after restart", async () => {
+    const store = await createSettingsStore();
+    const { io } = await measureFsIo(async () => {
+      await store.update((current) => ({
+        ...current, cleanup: { ...current.cleanup, fastPermanentDelete: true },
+      }));
+      await store.set(store.get());
+    });
+    expectIoBudget({
+      scenario: "settings-fast-delete-opt-in",
+      note: "One user opt-in plus one unchanged save: one settings rewrite. No recurring writes; 0 writes/day and 0 MB/day at default or 1-minute monitoring. One manual toggle writes about 1.2 KB.",
+      io,
+    });
+    const reopened = await createSettingsStore();
+    expect(reopened.get().cleanup.fastPermanentDelete).toBe(true);
+  });
+
   it("writes settings.json once when a setting changes", async () => {
     const store = await createSettingsStore();
     const current = store.get();

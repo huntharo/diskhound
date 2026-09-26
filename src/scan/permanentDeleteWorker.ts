@@ -17,7 +17,7 @@ if (parentPort) {
         progress,
       };
       parentPort?.postMessage(response);
-    })
+    }, message.method)
       .then(() => {
         const response: PermanentDeleteWorkerResponse = {
           type: "result",
@@ -30,6 +30,7 @@ if (parentPort) {
           type: "error",
           requestId: message.requestId,
           message: error instanceof Error ? error.message : String(error),
+          code: typeof error?.code === "string" ? error.code : undefined,
         };
         parentPort?.postMessage(response);
       });

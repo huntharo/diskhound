@@ -6,6 +6,8 @@ import type { PathActionResult, PermanentDeleteProgress } from "./contracts";
 const PROGRESS_MS = 150;
 const YIELD_EVERY = 32;
 
+export type PermanentDeleteMethod = "walk" | "recursive";
+
 function errorCode(error: unknown): string | undefined {
   if (!error || typeof error !== "object" || !("code" in error)) return undefined;
   const code = (error as { code?: unknown }).code;
@@ -115,13 +117,16 @@ async function removeNode(targetPath: string, state: WalkState): Promise<void> {
 
 /**
  * Permanently remove a file, directory, or junction. Never Recycle Bin.
- * Walks the tree so callers can tick progress. Symlinks and Windows
- * junctions are unlinked without walking the target. Missing paths
+ * The default walks the tree so callers can tick progress. The experimental
+ * recursive method uses Node's rm, reporting only the root (no invented file
+ * counts). The renderer keeps the tree size and elapsed time visible.
+ * Symlinks and Windows junctions are unlinked without walking the target. Missing paths
  * are success — the tree is already gone.
  */
 export async function permanentlyDeleteOnDisk(
   targetPath: string,
   onProgress?: (progress: PermanentDeleteProgress) => void,
+  method: PermanentDeleteMethod = "walk",
 ): Promise<void> {
   const resolved = Path.resolve(targetPath);
   const state: WalkState = {
@@ -132,7 +137,14 @@ export async function permanentlyDeleteOnDisk(
     onProgress,
   };
   emit(state, resolved, true);
-  await removeNode(resolved, state);
+  if (method === "recursive") {
+    // This was the original deletion engine (06721da). 329d71f replaced it
+    // for per-file progress, not because rm followed directory links.
+    // Neither engine promises to stay on one filesystem across mount points.
+    await FSP.rm(resolved, { recursive: true, force: true, maxRetries: 2 });
+  } else {
+    await removeNode(resolved, state);
+  }
   emit(state, resolved, true);
 
   try {

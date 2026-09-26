@@ -2052,11 +2052,16 @@ void (async () => {
       mainWindow?.webContents.send(PERMANENT_DELETE_PROGRESS_CHANNEL, progress);
     };
     let result: PathActionResult;
+    const fastDelete = settingsStore?.get().cleanup.fastPermanentDelete === true;
+    let method: "walk" | "recursive" = "walk";
+    const deleteStartedAt = Date.now();
     try {
       const stat = await FS.lstat(resolved);
       if (stat.isDirectory() && !stat.isSymbolicLink()) {
+        method = fastDelete ? "recursive" : "walk";
         await runPermanentDeleteWorker(resolved, {
           workerPath: permanentDeleteWorkerEntry,
+          method,
           onProgress,
         });
         result = { ok: true, message: "Permanently deleted." };
@@ -2072,7 +2077,7 @@ void (async () => {
     }
     writeCrashLog(
       "delete",
-      `${result.ok ? "ok" : result.requiresElevation ? "needs-admin" : "fail"} path=${resolved} ${result.message}`,
+      `${result.ok ? "ok" : result.requiresElevation ? "needs-admin" : "fail"} method=${method} elapsedMs=${Date.now() - deleteStartedAt} path=${resolved} ${result.message}`,
     );
     return result;
   });

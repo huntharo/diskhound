@@ -282,6 +282,11 @@ export function SettingsView() {
           desc="Show a confirmation dialog before the per-row Delete (Del) button on the Largest Files tab removes a file. Bulk operations always confirm regardless."
           value={settings.cleanup.confirmPermanentDelete}
           onChange={(v) => void save({ ...settings, cleanup: { ...settings.cleanup, confirmPermanentDelete: v } })} />
+        <ToggleRow
+          label="Faster folder deletion (experimental)"
+          desc="Try faster permanent folder removal. Shows the current tree and elapsed time instead of individual file progress. Applies to the next deletion; Windows admin retries use the existing method."
+          value={settings.cleanup.fastPermanentDelete}
+          onChange={(v) => void save({ ...settings, cleanup: { ...settings.cleanup, fastPermanentDelete: v } })} />
       </div>
 
       {/* ── Storage ── */}
