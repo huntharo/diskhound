@@ -119,15 +119,16 @@ describe("writeFileAtomic", () => {
 
   it("does not hold one file's save behind another's", async () => {
     const other = Path.join(dir, "other.json");
-    const firstWrite = gate();
-    vi.mocked(FSP.writeFile).mockImplementationOnce(async (...args) => {
-      await firstWrite.promise;
+    const slowWrite = gate();
+    // By path: each save runs its mkdir first, so either may write first.
+    vi.mocked(FSP.writeFile).mockImplementation(async (...args) => {
+      if (args[0] === `${target}.tmp`) await slowWrite.promise;
       return real.writeFile(...args);
     });
 
     const slow = writeFileAtomic(target, "slow");
     await writeFileAtomic(other, "fast");
-    firstWrite.open();
+    slowWrite.open();
     await slow;
 
     expect(await real.readFile(other, "utf8")).toBe("fast");
