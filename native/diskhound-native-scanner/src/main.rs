@@ -60,6 +60,7 @@ const SNAPSHOT_INTERVAL_MS: u128 = 200;
 /// the Folders tab. Trimmed to this cap after every insert that
 /// overflows the soft 2x bound.
 const FOLDER_TREE_FILES_PER_PARENT: usize = 200;
+#[cfg(windows)]
 const WINDOWS_TO_UNIX_EPOCH_TICKS: u64 = 116_444_736_000_000_000;
 
 /// Folder-tree file rows: biggest first, ties by name, so the rows kept
@@ -325,6 +326,7 @@ impl IndexWriter {
     /// methods below, so N emit threads can feed the one gzip writer
     /// concurrently. None if the writer thread has already been
     /// shut down via `finish`.
+    #[cfg(windows)]
     fn tx_clone(&self) -> Option<crossbeam_channel::Sender<IndexWriteMsg>> {
         self.tx.clone()
     }
@@ -527,11 +529,13 @@ enum ScanPhase {
     /// Pre-work: parsing args, loading baseline.
     Starting,
     /// MFT read / path build (MFT fast path only).
+    #[cfg(windows)]
     ReadingMetadata,
     /// Actively walking or emitting records into scan state.
     Indexing,
     /// Post-walk work: inherited-file streaming, final gzip flush,
     /// `Done` snapshot about to fire.
+    #[cfg(windows)]
     Finalizing,
     Complete,
 }
@@ -579,6 +583,7 @@ struct ScanState {
     /// baseline during the walk. After the walk completes we do one more
     /// streaming pass over the baseline to copy file records under these
     /// prefixes into the new index + update top-N file and extension stats.
+    #[cfg(windows)]
     inherited_prefixes: Vec<String>,
     /// Diagnostic counters — emitted on stderr so we can confirm the fast
     /// path actually fires in production builds.
@@ -642,6 +647,7 @@ impl ScanState {
             last_emit_elapsed_ms: 0,
             index_writer,
             baseline,
+            #[cfg(windows)]
             inherited_prefixes: Vec::new(),
             inherited_dirs: 0,
             inherited_files: 0,
@@ -1211,8 +1217,8 @@ fn register_signal_handler() {
         // so we use a background thread that blocks on the signal.
         // This is a lightweight alternative to adding the ctrlc crate.
         unsafe {
-            libc::signal(libc::SIGTERM, sigterm_handler as libc::sighandler_t);
-            libc::signal(libc::SIGINT, sigterm_handler as libc::sighandler_t);
+            libc::signal(libc::SIGTERM, sigterm_handler as *const () as libc::sighandler_t);
+            libc::signal(libc::SIGINT, sigterm_handler as *const () as libc::sighandler_t);
         }
     }
 }
