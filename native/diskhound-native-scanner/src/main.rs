@@ -864,6 +864,53 @@ impl Baseline {
             .cloned()
             .collect()
     }
+
+    /// The subtree at `dir_path` if its mtime still matches the baseline,
+    /// with the baseline's totals for it and for every folder under it.
+    /// Workers call this on their own threads, so the parallel walker's
+    /// main thread never needs the baseline to book the result.
+    fn inherit(&self, dir_path: &str, current_mtime: u64) -> Option<InheritedSubtree> {
+        let baseline_mtime = *self.dir_mtimes.get(dir_path)?;
+        if current_mtime.abs_diff(baseline_mtime) >= 2 {
+            return None;
+        }
+        let totals = |dir: &str| {
+            (
+                self.dir_total_sizes.get(dir).copied().unwrap_or(0),
+                self.dir_file_counts.get(dir).copied().unwrap_or(0),
+            )
+        };
+        let (bytes, file_count) = totals(dir_path);
+        let dirs = self
+            .subtree_dirs(dir_path)
+            .into_iter()
+            .filter_map(|path| {
+                let mtime = *self.dir_mtimes.get(&path)?;
+                let (size, file_count) = totals(&path);
+                Some(InheritedDir { path, mtime, size, file_count })
+            })
+            .collect();
+        Some(InheritedSubtree { bytes, file_count, dirs })
+    }
+}
+
+/// A folder whose mtime matched the baseline, so the walk takes its
+/// totals from the baseline instead of listing it.
+#[cfg_attr(not(windows), allow(dead_code))]
+struct InheritedSubtree {
+    bytes: u64,
+    file_count: u64,
+    /// Every folder under it, not the folder itself.
+    dirs: Vec<InheritedDir>,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+struct InheritedDir {
+    path: String,
+    mtime: u64,
+    /// Recursive bytes and file count, from the baseline.
+    size: u64,
+    file_count: u64,
 }
 
 /// Second pass: stream the baseline NDJSON and copy file records (not
@@ -2479,93 +2526,20 @@ fn scan_windows_sequential(
         // during the actual file-record stream. Accept that snapshots
         // emitted during the walk are slightly incomplete for those —
         // they'll be corrected before the final `done` snapshot.
-        let inheritance_plan = state.baseline.as_ref().and_then(|baseline| {
-            let baseline_mtime = *baseline.dir_mtimes.get(&directory_path_str)?;
-            if current_mtime.abs_diff(baseline_mtime) >= 2 {
-                return None;
-            }
-            let inherited_file_count = baseline
-                .dir_file_counts
-                .get(&directory_path_str)
-                .copied()
-                .unwrap_or(0);
-            let inherited_bytes = baseline
-                .dir_total_sizes
-                .get(&directory_path_str)
-                .copied()
-                .unwrap_or(0);
-            let subtree_dir_entries: Vec<(String, u64)> = baseline
-                .subtree_dirs(&directory_path_str)
-                .into_iter()
-                .filter_map(|sub| baseline.dir_mtimes.get(&sub).map(|m| (sub, *m)))
-                .collect();
-            Some((inherited_file_count, inherited_bytes, subtree_dir_entries))
-        });
+        let inherited = state
+            .baseline
+            .as_ref()
+            .and_then(|baseline| baseline.inherit(&directory_path_str, current_mtime));
 
-        if let Some((inherited_count, inherited_bytes, subtree_dir_entries)) = inheritance_plan {
+        if let Some(subtree) = inherited {
             state.inherited_dirs += 1;
-            state.inherited_files += inherited_count;
-            state.files_visited += inherited_count;
-            state.bytes_seen += inherited_bytes;
             // Credit the inherited subtree to directories_visited so the
             // "N dirs" status-bar stat reflects the full tree we scanned
             // (not just the handful of dirs we re-walked on a warm cache).
             // Without this, a fully-inherited scan of C:\ reported "1 dir"
             // despite covering millions of files under thousands of dirs.
-            state.directories_visited += subtree_dir_entries.len() as u64;
-            state.inherited_prefixes.push(directory_path_str.clone());
-
-            // Roll up directory totals using the precomputed cumulative
-            // size so the hottest-directories panel is accurate during
-            // the walk, even though individual file records haven't
-            // streamed in yet.
-            rollup_directory_bytes(
-                &state.root_path_string,
-                &directory_path_str,
-                inherited_bytes,
-                inherited_count,
-                &mut state.directory_totals,
-            );
-
-            // Re-emit dir entries from the subtree so the new index remains
-            // a valid baseline for the next scan.
-            if let Some(writer) = state.index_writer.as_mut() {
-                let _ = writer.write_dir_entry(&directory_path_str, current_mtime);
-                for (sub, m) in &subtree_dir_entries {
-                    let _ = writer.write_dir_entry(sub, *m);
-                }
-            }
-
-            // Populate directory_totals with each inherited subtree dir
-            // so the folder-tree sidecar's `d` (subdir) arrays are
-            // populated per parent. Without this, the inherited dirs
-            // only exist in the index but not in directory_totals, and
-            // the sidecar builder emits `"d":[]` for every parent —
-            // user-visible symptom: Folders tab shows 21 files at C:\
-            // with no directories (no C:\Users, C:\Windows, etc.),
-            // despite the tree having 938k+ entries.
-            //
-            // We reach into the baseline's per-dir aggregates for
-            // accurate size + file_count per subdir. Same memory was
-            // already paid for the inheritance check above, so this is
-            // cheap.
-            if let Some(baseline) = state.baseline.as_ref() {
-                let root_path_snapshot = state.root_path_string.clone();
-                for (sub, _mtime) in &subtree_dir_entries {
-                    let sub_size = baseline.dir_total_sizes.get(sub).copied().unwrap_or(0);
-                    let sub_fc = baseline.dir_file_counts.get(sub).copied().unwrap_or(0);
-                    state
-                        .directory_totals
-                        .entry(sub.clone())
-                        .or_insert_with(|| DirectoryHotspot {
-                            path: sub.clone(),
-                            size: sub_size,
-                            file_count: sub_fc,
-                            depth: directory_depth(&root_path_snapshot, sub),
-                        });
-                }
-            }
-
+            state.directories_visited += subtree.dirs.len() as u64;
+            book_inherited_subtree(state, directory_path_str, current_mtime, subtree);
             maybe_emit_progress(state)?;
             continue;
         }
@@ -2780,9 +2754,7 @@ enum ParallelWorkerMessage {
     Inheritance {
         dir_path: String,
         current_mtime: u64,
-        inherited_count: u64,
-        inherited_bytes: u64,
-        subtree_dir_entries: Vec<(String, u64)>,
+        subtree: InheritedSubtree,
     },
 }
 
@@ -2905,79 +2877,18 @@ fn try_scan_windows_parallel(root_path: &Path, state: &mut ScanState) -> Paralle
 
         // Inheritance check on main (mirrors the per-worker logic).
         let inheritance = if baseline_can_inherit {
-            baseline_opt.as_ref().and_then(|baseline| {
-                let baseline_mtime = *baseline.dir_mtimes.get(&child_path_str)?;
-                if current_mtime.abs_diff(baseline_mtime) >= 2 {
-                    return None;
-                }
-                let inherited_count = baseline
-                    .dir_file_counts
-                    .get(&child_path_str)
-                    .copied()
-                    .unwrap_or(0);
-                let inherited_bytes = baseline
-                    .dir_total_sizes
-                    .get(&child_path_str)
-                    .copied()
-                    .unwrap_or(0);
-                let subtree_dir_entries: Vec<(String, u64)> = baseline
-                    .subtree_dirs(&child_path_str)
-                    .into_iter()
-                    .filter_map(|sub| baseline.dir_mtimes.get(&sub).map(|m| (sub, *m)))
-                    .collect();
-                Some((inherited_count, inherited_bytes, subtree_dir_entries))
-            })
+            baseline_opt
+                .as_ref()
+                .and_then(|baseline| baseline.inherit(&child_path_str, current_mtime))
         } else {
             None
         };
 
-        if let Some((inherited_count, inherited_bytes, subtree_dir_entries)) = inheritance {
+        if let Some(subtree) = inheritance {
             // Apply inheritance directly to state — same effect as the
             // main loop's Inheritance message handler.
-            state.inherited_dirs += 1 + subtree_dir_entries.len() as u64;
-            state.inherited_files += inherited_count;
-            state.bytes_seen += inherited_bytes;
-            state.files_visited += inherited_count;
-            rollup_directory_bytes(
-                &state.root_path_string,
-                &child_path_str,
-                inherited_bytes,
-                inherited_count,
-                &mut state.directory_totals,
-            );
-            if let Some(writer) = state.index_writer.as_mut() {
-                let _ = writer.write_dir_entry(&child_path_str, current_mtime);
-                for (sub_path, sub_mtime) in &subtree_dir_entries {
-                    let _ = writer.write_dir_entry(sub_path, *sub_mtime);
-                }
-            }
-            // Mirror of the sequential path fix: populate
-            // directory_totals for each inherited subtree dir so the
-            // folder-tree sidecar's `d` arrays are complete. Without
-            // this, inherited dirs only live in the index and the
-            // Folders tab shows empty subtrees.
-            if let Some(baseline) = baseline_opt.as_ref() {
-                let root_path_snapshot = state.root_path_string.clone();
-                for (sub, _mtime) in &subtree_dir_entries {
-                    let sub_size = baseline.dir_total_sizes.get(sub).copied().unwrap_or(0);
-                    let sub_fc = baseline.dir_file_counts.get(sub).copied().unwrap_or(0);
-                    state
-                        .directory_totals
-                        .entry(sub.clone())
-                        .or_insert_with(|| DirectoryHotspot {
-                            path: sub.clone(),
-                            size: sub_size,
-                            file_count: sub_fc,
-                            depth: directory_depth(&root_path_snapshot, sub),
-                        });
-                }
-            }
-            // Record the subtree prefix so the post-walk streamer copies
-            // its file records out of the baseline index into the new
-            // index. Without this the inherited file content would be
-            // correctly counted but absent from the index, breaking the
-            // next rescan's baseline.
-            state.inherited_prefixes.push(child_path_str.clone());
+            state.inherited_dirs += 1 + subtree.dirs.len() as u64;
+            book_inherited_subtree(state, child_path_str, current_mtime, subtree);
             preseed_inheritance_hits += 1;
             continue;
         }
@@ -3209,36 +3120,14 @@ fn handle_parallel_message(
         ParallelWorkerMessage::Inheritance {
             dir_path,
             current_mtime,
-            inherited_count,
-            inherited_bytes,
-            subtree_dir_entries,
+            subtree,
         } => {
-            // Counters — authoritative on main. Matches the sequential
-            // path's inheritance block exactly.
+            // Counters — authoritative on main. The worker never sent a
+            // DirEntered for this folder, so count it here along with
+            // the folders under it.
             state.inherited_dirs += 1;
-            state.inherited_files += inherited_count;
-            state.files_visited += inherited_count;
-            state.bytes_seen += inherited_bytes;
-            state.directories_visited += 1 + subtree_dir_entries.len() as u64;
-            state.inherited_prefixes.push(dir_path.clone());
-
-            // Rollup the subtree's bytes onto the directory_totals map
-            // so hottest_directories surfaces it correctly before the
-            // post-walk streaming pass fills in file records.
-            rollup_directory_bytes(
-                &state.root_path_string,
-                &dir_path,
-                inherited_bytes,
-                inherited_count,
-                &mut state.directory_totals,
-            );
-
-            if let Some(writer) = state.index_writer.as_mut() {
-                let _ = writer.write_dir_entry(&dir_path, current_mtime);
-                for (sub, m) in &subtree_dir_entries {
-                    let _ = writer.write_dir_entry(sub, *m);
-                }
-            }
+            state.directories_visited += 1 + subtree.dirs.len() as u64;
+            book_inherited_subtree(state, dir_path, current_mtime, subtree);
             Ok(())
         }
     }
@@ -3273,36 +3162,16 @@ fn parallel_worker_loop(
 
         // Phase-1 inheritance check — same shape as the sequential
         // scanner. Baseline is Arc, HashMap::get is lock-free.
-        let inheritance = shared.baseline.as_ref().and_then(|baseline| {
-            let baseline_mtime = *baseline.dir_mtimes.get(&directory_path_str)?;
-            if current_mtime.abs_diff(baseline_mtime) >= 2 {
-                return None;
-            }
-            let inherited_count = baseline
-                .dir_file_counts
-                .get(&directory_path_str)
-                .copied()
-                .unwrap_or(0);
-            let inherited_bytes = baseline
-                .dir_total_sizes
-                .get(&directory_path_str)
-                .copied()
-                .unwrap_or(0);
-            let subtree_dir_entries: Vec<(String, u64)> = baseline
-                .subtree_dirs(&directory_path_str)
-                .into_iter()
-                .filter_map(|sub| baseline.dir_mtimes.get(&sub).map(|m| (sub, *m)))
-                .collect();
-            Some((inherited_count, inherited_bytes, subtree_dir_entries))
-        });
+        let inheritance = shared
+            .baseline
+            .as_ref()
+            .and_then(|baseline| baseline.inherit(&directory_path_str, current_mtime));
 
-        if let Some((inherited_count, inherited_bytes, subtree_dir_entries)) = inheritance {
+        if let Some(subtree) = inheritance {
             let _ = tx.send(ParallelWorkerMessage::Inheritance {
                 dir_path: directory_path_str,
                 current_mtime,
-                inherited_count,
-                inherited_bytes,
-                subtree_dir_entries,
+                subtree,
             });
             shared.queue.mark_done();
             continue;
@@ -3420,6 +3289,67 @@ fn enumerate_windows_directory_parallel(
     }
 
     Ok(())
+}
+
+/// Books a subtree inherited from the baseline without walking it. Every
+/// walker that inherits calls this, so a folder gets the same rows
+/// whichever walker or worker thread inherited it. Each caller counts the
+/// folder itself in `inherited_dirs` / `directories_visited`.
+///
+/// Its file records are copied from the baseline after the walk
+/// (`stream_inherited_files_into`), which fills `largest_files`,
+/// `extension_totals` and `folder_tree_files`. Everything else happens
+/// here from the baseline's per-folder totals.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn book_inherited_subtree(
+    state: &mut ScanState,
+    dir_path: String,
+    current_mtime: u64,
+    subtree: InheritedSubtree,
+) {
+    state.inherited_files += subtree.file_count;
+    state.files_visited += subtree.file_count;
+    state.bytes_seen += subtree.bytes;
+
+    // The folder and its ancestors get the subtree's totals, so the
+    // hottest-folders ranking is right before the files stream in.
+    rollup_directory_bytes(
+        &state.root_path_string,
+        &dir_path,
+        subtree.bytes,
+        subtree.file_count,
+        &mut state.directory_totals,
+    );
+
+    // Dir entries for the whole subtree, so the new index is a complete
+    // baseline for the next scan.
+    if let Some(writer) = state.index_writer.as_mut() {
+        let _ = writer.write_dir_entry(&dir_path, current_mtime);
+        for dir in &subtree.dirs {
+            let _ = writer.write_dir_entry(&dir.path, dir.mtime);
+        }
+    }
+
+    // A row for every folder under it. The folder-tree sidecar builds each
+    // parent's `d` (subfolder) array from directory_totals, so without
+    // these the Folders tab showed the inherited folder's files but none
+    // of its subfolders: 21 files at C:\ and no C:\Users or C:\Windows,
+    // on a tree of 938k+ entries.
+    for dir in subtree.dirs {
+        work::step();
+        let depth = directory_depth(&state.root_path_string, &dir.path);
+        state
+            .directory_totals
+            .entry(dir.path.clone())
+            .or_insert(DirectoryHotspot {
+                path: dir.path,
+                size: dir.size,
+                file_count: dir.file_count,
+                depth,
+            });
+    }
+
+    state.inherited_prefixes.push(dir_path);
 }
 
 /// Add `bytes` and `file_count` to a directory and each of its ancestors
@@ -4756,6 +4686,7 @@ mod index_line_parse_tests {
 #[cfg(test)]
 mod scaling_tests {
     use super::*;
+    use crate::test_support::{folder_rows, hottest_rows, TempTree};
     use std::path::MAIN_SEPARATOR as SEP;
 
     /// From N to 8N (and L or K to 8L or 8K), linear work grows 8×. Allow
@@ -4950,7 +4881,7 @@ mod scaling_tests {
         dirs.sort();
         Baseline {
             baseline_path: PathBuf::new(),
-            dir_mtimes: HashMap::new(),
+            dir_mtimes: dirs.iter().map(|dir| (dir.clone(), 0)).collect(),
             dir_file_counts: HashMap::new(),
             dir_total_sizes: HashMap::new(),
             dirs,
@@ -4994,6 +4925,74 @@ mod scaling_tests {
         assert_eq!(baseline.subtree_dirs(&a), vec![format!("{a}{SEP}x"), format!("{a}{SEP}x{SEP}y")]);
         assert_eq!(baseline.subtree_dirs(&root()).len(), 6);
         assert_eq!(baseline.subtree_dirs(&format!("{a}{SEP}x{SEP}y")), Vec::<String>::new());
+    }
+
+    fn inherit_groups(groups: usize) -> (u64, ScanState) {
+        let baseline = baseline_with_groups(groups);
+        let mut state = state(10);
+        work::take();
+        for g in 0..groups {
+            let subtree = baseline.inherit(&group(g), 0).unwrap();
+            book_inherited_subtree(&mut state, group(g), 0, subtree);
+        }
+        (work::take(), state)
+    }
+
+    #[test]
+    fn inheriting_a_folder_is_log_d_plus_subtree() {
+        let (small, _) = inherit_groups(100);
+        let (large, state) = inherit_groups(800);
+        // Per folder: the subtree_dirs search, 2 rollup rows, 10 new rows.
+        assert_scales("inherit", small, large, 800 * 50);
+        assert_eq!(state.directory_totals.len(), 1 + 800 * 11);
+    }
+
+    /// The index a walk of files 0..n writes: every folder (mtime 7),
+    /// then every file.
+    fn baseline_for(tree: &TempTree, files: usize) -> Baseline {
+        let path = tree.path("baseline.ndjson.gz");
+        let mut writer = IndexWriter::create(&path, None, root()).unwrap();
+        let mut dirs = vec![root()];
+        dirs.extend((0..files.div_ceil(100)).map(group));
+        dirs.extend((0..files.div_ceil(10)).map(leaf));
+        for dir in &dirs {
+            writer.write_dir_entry(dir, 7).unwrap();
+        }
+        for f in (0..files).map(file) {
+            writer.write_entry(&f.path, f.size, 0, false).unwrap();
+        }
+        writer.finish().unwrap();
+        Baseline::load_metadata(&path, &Arc::new(IoStats::default()), |_| {}).unwrap()
+    }
+
+    #[test]
+    fn inherited_folders_get_the_rows_a_walk_gives_them() {
+        // Two groups of ten leaf folders, ten files each.
+        const FILES: usize = 200;
+        let tree = TempTree::new("inherit-rows");
+        let baseline = baseline_for(&tree, FILES);
+        let (_, walked) = walk(FILES, 100);
+
+        // One group inherited while the rest is walked, as a worker thread
+        // or the preseed does, and an unchanged root, as the sequential
+        // walker does.
+        for inherited in [group(0), root()] {
+            let mut state = state(100);
+            let subtree = baseline.inherit(&inherited, 8).unwrap();
+            book_inherited_subtree(&mut state, inherited.clone(), 8, subtree);
+            let under = format!("{inherited}{SEP}");
+            for f in (0..FILES).map(file).filter(|f| !f.path.starts_with(&under)) {
+                record_file_with_link_flag(&mut state, f, false).unwrap();
+            }
+            finalize_hottest_directories(&mut state);
+
+            assert_eq!(folder_rows(&state), folder_rows(&walked), "inheriting {inherited}");
+            assert_eq!(hottest_rows(&state), hottest_rows(&walked), "inheriting {inherited}");
+            assert_eq!(state.files_visited, walked.files_visited);
+            assert_eq!(state.bytes_seen, walked.bytes_seen);
+            assert_eq!(state.inherited_prefixes, vec![inherited]);
+        }
+        assert!(baseline.inherit(&group(0), 9).is_none(), "2 ms off is a change");
     }
 
     /// Baseline of `files` files with half the leaf folders inherited:
@@ -5505,6 +5504,7 @@ mod windows_visit_once_tests {
         assert_eq!(state.inherited_dirs, 1, "the root is inherited whole");
         assert_walked_once(&state, &index, 4, 4);
         assert_eq!(assert_listed_once(&index).1, first_files);
+        assert_eq!(folder_rows(&state), folder_rows(&first));
         assert_eq!(state.io.readdir_calls(), 0);
         expect_io_budget(
             "native-windows/unchanged-root",
@@ -5516,6 +5516,63 @@ mod windows_visit_once_tests {
                 Some(&first_index),
             ),
         );
+    }
+
+    #[test]
+    fn parallel_rescan_keeps_the_folders_under_inherited_ones() {
+        let tree = TempTree::new("win-parallel-inherit");
+        tree.write("root/a.txt", 1024);
+        tree.write("root/x/one.txt", 2048);
+        tree.write("root/x/inner/two.txt", 4096);
+        tree.write("root/y/three.txt", 8192);
+        tree.write("root/y/z/four.txt", 16384);
+        tree.write("root/y/z/deep/five.txt", 32768);
+        tree.write("root/y/z/deep/deeper/six.txt", 65536);
+        let root = tree.path("root");
+        let first_index = tree.path("first.ndjson.gz");
+        let mut first = test_state(&root, &first_index);
+        let first_lines = walk(&mut first, &root, &first_index);
+
+        // Drop the root and y from the baseline, as if each had changed.
+        // The root is listed on main and y in the preseed; the preseed
+        // inherits x and a worker thread inherits y\z, each with a
+        // subfolder chain under it.
+        let index_path = tree.path("rescan.ndjson.gz");
+        let input = ScanInput {
+            baseline_index: Some(first_index.clone()),
+            ..scan_input(&root, &index_path)
+        };
+        let io = Arc::new(IoStats::default());
+        let mut baseline = Baseline::load_metadata(&first_index, &io, |_| {}).unwrap();
+        for changed in [root.clone(), root.join("y")] {
+            baseline.dir_mtimes.remove(&normalize_path(&changed));
+        }
+        // The walkers take a folder's mtime from its parent's listing.
+        // NTFS keeps that copy in the parent's index and can update it
+        // after the first scan read it, so the first scan's value can be
+        // older than the rescan's (CI saw x walked, not inherited). Take
+        // the mtimes the rescan will see.
+        for unchanged in [root.join("x"), root.join("y").join("z")] {
+            let listed = std::fs::read_dir(unchanged.parent().unwrap())
+                .unwrap()
+                .map(Result::unwrap)
+                .find(|entry| entry.path() == unchanged)
+                .unwrap();
+            // Read from the listing's find data, with no extra stat.
+            let mtime = unix_timestamp_ms(listed.metadata().unwrap().modified().unwrap());
+            baseline.dir_mtimes.insert(normalize_path(&unchanged), mtime);
+        }
+        let mut state = state_for(input, Some(baseline), io);
+        let index = walk(&mut state, &root, &index_path);
+
+        let mut inherited = state.inherited_prefixes.clone();
+        inherited.sort();
+        let x = normalize_path(&root.join("x"));
+        let z = normalize_path(&root.join("y").join("z"));
+        assert_eq!(inherited, vec![x, z]);
+        assert_eq!(folder_rows(&state), folder_rows(&first));
+        assert_eq!(hottest_rows(&state), hottest_rows(&first));
+        assert_eq!(assert_listed_once(&index), assert_listed_once(&first_lines));
     }
 }
 
