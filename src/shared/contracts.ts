@@ -1148,12 +1148,33 @@ export interface DuplicateFileEntry {
   name: string;
   parentPath: string;
   modifiedAt: number;
+  /**
+   * What deleting just this file frees, when the scan knew its storage
+   * is shared: 0 for a hardlinked file (another name keeps the data),
+   * the APFS private bytes for a clone. Absent = the full `size`.
+   */
+  reclaimableBytes?: number;
+  /** Why `reclaimableBytes` is below the size. */
+  sharing?: DuplicateSharing;
 }
+
+/**
+ * `hardlink`: one file with several names (only the first name in the
+ * folder is listed). `clone`: an APFS clone sharing blocks with another
+ * file. Both come from the scan index (`i`, `v`/`k`), not a fresh stat.
+ */
+export type DuplicateSharing = "hardlink" | "clone";
 
 export interface DuplicateGroup {
   hash: string;
   size: number;
   files: DuplicateFileEntry[];
+  /**
+   * Bytes freed by keeping one copy and deleting the rest, with hardlinks
+   * and APFS clones counted at what they really free. Absent on results
+   * from older builds: read it through `duplicateGroupReclaimable`.
+   */
+  reclaimableBytes?: number;
 }
 
 export interface DuplicateAnalysis {
