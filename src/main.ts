@@ -2381,8 +2381,14 @@ void (async () => {
     };
   });
 
-  ipcMain.handle("diskhound:compute-full-scan-diff", async (_event, baselineId: string, currentId: string, limit?: number) => {
-    return await fullDiffLoader.load(baselineId, currentId, limit);
+  ipcMain.handle("diskhound:compute-full-scan-diff", async (
+    _event,
+    baselineId: string,
+    currentId: string,
+    limit?: number,
+    options?: { retryFailed?: boolean },
+  ) => {
+    return await fullDiffLoader.load(baselineId, currentId, limit, options);
   });
 
   // Load a dense file list for the treemap from the persisted full-file index.

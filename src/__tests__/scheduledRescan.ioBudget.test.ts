@@ -458,7 +458,7 @@ describe("full diff after a scan", () => {
 
     expectIoBudget({
       scenario: "full-diff-warm",
-      note: "the latest pair's full diff, warmed after every scan whose totals moved: both indexes sorted into runs spilled to OS.tmpdir() as uncompressed JSONL, ~265 B per file per side (the path twice). 8 runs and 10.6 MB here; 59 runs per side and ~3.7 GB per scan at 7M files, ~15 GB/day at the 6 h default. Plus a ~150 KB full-diff-cache entry",
+      note: "the latest pair's full diff, warmed after every scan whose totals moved: both indexes sorted into runs spilled to OS.tmpdir() as uncompressed JSONL, ~265 B per file per side (the path twice). 8 runs and 10.6 MB here; 59 runs per side and ~3.7 GB per scan at 7M files, ~15 GB/day at the 6 h default. Plus a ~150 KB full-diff-cache entry, and 2 stats for the failed-diff check",
       io,
     });
     expect(result?.totalChanges).toBeGreaterThan(0);
@@ -475,10 +475,43 @@ describe("full diff after a scan", () => {
 
     expectIoBudget({
       scenario: "full-diff-retry-after-failure",
-      note: "asking again for a pair whose diff failed in the worker and inline: both spill again, 2 × 10.6 MB here and ~7.4 GB at 7M files per retry",
+      note: "asking again for a pair whose diff failed in the worker and inline: 2 stats and 0 writes, since the failure is remembered against both indexes' size and mtime. Was both spills again, 2 × 10.6 MB here and ~7.4 GB at 7M files per retry",
       io,
     });
     expect(result).toBeNull();
     expect(FS.readdirSync(tmpDir)).toEqual([]);
+  });
+
+  it("tries a failed diff again when an index changes or the user asks", async () => {
+    const { baselineId, currentId } = await seedPair();
+    let attempts = 0;
+    let fail = true;
+    const diffs = createFullDiffLoader({
+      loadSnapshot: loadHistoricalSnapshot,
+      runWorker: async (input) => {
+        attempts += 1;
+        if (fail) throw new Error("worker out of memory");
+        return computeFullDiffFromIndexFiles({ ...input, sortChunkRecords: SORT_CHUNK });
+      },
+      computeInline: async () => {
+        throw new Error("main thread out of memory");
+      },
+      log: () => {},
+    });
+
+    expect(await diffs.load(baselineId, currentId, 1000)).toBeNull();
+    expect(await diffs.load(baselineId, currentId, 1000)).toBeNull();
+    expect(attempts).toBe(1);
+    // The Retry button: the user asked, so it runs again.
+    expect(await diffs.load(baselineId, currentId, 1000, { retryFailed: true })).toBeNull();
+    expect(attempts).toBe(2);
+
+    // The current index is rewritten, say by a scan that was still
+    // finishing: the pair is worth another try.
+    fail = false;
+    writeSyntheticIndex(indexFilePath(currentId), syntheticTree(ROOT, FILES, 3));
+    FS.utimesSync(indexFilePath(currentId), new Date(now + HOUR), new Date(now + HOUR));
+    expect((await diffs.load(baselineId, currentId, 1000))?.totalChanges).toBeGreaterThan(0);
+    expect(attempts).toBe(3);
   });
 });
