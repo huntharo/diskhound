@@ -389,6 +389,8 @@ export interface RecentScan {
 }
 
 export interface GeneralSettings {
+  /** Omitted = decimal on macOS, binary elsewhere. */
+  sizeUnits?: "decimal" | "binary";
   minimizeToTray: boolean;
   startMinimized: boolean;
   launchOnStartup: boolean;
@@ -535,7 +537,12 @@ export interface StorageStats {
 export interface DiskSpaceInfo {
   drive: string;
   totalBytes: number;
+  /** Raw filesystem free space, excluding purgeable bytes; used for change history. */
   freeBytes: number;
+  /** macOS Finder Available. Absent when Foundation cannot provide it. */
+  availableBytes?: number;
+  /** Part of Available that macOS can reclaim, from the same capacity sample. */
+  purgeableBytes?: number;
   usedBytes: number;
   usedPercent: number;
   timestamp: number;
@@ -1721,6 +1728,8 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
 
   return {
     general: {
+      ...(merged.general.sizeUnits === "decimal" || merged.general.sizeUnits === "binary"
+        ? { sizeUnits: merged.general.sizeUnits } : {}),
       minimizeToTray,
       startMinimized: minimizeToTray && Boolean(merged.general.startMinimized),
       launchOnStartup: Boolean(merged.general.launchOnStartup),

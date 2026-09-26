@@ -4,7 +4,8 @@ import * as FS from "node:fs/promises";
 import * as Path from "node:path";
 import { promisify } from "node:util";
 
-import type { DiskDelta, DiskSpaceInfo, MonitoringSettings, MonitoringSnapshot } from "./contracts";
+import type { DiskDelta, DiskSpaceInfo, MonitoringSettings, MonitoringSnapshot, StorageAccountingReport } from "./contracts";
+import { getVolumeStorageAccounting } from "./macStorageAccounting";
 
 const execFileAsync = promisify(execFile);
 const BASELINE_FILE = "disk-baselines.json";
@@ -421,7 +422,28 @@ async function getMacDiskSpace(): Promise<DiskSpaceInfo[] | null> {
   // separate from Linux. `-P -k` gives stable POSIX columns:
   //   Filesystem  1024-blocks  Used  Available  Capacity  Mounted on
   const stdout = await runDf(["-P", "-k"]);
-  return stdout === null ? null : parseMacDfOutput(stdout, Date.now());
+  if (stdout === null) return null;
+  return Promise.all(parseMacDfOutput(stdout, Date.now()).map(async (drive) =>
+    withMacAvailableSpace(drive, await getVolumeStorageAccounting(drive.drive)),
+  ));
+}
+
+/** Keep df's raw free/used counters stable for monitoring and old baselines. */
+export function withMacAvailableSpace(
+  drive: DiskSpaceInfo,
+  report: StorageAccountingReport,
+): DiskSpaceInfo {
+  const available = report.availableForImportantUsageBytes;
+  if (report.platform !== "darwin" || report.volumePath !== drive.drive
+    || available === null || !Number.isFinite(available) || available < 0) return drive;
+  const availableBytes = Math.min(drive.totalBytes, available);
+  const purgeable = report.purgeableBytes;
+  return {
+    ...drive,
+    availableBytes,
+    ...(purgeable !== null && Number.isFinite(purgeable) && purgeable >= 0
+      ? { purgeableBytes: Math.min(availableBytes, purgeable) } : {}),
+  };
 }
 
 const DF_TIMEOUT_MS = 10_000;

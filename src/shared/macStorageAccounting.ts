@@ -392,6 +392,8 @@ export interface StorageAccountingDeps {
   run?: CommandRunner;
   now?: () => number;
   exists?: (p: string) => boolean;
+  /** Exact mount from df, including mounts outside /Volumes. */
+  volumePath?: string;
 }
 
 const COMMAND_TIMEOUT_MS = 8_000;
@@ -411,7 +413,7 @@ export async function collectStorageAccounting(
   }
   const run = deps.run ?? defaultRunner;
   const exists = deps.exists ?? FS.existsSync;
-  const volumePath = macVolumeForPath(targetPath);
+  const volumePath = deps.volumePath ?? macVolumeForPath(targetPath);
   const dataPath = macDataVolumeFor(volumePath, exists);
 
   const [tmutil, apfsSnaps, info, apfsList, capacity] = await Promise.all([
@@ -434,7 +436,9 @@ export async function collectStorageAccounting(
   });
 }
 
-const CACHE_TTL_MS = 15_000;
+// Shared by the 10 s drive poll and the Overview card; at most one
+// collection per minute per volume, unless a delete requests fresh data.
+const CACHE_TTL_MS = 60_000;
 /**
  * One delete fans out into several `fresh` requests (the check itself,
  * plus every mounted view reacting to the stale event). A collection
@@ -453,14 +457,25 @@ export function getStorageAccounting(
   targetPath: string,
   opts: { fresh?: boolean } = {},
 ): Promise<StorageAccountingReport> {
-  const key = process.platform === "darwin" ? macVolumeForPath(targetPath) : targetPath;
+  const volumePath = process.platform === "darwin" ? macVolumeForPath(targetPath) : targetPath;
+  return getVolumeStorageAccounting(volumePath, opts);
+}
+
+/** Same cache as the card, but accepts an exact mount discovered by df. `deps` is for tests. */
+export function getVolumeStorageAccounting(
+  volumePath: string,
+  opts: { fresh?: boolean } = {},
+  deps: StorageAccountingDeps = {},
+): Promise<StorageAccountingReport> {
+  const key = volumePath;
+  const now = deps.now ?? Date.now;
   const hit = cache.get(key);
   const maxAge = opts.fresh ? FRESH_REUSE_MS : CACHE_TTL_MS;
-  if (hit && Date.now() - hit.at < maxAge) return hit.report;
-  const report = collectStorageAccounting(targetPath).catch(() =>
-    unsupportedStorageAccountingReport(normalizePlatform(process.platform), key),
+  if (hit && now() - hit.at < maxAge) return hit.report;
+  const report = collectStorageAccounting(volumePath, { ...deps, volumePath }).catch(() =>
+    unsupportedStorageAccountingReport(normalizePlatform(deps.platform ?? process.platform), key),
   );
-  cache.set(key, { at: Date.now(), report });
+  cache.set(key, { at: now(), report });
   return report;
 }
 

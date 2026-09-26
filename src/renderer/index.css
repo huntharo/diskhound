@@ -7165,6 +7165,7 @@ button, input, select, textarea { font: inherit; }
 
 .drive-card-stats {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   font-size: 10.5px;
   color: var(--text-muted);
