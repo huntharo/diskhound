@@ -1,14 +1,26 @@
 {
-  "native-unix/rescan-with-baseline": {
+  "native-linux/rescan-with-baseline": {
     "note": "same tree, --baseline-index and --expected-files given: the walk's cost and 0 baseline passes (was 1 full decompress and parse, only to read the root's file count)",
     "readdir": 4,
-    "stat": 8,
+    "stat": 10,
     "baselinePasses": 0
   },
-  "native-unix/walk": {
-    "note": "4 dirs, 4 files (one a second hardlink), 2 symlinks: 1 read_dir per dir, 1 lstat per dir (its index mtime) and per file, nothing for symlinks",
+  "native-linux/walk": {
+    "note": "4 dirs, 4 files (one a second hardlink), 2 symlinks: 1 listing per dir, 1 fstatat per entry, symlinks included (jwalk took 8: no stat for symlinks)",
     "readdir": 4,
-    "stat": 8,
+    "stat": 10,
+    "baselinePasses": 0
+  },
+  "native-macos/rescan-with-baseline": {
+    "note": "same tree, --baseline-index and --expected-files given: the walk's cost and 0 baseline passes (was 1 full decompress and parse, only to read the root's file count)",
+    "readdir": 4,
+    "stat": 4,
+    "baselinePasses": 0
+  },
+  "native-macos/walk": {
+    "note": "4 dirs, 4 files (one a second hardlink), 2 symlinks: 1 listing per dir, 1 lstat per dir (its index mtime); getattrlistbulk gives files and symlinks theirs. jwalk took 8 stats: it also lstat'ed every file",
+    "readdir": 4,
+    "stat": 4,
     "baselinePasses": 0
   },
   "native-windows/parallel": {
