@@ -520,6 +520,7 @@ export type DevArtifactKind =
   | "dotnet"
   | "compiler-cache"
   | "cmake-build"
+  | "terraform"
   | "diag-logs";
 
 export interface DevArtifact {

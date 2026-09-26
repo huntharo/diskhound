@@ -67,6 +67,8 @@ import { createAffinityEnforcer, upsertAffinityRule } from "./shared/affinityEnf
 import { createSettingsStore, type SettingsStore } from "./shared/settingsStore";
 import { createUpdaterStateStore } from "./shared/updaterStateStore";
 import { createWindowStateStore, type WindowStateStore } from "./shared/windowStateStore";
+import { CRASH_LOG_FILENAME, createCrashLog, formatRendererError } from "./shared/crashLog";
+import { createMemoryDiagnostics, type MemorySample } from "./shared/memoryDiagnostics";
 import {
   easyMove,
   easyMoveBack,
@@ -446,54 +448,30 @@ function createTrayIconImage(): Electron.NativeImage {
 // worker failures. The Settings UI has a "View crash logs" button so
 // users can zip-and-send the file when asking for help.
 //
-// Bounded by simple size-based rotation — once the file exceeds
-// CRASH_LOG_MAX_BYTES, we rename it to crash.log.old so we always keep
-// at least one archived copy without growing unbounded over months.
+// Crash-class tags append synchronously; everything else is buffered
+// for a couple of seconds and flushed at quit. Rotation, buffering and
+// repeat counting live in shared/crashLog.ts.
 
-const CRASH_LOG_FILENAME = "crash.log";
-const CRASH_LOG_ARCHIVE_FILENAME = "crash.log.old";
-const CRASH_LOG_MAX_BYTES = 1 * 1024 * 1024; // 1 MiB
+const crashLog = createCrashLog({
+  path: () => Path.join(app.getPath("userData"), CRASH_LOG_FILENAME),
+});
 
 function crashLogPath(): string {
-  return Path.join(app.getPath("userData"), CRASH_LOG_FILENAME);
-}
-function crashLogArchivePath(): string {
-  return Path.join(app.getPath("userData"), CRASH_LOG_ARCHIVE_FILENAME);
-}
-
-async function maybeRotateCrashLog(): Promise<void> {
-  try {
-    const stat = await FS.stat(crashLogPath());
-    if (stat.size > CRASH_LOG_MAX_BYTES) {
-      await FS.rename(crashLogPath(), crashLogArchivePath()).catch(() => {});
-    }
-  } catch {
-    // missing file is fine — nothing to rotate
-  }
+  return crashLog.path();
 }
 
 /**
  * Append a timestamped line to crash.log. Categorized by `tag` so it's
  * easy to grep for a specific failure class when triaging.
  */
-function writeCrashLog(tag: string, message: string): void {
-  const line = `[${new Date().toISOString()}] [${tag}] ${message}\n`;
-  try {
-    const logPath = crashLogPath();
-    // Use SYNC append for crash-class events so the breadcrumb is on
-    // disk before the dialog appears / process is killed. The earlier
-    // async appendFile silently lost entries when the process crashed
-    // before the microtask flushed — we'd see the "Unexpected error"
-    // dialog with no corresponding crash.log entry, making remote
-    // diagnosis impossible. Sync write is fine; we're already in an
-    // exceptional path where perf doesn't matter.
-    try { FS_SYNC.mkdirSync(Path.dirname(logPath), { recursive: true }); } catch { /* ok */ }
-    FS_SYNC.appendFileSync(logPath, line);
-  } catch { /* best effort — disk full / readonly userData / etc */ }
-  // Rotate opportunistically — cheap check, runs on a microtask so it
-  // doesn't block the writer.
-  void maybeRotateCrashLog();
+function writeCrashLog(tag: string, message: string, options?: { sync?: boolean }): void {
+  crashLog.write(tag, message, options);
 }
+
+// Buffered lines and repeat counts reach disk on every way out:
+// will-quit covers app.quit(), "exit" covers process.exit().
+app.on("will-quit", () => crashLog.flushAll());
+process.on("exit", () => crashLog.flushAll());
 
 // Back-compat alias — older call sites still use writeStartupLog.
 function writeStartupLog(message: string): void {
@@ -538,13 +516,19 @@ process.on("uncaughtException", (err) => {
     ?? (err as { message?: string })?.message
     ?? String(err);
   const code = (err as { code?: string })?.code ?? "";
-  writeCrashLog("main-uncaught", `${code ? `[${code}] ` : ""}${stackOrMsg}`);
-  if (isRoutineFsError(err)) {
+  const routine = isRoutineFsError(err);
+  // A routine error doesn't end in a dialog or a dead process, so its
+  // line can wait for the next buffered flush like any other.
+  writeCrashLog("main-uncaught", `${code ? `[${code}] ` : ""}${stackOrMsg}`, routine ? { sync: false } : undefined);
+  if (routine) {
     // Silent: the user can't do anything about a file that vanished
     // mid-scan. The crash.log entry above is sufficient for us to
     // diagnose if the rate gets out of hand.
     return;
   }
+  // The dialog blocks the main thread, and the user may kill the app
+  // from it. Whatever is buffered goes to disk first.
+  crashLog.flush();
   try {
     dialog.showErrorBox(
       "DiskHound — Unexpected error",
@@ -564,9 +548,8 @@ process.on("unhandledRejection", (reason) => {
  * Called from the periodic diagnostic + on demand (e.g. when a user
  * clicks "Refresh" in the crash-log viewer).
  */
-function describeMemoryUsage(): string {
+function describeMemoryUsage(mem: NodeJS.MemoryUsage = process.memoryUsage()): string {
   const mb = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(0)} MB`;
-  const mem = process.memoryUsage();
   return `rss=${mb(mem.rss)} heapUsed=${mb(mem.heapUsed)} heapTotal=${mb(mem.heapTotal)} external=${mb(mem.external)} arrayBuffers=${mb(mem.arrayBuffers)}`;
 }
 
@@ -2129,6 +2112,8 @@ void (async () => {
   // itself is written by the writeCrashLog() helper declared up top.
 
   ipcMain.handle("diskhound:get-crash-log", async () => {
+    // The viewer should show the lines still buffered in memory too.
+    crashLog.flushAll();
     const path = crashLogPath();
     try {
       const stat = await FS.stat(path);
@@ -2151,18 +2136,20 @@ void (async () => {
   // file browser, highlighting crash.log alongside its rotated
   // crash.log.old sibling.
   ipcMain.on("diskhound:reveal-crash-log", () => {
+    crashLog.flushAll();
     shell.showItemInFolder(crashLogPath());
   });
 
   // Renderer errors get forwarded here via window.onerror / onunhandled-
-  // rejection, so uncaught rendering bugs also land in the same file.
+  // rejection and from failed polls, so rendering bugs also land in the
+  // same file. crashLog counts identical repeats instead of writing
+  // each one, so a poll that fails every tick costs a few lines a day.
   ipcMain.on("diskhound:report-renderer-error", (_event, payload: {
     message: string;
     stack?: string;
     source?: string;
   }) => {
-    const loc = payload.source ? ` @ ${payload.source}` : "";
-    writeCrashLog("renderer", `${payload.message}${loc}\n${payload.stack ?? ""}`);
+    writeCrashLog("renderer", formatRendererError(payload));
   });
 
   let handleUpdateSettingsChanged:
@@ -2923,49 +2910,43 @@ void (async () => {
    * (folder-tree parent count, treemap cache entries, full-diff memory
    * cache size). Useful for "why is DiskHound holding 800 MB?" triage.
    */
-  const describeCacheMemory = (): string => {
+  const sampleCacheMemory = (): MemorySample => {
     const treemapStats = treemapCache.getStats();
-    return [
-      describeMemoryUsage(),
-      `folderTree: ${folderTreeCache.size} trees, ${folderTreeTotalEntries.toLocaleString()} entries`,
-      (() => {
-        const pages = folderTreePages.stats();
-        return `folderTreePages: ${pages.pages} pages, ${pages.nodes.toLocaleString()} nodes, ~${Math.round(pages.heapBytes / 1024 / 1024)} MB`;
-      })(),
-      `treemapCache: ${treemapStats.entries} entries, ${treemapStats.inflight} inflight`,
-      `fullDiffMem: ${fullDiffLoader.memoryEntries()} entries`,
-    ].join(" | ");
+    const pages = folderTreePages.stats();
+    const mem = process.memoryUsage();
+    const fullDiffEntries = fullDiffLoader.memoryEntries();
+    return {
+      rssBytes: mem.rss,
+      heapUsedBytes: mem.heapUsed,
+      caches: [folderTreeCache.size, folderTreeTotalEntries, pages.pages, treemapStats.entries, fullDiffEntries].join("/"),
+      text: [
+        describeMemoryUsage(mem),
+        `folderTree: ${folderTreeCache.size} trees, ${folderTreeTotalEntries.toLocaleString()} entries`,
+        `folderTreePages: ${pages.pages} pages, ${pages.nodes.toLocaleString()} nodes, ~${Math.round(pages.heapBytes / 1024 / 1024)} MB`,
+        `treemapCache: ${treemapStats.entries} entries, ${treemapStats.inflight} inflight`,
+        `fullDiffMem: ${fullDiffEntries} entries`,
+      ].join(" | "),
+    };
   };
+  const describeCacheMemory = (): string => sampleCacheMemory().text;
 
-  // Log a memory snapshot on a cadence that tracks activity:
-  //   - 1 minute while a scan is live (catches the peak mid-walk)
-  //   - 5 minutes when idle (enough to notice slow leaks without
-  //     spamming the log when nothing's happening)
-  // Unref so it doesn't keep the process alive on quit.
-  let memoryDiagIntervalHandle: ReturnType<typeof setInterval> | null = null;
-  let memoryDiagCadence: "scanning" | "idle" = "idle";
-  const startMemoryDiag = (cadence: "scanning" | "idle") => {
-    if (memoryDiagIntervalHandle) clearInterval(memoryDiagIntervalHandle);
-    const ms = cadence === "scanning" ? 60 * 1000 : 5 * 60 * 1000;
-    memoryDiagIntervalHandle = setInterval(() => {
-      const tag = activeScans.size > 0 ? "memory-scanning" : "memory";
-      writeCrashLog(tag, describeCacheMemory());
-    }, ms);
-    memoryDiagIntervalHandle.unref?.();
-    memoryDiagCadence = cadence;
-  };
+  // Sample memory every minute while a scan is live (catches the peak
+  // mid-walk) and every 5 minutes when idle, logging a sample only when
+  // it moved since the last logged one, plus an hourly heartbeat. See
+  // shared/memoryDiagnostics.ts.
+  const memoryDiagnostics = createMemoryDiagnostics({
+    sample: sampleCacheMemory,
+    isScanning: () => activeScans.size > 0,
+    write: writeCrashLog,
+  });
   /**
    * Bump the cadence to 1 min while a scan is active and drop back to
    * 5 min when everything settles. Called from the running/done scan
    * broadcast paths so we cover both manual and scheduled scans.
    */
-  const retuneMemoryDiagCadence = () => {
-    const desired: "scanning" | "idle" = activeScans.size > 0 ? "scanning" : "idle";
-    if (desired !== memoryDiagCadence) startMemoryDiag(desired);
-  };
-  startMemoryDiag("idle");
-  // One snapshot at boot for the "after restart" baseline.
-  writeCrashLog("memory", `boot: ${describeCacheMemory()}`);
+  const retuneMemoryDiagCadence = () => memoryDiagnostics.retune();
+  // Logs one snapshot at boot for the "after restart" baseline.
+  memoryDiagnostics.start();
 
   // Pre-warm the folder tree for the last rehydrated scan so the
   // Folders tab is instant on app launch. Fire-and-forget — the user
@@ -4582,6 +4563,7 @@ void (async () => {
 })().catch((err: unknown) => {
   const error = err as { stack?: string; message?: string };
   writeStartupLog(`whenReady rejected: ${error?.stack ?? error?.message ?? String(err)}`);
+  crashLog.flush();
   try {
     dialog.showErrorBox("DiskHound — Startup failed", String(error?.stack ?? error?.message ?? err));
   } catch { /* noop */ }

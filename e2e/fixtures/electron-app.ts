@@ -284,6 +284,15 @@ async function attachDiagnostics(
   prefix: string,
   testInfo: TestInfo,
 ): Promise<void> {
+  await attachScreenshot(diagnostics, prefix, testInfo);
+  await attachLogs(diagnostics, prefix, testInfo);
+}
+
+async function attachScreenshot(
+  diagnostics: LaunchDiagnostics,
+  prefix: string,
+  testInfo: TestInfo,
+): Promise<void> {
   const { page } = diagnostics;
   if (page && !page.isClosed()) {
     try {
@@ -296,6 +305,14 @@ async function attachDiagnostics(
       // The window can go away between the check and the capture.
     }
   }
+}
+
+/** Complete only after close: the app buffers crash.log lines and flushes them at quit. */
+async function attachLogs(
+  diagnostics: LaunchDiagnostics,
+  prefix: string,
+  testInfo: TestInfo,
+): Promise<void> {
   const crashLog = join(diagnostics.userDataDir, "crash.log");
   if (existsSync(crashLog)) {
     await testInfo.attach(`${prefix}-crash.log`, {
@@ -347,14 +364,18 @@ export const test = base.extend<Fixtures>({
     // throws. The first error is rethrown at the end.
     const errors: unknown[] = [];
     for (const { handle, prefix } of handles) {
-      if (failed) await attachDiagnostics(handle, prefix, testInfo).catch((error) => errors.push(error));
+      if (failed) await attachScreenshot(handle, prefix, testInfo).catch((error) => errors.push(error));
+      let closeFailed = false;
       try {
         await handle.close();
       } catch (error) {
         errors.push(error);
-        // The main output shows what the app did with the quit.
-        if (!failed) await attachDiagnostics(handle, prefix, testInfo).catch(() => {});
+        closeFailed = true;
       }
+      // After close, so crash.log has the lines the app flushed at quit.
+      if (failed) await attachLogs(handle, prefix, testInfo).catch((error) => errors.push(error));
+      // The main output shows what the app did with the quit.
+      else if (closeFailed) await attachLogs(handle, prefix, testInfo).catch(() => {});
     }
     for (const dir of ownedDirs) {
       try {

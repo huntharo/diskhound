@@ -21,6 +21,7 @@ import {
 import { basename, formatBytes, relativeTime } from "../lib/format";
 import { useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { saveLocalPreference } from "../lib/localPreference";
+import { reportPollFailure } from "../lib/pollFailure";
 import { nativeApi } from "../nativeApi";
 import { toast } from "./Toasts";
 import { FileIcon } from "./FileIcon";
@@ -138,7 +139,10 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
   // Schedule info: fetch on mount + refresh every 30s so the "next scan in X"
   // label stays roughly current. Also refresh after scans complete.
   const refreshScheduleInfo = useCallback(async () => {
-    const info = await nativeApi.getScanScheduleInfo();
+    const info = await nativeApi.getScanScheduleInfo().catch((error: unknown) => {
+      reportPollFailure("ChangesView schedule", error);
+      return null;
+    });
     if (info) setScheduleInfo(info);
   }, []);
 
