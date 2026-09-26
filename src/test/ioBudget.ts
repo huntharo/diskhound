@@ -1,7 +1,9 @@
+import type { ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import * as OS from "node:os";
 import * as Path from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import { expect } from "vitest";
 
@@ -37,6 +39,23 @@ import { expect } from "vitest";
  * as `writeFile`. `bytesWritten` adds the data passed to writeFile and
  * appendFile and the bytes a write stream flushed.
  *
+ * ## Counting processes and workers
+ *
+ * A poll that shells out to `df` or PowerShell, or a handler that
+ * streams an index in a worker thread, does its I/O where the fs mock
+ * cannot see it. `measureFsIo(fn, { countProcesses: true })` also
+ * counts `spawn` (every child_process spawn, exec, execFile and fork,
+ * sync or not) and `worker` (every `new Worker`). It needs two more
+ * pass-through mocks in the test file:
+ *
+ *     vi.mock("node:child_process", async (importOriginal) =>
+ *       (await import("../../test/ioBudget")).instrumentChildProcess(await importOriginal()));
+ *     vi.mock("node:worker_threads", async (importOriginal) =>
+ *       (await import("../../test/ioBudget")).instrumentWorkerThreads(await importOriginal()));
+ *
+ * Budgets recorded without `countProcesses` carry no process counts,
+ * and a budget that has them fails a measurement that lacks them.
+ *
  * ## Settling
  *
  * Stores often persist fire-and-forget (`void persist()`). When the
@@ -52,7 +71,9 @@ import { expect } from "vitest";
  * A zero is only a measurement if the counters are live. The first
  * `measureFsIo` in each test file first writes two known files, one
  * through each module, and throws if the counters did not see them.
- * That catches a test file that forgot the `vi.mock` lines.
+ * That catches a test file that forgot the `vi.mock` lines. The first
+ * `countProcesses` measurement likewise spawns a command that does not
+ * exist and starts a one-line worker, and throws unless both counted.
  *
  * ## Budgets
  *
@@ -90,11 +111,18 @@ export const IO_READ_COUNTERS = [
   "open",
 ] as const;
 
+export const IO_PROCESS_COUNTERS = ["spawn", "worker"] as const;
+
 export type IoCounter =
   | (typeof IO_WRITE_COUNTERS)[number]
   | (typeof IO_READ_COUNTERS)[number];
 
-export type FsIo = Record<IoCounter, number> & { bytesWritten: number };
+export type ProcessCounter = (typeof IO_PROCESS_COUNTERS)[number];
+
+/** Process counts are present only when the measurement counted them. */
+export type FsIo = Record<IoCounter, number>
+  & Partial<Record<ProcessCounter, number>>
+  & { bytesWritten: number };
 
 const IO_COUNTERS: readonly IoCounter[] = [...IO_WRITE_COUNTERS, ...IO_READ_COUNTERS];
 
@@ -167,9 +195,10 @@ let openWindows: Window[] = [];
 const inflight = new Map<Promise<unknown>, string>();
 let instrumentationProven = false;
 
-function emptyIo(): FsIo {
+function emptyIo(countProcesses = false): FsIo {
   const io = { bytesWritten: 0 } as FsIo;
   for (const counter of IO_COUNTERS) io[counter] = 0;
+  if (countProcesses) for (const counter of IO_PROCESS_COUNTERS) io[counter] = 0;
   return io;
 }
 
@@ -177,8 +206,10 @@ function windowsFor(target: string): Window[] {
   return openWindows.filter((window) => !window.accepts || window.accepts(target));
 }
 
-function record(counter: IoCounter, bytes: number, target: string): void {
+function record(counter: IoCounter | ProcessCounter, bytes: number, target: string): void {
   for (const { io } of windowsFor(target)) {
+    // A window that is not counting processes has no key for them.
+    if (io[counter] === undefined) continue;
     io[counter] += 1;
     io.bytesWritten += bytes;
   }
@@ -335,6 +366,91 @@ export function instrumentFsPromises<T>(original: T): T {
   return out as T;
 }
 
+const CHILD_PROCESS_FUNCTIONS = [
+  "spawn",
+  "spawnSync",
+  "exec",
+  "execSync",
+  "execFile",
+  "execFileSync",
+  "fork",
+] as const;
+
+/** Tracks a child until it exits, so a window closes after the process it saw. */
+function trackChild(child: ChildProcess, label: string): void {
+  track(
+    new Promise<void>((resolve) => {
+      child.once("exit", () => resolve());
+      child.once("error", () => resolve());
+    }),
+    label,
+  );
+}
+
+function countedSpawn(
+  original: (...args: unknown[]) => unknown,
+  label: string,
+): (...args: unknown[]) => unknown {
+  return function counted(this: unknown, ...args: unknown[]) {
+    const target = describeTarget(args);
+    record("spawn", 0, target);
+    const result = original.apply(this, args);
+    if (result && typeof (result as ChildProcess).once === "function") {
+      trackChild(result as ChildProcess, `${label} ${target}`);
+    } else if (result && typeof (result as Promise<unknown>).then === "function") {
+      // util.promisify(execFile) and friends.
+      track(result as Promise<unknown>, `${label} ${target}`);
+    }
+    return result;
+  };
+}
+
+let instrumentedChildProcess: typeof import("node:child_process") | null = null;
+let instrumentedWorkerThreads: typeof import("node:worker_threads") | null = null;
+
+/** `vi.mock("node:child_process")` factory body. See the module comment. */
+export function instrumentChildProcess<T>(original: T): T {
+  const real = original as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...real };
+  for (const name of CHILD_PROCESS_FUNCTIONS) {
+    const fn = real[name] as ((...args: unknown[]) => unknown) & { [promisify.custom]?: unknown };
+    if (typeof fn !== "function") continue;
+    const wrapped = countedSpawn(fn, `child_process.${name}`) as typeof fn;
+    // promisify(execFile) resolves { stdout, stderr } only through the
+    // original's custom form, which must count too.
+    const custom = fn[promisify.custom];
+    if (typeof custom === "function") {
+      wrapped[promisify.custom] = countedSpawn(
+        custom as (...args: unknown[]) => unknown,
+        `child_process.${name}`,
+      );
+    }
+    out[name] = wrapped;
+  }
+  out.default = out;
+  instrumentedChildProcess = out as unknown as typeof import("node:child_process");
+  return out as T;
+}
+
+/** `vi.mock("node:worker_threads")` factory body. See the module comment. */
+export function instrumentWorkerThreads<T>(original: T): T {
+  const real = original as Record<string, unknown> & { Worker: typeof import("node:worker_threads").Worker };
+  const RealWorker = real.Worker;
+  class CountedWorker extends RealWorker {
+    constructor(...args: ConstructorParameters<typeof RealWorker>) {
+      const target = String(args[0]);
+      record("worker", 0, target);
+      super(...args);
+      // Workers emit "exit" after an "error" too.
+      track(new Promise<void>((resolve) => this.once("exit", () => resolve())), `worker ${target}`);
+    }
+  }
+  const out: Record<string, unknown> = { ...real, Worker: CountedWorker };
+  out.default = out;
+  instrumentedWorkerThreads = out as unknown as typeof import("node:worker_threads");
+  return out as T;
+}
+
 function nextMacrotask(): Promise<void> {
   return new Promise((resolve) => realSetImmediate(resolve));
 }
@@ -407,6 +523,56 @@ export async function expectFsInstrumentationLive(): Promise<void> {
   instrumentationProven = true;
 }
 
+let processInstrumentationProven = false;
+const PROBE_COMMAND = "diskhound-io-probe-no-such-command";
+const PROBE_WORKER_SOURCE = "/* diskhound-io-probe */ void 0";
+
+/**
+ * Spawns a command that does not exist and starts a one-line worker
+ * through the modules the factories returned, and checks both counted.
+ * Runs once per test file, before its first `countProcesses` window.
+ */
+export async function expectProcessInstrumentationLive(): Promise<void> {
+  if (processInstrumentationProven) return;
+  const childProcess = instrumentedChildProcess;
+  const workerThreads = instrumentedWorkerThreads;
+  if (!childProcess || !workerThreads) {
+    throw new Error(
+      `Process counting is not live in this test file: ${childProcess ? "node:worker_threads" : "node:child_process"} `
+        + "was never instrumented.\nAdd the vi.mock(\"node:child_process\") and "
+        + "vi.mock(\"node:worker_threads\") lines from src/test/ioBudget.ts to the top of "
+        + "the test file, and import both modules there so their factories run.",
+    );
+  }
+  const hidden = openWindows;
+  const probe = emptyIo(true);
+  openWindows = [{ io: probe, accepts: (target) => target === PROBE_COMMAND || target === PROBE_WORKER_SOURCE }];
+  try {
+    await new Promise<void>((resolve) => {
+      const child = childProcess.spawn(PROBE_COMMAND, [], { stdio: "ignore" });
+      child.once("error", () => resolve());
+      child.once("exit", () => resolve());
+    });
+    await new Promise<void>((resolve) => {
+      const worker = new workerThreads.Worker(PROBE_WORKER_SOURCE, { eval: true });
+      worker.once("exit", () => resolve());
+    });
+  } finally {
+    openWindows = hidden;
+  }
+  if (probe.spawn !== 1 || probe.worker !== 1) {
+    throw new Error(
+      `Process counting is not live in this test file: one spawn and one worker counted as ${probe.spawn} and ${probe.worker}.`,
+    );
+  }
+  processInstrumentationProven = true;
+}
+
+export interface MeasureOptions {
+  /** Also count child processes and worker threads. See the module comment. */
+  countProcesses?: boolean;
+}
+
 /**
  * Runs `fn` and counts the fs calls it makes, including the ones its
  * fire-and-forget work makes before it settles. Setup is not counted:
@@ -415,10 +581,12 @@ export async function expectFsInstrumentationLive(): Promise<void> {
  */
 export async function measureFsIo<T>(
   fn: () => T | Promise<T>,
+  options: MeasureOptions = {},
 ): Promise<{ result: T; io: FsIo }> {
   await settle();
   await expectFsInstrumentationLive();
-  const window: Window = { io: emptyIo() };
+  if (options.countProcesses) await expectProcessInstrumentationLive();
+  const window: Window = { io: emptyIo(options.countProcesses) };
   openWindows = [...openWindows, window];
   try {
     const result = await fn();
@@ -431,7 +599,10 @@ export async function measureFsIo<T>(
 
 const BUDGETS_PATH = Path.join(Path.dirname(fileURLToPath(import.meta.url)), "io-budgets.json");
 
-type Budget = { note: string } & Record<IoCounter, number> & { observedBytesWritten: number };
+type Budget = { note: string }
+  & Record<IoCounter, number>
+  & Partial<Record<ProcessCounter, number>>
+  & { observedBytesWritten: number };
 type BudgetFile = Record<string, Budget>;
 
 /**
@@ -473,24 +644,33 @@ export function expectIoBudget(params: { scenario: string; note: string; io: FsI
 function toBudget(note: string, io: FsIo): Budget {
   const budget = { note } as Budget;
   for (const counter of IO_COUNTERS) budget[counter] = io[counter];
+  for (const counter of IO_PROCESS_COUNTERS) {
+    if (io[counter] !== undefined) budget[counter] = io[counter];
+  }
   budget.observedBytesWritten = io.bytesWritten;
   return budget;
 }
 
-function counts(budget: Budget): Record<IoCounter, number> {
-  const out = {} as Record<IoCounter, number>;
+/** Process counts appear only when counted, so either side lacking them is a mismatch. */
+function counts(budget: Budget): Partial<Record<IoCounter | ProcessCounter, number>> {
+  const out: Partial<Record<IoCounter | ProcessCounter, number>> = {};
   for (const counter of IO_COUNTERS) out[counter] = budget[counter] ?? 0;
+  for (const counter of IO_PROCESS_COUNTERS) {
+    if (budget[counter] !== undefined) out[counter] = budget[counter];
+  }
   return out;
 }
 
-/** "1 writeFile, 1 mkdir; reads: 2 readFile (~12.3 KB written)" */
+/** "1 writeFile, 1 mkdir; reads: 2 readFile; processes: 1 spawn (~12.3 KB written)" */
 export function describeBudget(budget: Budget): string {
-  const list = (names: readonly IoCounter[]) =>
+  const list = (names: readonly (IoCounter | ProcessCounter)[]) =>
     names.filter((name) => budget[name]).map((name) => `${budget[name]} ${name}`).join(", ");
   const writes = list(IO_WRITE_COUNTERS) || "no writes";
   const reads = list(IO_READ_COUNTERS);
+  const counted = IO_PROCESS_COUNTERS.some((name) => budget[name] !== undefined);
+  const processes = counted ? list(IO_PROCESS_COUNTERS) || "no processes" : "";
   const kb = (budget.observedBytesWritten / 1024).toFixed(1);
-  return `${writes}${reads ? `; reads: ${reads}` : ""} (~${kb} KB written)`;
+  return `${writes}${reads ? `; reads: ${reads}` : ""}${processes ? `; ${processes}` : ""} (~${kb} KB written)`;
 }
 
 /** Each test file runs in its own worker, and each re-record rewrites the whole file. */

@@ -208,6 +208,27 @@
     "open": 0,
     "observedBytesWritten": 485
   },
+  "io-budget-harness-no-processes": {
+    "note": "nothing, with processes counted",
+    "writeFile": 0,
+    "appendFile": 0,
+    "rename": 0,
+    "copyFile": 0,
+    "mkdir": 0,
+    "createWriteStream": 0,
+    "unlink": 0,
+    "readFile": 0,
+    "readdir": 0,
+    "stat": 0,
+    "lstat": 0,
+    "access": 0,
+    "existsSync": 0,
+    "createReadStream": 0,
+    "open": 0,
+    "spawn": 0,
+    "worker": 0,
+    "observedBytesWritten": 0
+  },
   "io-budget-harness-one-write": {
     "note": "one known write",
     "writeFile": 1,
