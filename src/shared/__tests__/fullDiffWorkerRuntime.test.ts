@@ -124,6 +124,58 @@ describe("computeFullDiffFromIndexFiles", () => {
     });
   });
 
+  it.each([
+    ['{"p":"/data/file.bin","s":10}', { p: "/data/file.bin", s: 10 }],
+    ['{"p":"/data/file.bin","s":10,"m":0}', { p: "/data/file.bin", s: 10 }],
+    ['{"p":"/data/file.bin","s":10,"m":1,"v":0,"k":123}', { p: "/data/file.bin", s: 10 }],
+    // Storage-accounting indexes (upstream #40) add identity and clone metadata.
+    ['{"p":"/data/file.bin","s":10,"m":1,"i":"1:42"}', { p: "/data/file.bin", s: 10 }],
+    ['{"p":"/data/file.bin","s":10,"m":1,"k":1}', { p: "/data/file.bin", s: 10 }],
+    ['{"p":"/data/file.bin","s":10,"m":1,"i":"1:42","v":2,"k":1}', { p: "/data/file.bin", s: 10 }],
+    ['{"p":"/data/link.bin","s":10,"m":1,"h":1,"i":"1:42","v":2,"k":1}', null],
+    ['{"p":"/data/link.bin","s":10,"m":1,"h":1}', null],
+    ['{"p":"/data/link.bin","s":10,"h": 1}', null],
+    ['{"p":"/data/link.bin","s":10,"h" :1}', null],
+    ['{"p":"/data/link.bin","s":10,"h":1.0}', null],
+    ['{"p":"/data/link.bin","s":10,"h":1e0}', null],
+    ['{"p":"/data/link.bin","s":10,"h":0,"h":1}', null],
+    ['{"p":"/data/file.bin","s":10,"h":1,"h":0}', { p: "/data/file.bin", s: 10 }],
+    ['{"p":"/data/file.bin","s":10,"s":20}', { p: "/data/file.bin", s: 20 }],
+    ['{"p":"/data/file.bin","s":10,"p":"/data/other.bin"}', { p: "/data/other.bin", s: 10 }],
+    ['{"p":"/data/file.bin","t":"d","s":10,"t":"f"}', { p: "/data/file.bin", s: 10 }],
+    ['{"p":"/data/folder","s":10,"t" : "d"}', null],
+    ['{"p":"/data/file.bin","s":10,"m":-1.5,"extra":{"h":1}}', { p: "/data/file.bin", s: 10 }],
+    ['{"p":"/data/bad.bin","s":10,"m":}', null],
+    ['{"p":"/data/bad.bin","s":10,"m":01}', null],
+    ['{"p":"/data/bad.bin","s":10,"m":1,"v":,"k":2}', null],
+    ['{"p":"/data/bad.bin","s":10,"m":1,"v":0,"k":}', null],
+    ['{"p":"/data/bad.bin","s":10,}', null],
+    ['{"p":"/data/bad.bin","s":10}garbage}', null],
+    ['{"p":"/data/bad.bin","s":10,"unknown":}', null],
+    ['{"p":"/data/bad\t.bin","s":10}', null],
+    ['{"p":"/data/bad\u0000.bin","s":10}', null],
+  ] as const)("preserves JSON validation and filtering for %s", async (line, expected) => {
+    const baselinePath = await writeIndex("validation-baseline", []);
+    const currentPath = await writeIndex("validation-current", [`${line}\n`]);
+    const result = await computeFullDiffFromIndexFiles({
+      baselineId: "validation-baseline",
+      currentId: "validation-current",
+      baselinePath,
+      currentPath,
+      caseSensitive: true,
+    });
+
+    expect(result).toMatchObject({
+      totalChanges: expected ? 1 : 0,
+      totalAdded: expected ? 1 : 0,
+      totalBytesAdded: expected?.s ?? 0,
+      totalBytesRemoved: 0,
+      changes: expected ? [{
+        path: expected.p, kind: "added", size: expected.s, previousSize: 0, deltaBytes: expected.s,
+      }] : [],
+    });
+  });
+
   it("caps the returned changes while preserving totals", async () => {
     const baselinePath = await writeIndex("baseline-limit", []);
     const currentPath = await writeIndex(

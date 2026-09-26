@@ -60,6 +60,12 @@ const ZERO = 0x30;
 const NINE = 0x39;
 /** Longer sizes take JSON.parse, so their rounding stays JSON.parse's. */
 const MAX_FAST_SIZE_DIGITS = 15;
+// Sticky matching validates the entire suffix at the parser's current
+// position without copying it. Unknown fields, duplicate keys and other
+// number/whitespace forms must go through JSON.parse and record filtering.
+const CANONICAL_FILE_SUFFIX = /(?:,"m":(?:0|[1-9][0-9]*))?(?:,"v":(?:0|[1-9][0-9]*),"k":(?:0|[1-9][0-9]*))?(?:,"h":1)?\}$/y;
+const CANONICAL_DIRECTORY_SUFFIX = /,"t":"d","m":(?:0|[1-9][0-9]*)\}$/y;
+const JSON_CONTROL_CHARACTER = /[\u0000-\u001f]/;
 /**
  * The merge is synchronous between these. When the worker fails,
  * main.ts runs the diff on the main process, whose windows would
@@ -111,6 +117,7 @@ function parseCanonicalIndexLine(line: string): FileIndexRecord | null | undefin
   if (!line.startsWith("{\"p\":\"") || line.charCodeAt(line.length - 1) !== CLOSE_BRACE) {
     return undefined;
   }
+  if (JSON_CONTROL_CHARACTER.test(line)) return undefined;
 
   const start = 6;
   const end = line.indexOf("\"", start);
@@ -124,7 +131,10 @@ function parseCanonicalIndexLine(line: string): FileIndexRecord | null | undefin
   }
 
   const rest = end + 1;
-  if (line.startsWith(",\"t\":\"d\"", rest)) return null;
+  if (line.startsWith(",\"t\":\"d\"", rest)) {
+    CANONICAL_DIRECTORY_SUFFIX.lastIndex = rest;
+    return CANONICAL_DIRECTORY_SUFFIX.test(line) ? null : undefined;
+  }
   if (!line.startsWith(",\"s\":", rest)) return undefined;
 
   let at = rest + 5;
@@ -140,11 +150,9 @@ function parseCanonicalIndexLine(line: string): FileIndexRecord | null | undefin
   // JSON has no leading zeros; leave "007" to JSON.parse to reject.
   if (digits > 1 && line.charCodeAt(firstDigit) === ZERO) return undefined;
   if (code !== COMMA && code !== CLOSE_BRACE) return undefined;
-  // The fields after the size are numbers ("m", and "v"/"k" on some
-  // scans). An extra hardlink adds "h":1; anything with "t" is left to
-  // JSON.parse.
-  if (line.indexOf(",\"h\":1,", at) !== -1 || line.endsWith(",\"h\":1}")) return null;
-  if (line.indexOf("\"t\":", at) !== -1) return undefined;
+  CANONICAL_FILE_SUFFIX.lastIndex = at;
+  if (!CANONICAL_FILE_SUFFIX.test(line)) return undefined;
+  if (line.endsWith(",\"h\":1}")) return null;
 
   const path = line.slice(start, end);
   return { p: escaped ? path.replaceAll("\\\\", "\\") : path, s: size };
