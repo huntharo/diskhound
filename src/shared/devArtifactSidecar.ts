@@ -700,6 +700,9 @@ export function carryCloneInfo(next: DevArtifactSidecar, previous: DevArtifactSi
           clonePrivateSize: scale(old.clone.clonePrivateSize),
           cloneInternalSize: scale(old.clone.cloneInternalSize),
           cloneSharedSize: scale(old.clone.cloneSharedSize),
+          ...(old.clone.cloneSharedBlocks !== undefined
+            ? { cloneSharedBlocks: scale(old.clone.cloneSharedBlocks) }
+            : {}),
         },
       };
     }),

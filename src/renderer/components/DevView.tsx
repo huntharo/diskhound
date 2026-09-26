@@ -37,7 +37,7 @@ import {
   type DevGroupBy,
   type DevSortBy,
 } from "../lib/devArtifactViewState";
-import { formatBytes, formatCount, relativeTime } from "../lib/format";
+import { formatBytes, formatBytesRange, formatCount, relativeTime } from "../lib/format";
 import { captureFreeBytes, checkFreedSpace, freedSpaceCheckEnabled } from "../lib/freedSpaceCheck";
 import { dispatchDevArtifactsUpdated, STORAGE_ACCOUNTING_STALE_EVENT } from "../lib/uiEvents";
 import { nativeApi } from "../nativeApi";
@@ -107,17 +107,21 @@ function yieldToUi(): Promise<void> {
   });
 }
 
-function permanentDeleteConfirm(label: string, trees: number, bytes: number, freesBytes: number | null): string {
+function permanentDeleteConfirm(
+  label: string,
+  trees: number,
+  bytes: number,
+  frees: { low: number; high: number } | null,
+): string {
   // APFS clone accounting: say up front when most of the selection is
-  // clone copies, instead of promising the full size. Conservative when
-  // the selection holds both sides of a clone (see summarizeDevSharing),
-  // so the wording doesn't claim the other copy stays.
-  const frees = freesBytes !== null && freesBytes < bytes * 0.9
-    ? `\nFrees ≈ ${formatBytes(freesBytes)} — the rest is APFS clone copies; their blocks come back only when every copy is gone.\n`
+  // clone copies, instead of promising the full size. A range when the
+  // selection may hold every copy of some clones (see summarizeDevSharing).
+  const note = frees !== null && frees.low < bytes * 0.9
+    ? `\nFrees ≈ ${formatBytesRange(frees.low, frees.high)} — the rest is APFS clone copies; their blocks come back only when every copy is gone.\n`
     : "";
   return (
     `${label}\n\n` +
-    `${formatCount(trees)} trees · ${formatBytes(bytes)}\n${frees}\n` +
+    `${formatCount(trees)} trees · ${formatBytes(bytes)}\n${note}\n` +
     `This permanently deletes the trees from disk. It cannot be undone and does not go to the Recycle Bin. Protected folders are skipped.`
   );
 }
@@ -412,6 +416,16 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
   const newestSnapshotAt = devSnapshots.find((s) => s.createdAt !== null)?.createdAt ?? null;
   const showSharedNote = sharingSummary.measuredTrees > 0
     && sharingSummary.sharedBytes >= Math.max(64 * 1024 * 1024, summary.totalBytes * 0.02);
+  // APFS clones count at full size in every tree that holds a copy, so
+  // the trees' sizes add up to more than deleting them frees. Lead with
+  // what comes back once the gap is worth a second number.
+  const cloneAwareTotal = sharingSummary.measuredTrees > 0
+    && summary.totalBytes - sharingSummary.freesBytes >= Math.max(64 * 1024 * 1024, summary.totalBytes * 0.02);
+  const reclaimRange = formatBytesRange(sharingSummary.freesBytes, sharingSummary.freesAtMostBytes);
+  const reclaimIsRange = reclaimRange !== formatBytes(sharingSummary.freesBytes);
+  // Only worth saying when the copies stand for noticeably fewer blocks
+  // (older sidecars report no blocks, and then the two are equal).
+  const showSharedBlocks = sharingSummary.sharedBlocks < sharingSummary.sharedBytes * 0.9;
 
   const kindTotals = useMemo(() => {
     const map = new Map<DevArtifactKind, { size: number; count: number }>();
@@ -485,7 +499,9 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
       label,
       targets.length,
       totalBytes,
-      targetSharing.measuredTrees > 0 ? targetSharing.freesBytes : null,
+      targetSharing.measuredTrees > 0
+        ? { low: targetSharing.freesBytes, high: targetSharing.freesAtMostBytes }
+        : null,
     ));
     if (!ok) return;
     // Did free space actually move? (macOS; see freedSpaceCheck.ts)
@@ -762,8 +778,31 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
       <div className="dev-summary">
         <div className="dev-summary-net">
           <span className="scan-root-chip" title={root}>{rootLabel}</span>
-          <span className="changes-delta-big">{formatBytes(summary.totalBytes)}</span>
-          <span className="changes-delta-label">reclaimable on this scan</span>
+          {cloneAwareTotal ? (
+            <>
+              <span
+                className="changes-delta-big"
+                title={
+                  `Deleting every tree listed frees about ${formatBytes(sharingSummary.freesBytes)}`
+                  + (reclaimIsRange
+                    ? `, up to ${formatBytes(sharingSummary.freesAtMostBytes)} if no copy of their shared APFS clones is left elsewhere`
+                    : "")
+                  + `. Their sizes add up to ${formatBytes(summary.totalBytes)} because every clone copy counts at full size.`
+                  + " A local snapshot holds the space until it expires."
+                }
+              >
+                {reclaimIsRange ? reclaimRange : `≈ ${reclaimRange}`}
+              </span>
+              <span className="changes-delta-label">
+                reclaimable on this scan · {formatBytes(summary.totalBytes)} listed
+              </span>
+            </>
+          ) : (
+            <>
+              <span className="changes-delta-big">{formatBytes(summary.totalBytes)}</span>
+              <span className="changes-delta-label">reclaimable on this scan</span>
+            </>
+          )}
         </div>
         <div className="changes-summary-stats">
           <div className="summary-item">
@@ -795,10 +834,23 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
         <div className="dev-sharing-note" role="note">
           {showSharedNote && (
             <div>
-              <strong>{formatBytes(sharingSummary.sharedBytes)}</strong> of these trees is APFS-cloned with
-              files elsewhere, so deleting a tree frees only its own blocks — about{" "}
-              <strong>{formatBytes(sharingSummary.freesBytes)}</strong> if you deleted everything listed.
-              Rows marked <span className="dev-share-badge">Shared</span> say with what.
+              <strong>{formatBytes(sharingSummary.sharedBytes)}</strong> of these trees is APFS clones sharing
+              blocks with files elsewhere.
+              {showSharedBlocks && (
+                <>
+                  {" "}Each copy counts at full size, but together they hold about{" "}
+                  <strong>{formatBytes(sharingSummary.sharedBlocks)}</strong> of blocks.
+                </>
+              )}
+              {" "}Deleting a tree frees only its own blocks: about{" "}
+              <strong>{formatBytes(sharingSummary.freesBytes)}</strong> if you deleted everything listed
+              {reclaimIsRange && (
+                <>
+                  , up to <strong>{formatBytes(sharingSummary.freesAtMostBytes)}</strong> if no copy is left
+                  elsewhere
+                </>
+              )}
+              . Rows marked <span className="dev-share-badge">Shared</span> say with what.
             </div>
           )}
           {devSnapshots.length > 0 && (

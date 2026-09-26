@@ -638,6 +638,13 @@ export interface DevArtifactCloneInfo {
   cloneInternalSize: number;
   /** Clone bytes whose blocks are also referenced from outside this tree. */
   cloneSharedSize: number;
+  /**
+   * The blocks behind `cloneSharedSize`: each copy of a group of k full
+   * clones counts 1/k of its size (a modified clone counts whole). Summed
+   * over trees, at least what deleting all of them frees beyond each
+   * tree's own blocks. Absent from sidecars older than this field.
+   */
+  cloneSharedBlocks?: number;
   /** Other Dev Artifacts trees that share clone groups with this one. */
   sharedRoots: number;
   /** Up to three of those trees, most shared bytes first. */

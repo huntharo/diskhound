@@ -140,25 +140,37 @@ test.describe("APFS clones", () => {
 
   test("Dev Artifacts marks node_modules trees cloned from each other", async ({ launch }, testInfo) => {
     // What a bun or pnpm install on APFS does: every project's copy of a
-    // package is a clone of the same blocks.
+    // package is a clone of the same blocks. Three projects hold one
+    // 32 MiB file between them, enough for the summary to call it out.
     const root = testInfo.outputPath("tree");
-    const first = join(root, "app-one", "node_modules");
-    const second = join(root, "app-two", "node_modules");
-    mkdirSync(join(first, "pkg"), { recursive: true });
-    mkdirSync(join(second, "pkg"), { recursive: true });
-    writeFileSync(join(first, "pkg", "index.js"), randomBytes(DATA_BYTES));
-    cloneFile(join(first, "pkg", "index.js"), join(second, "pkg", "index.js"));
+    const trees = ["app-one", "app-two", "app-three"].map((app) => join(root, app, "node_modules"));
+    for (const tree of trees) mkdirSync(join(tree, "pkg"), { recursive: true });
+    writeFileSync(join(trees[0]!, "pkg", "index.js"), randomBytes(32 * 1024 * KiB));
+    for (const tree of trees.slice(1)) cloneFile(join(trees[0]!, "pkg", "index.js"), join(tree, "pkg", "index.js"));
 
     const handle = await launch();
     await scanFolderFromPicker(handle, root);
     const { page } = handle;
     await openTab(page, "Dev Artifacts");
 
-    for (const tree of [first, second]) {
+    for (const tree of trees) {
       const row = page.locator(".dev-row").filter({ has: page.locator(`.dev-row-name[title="${tree}"]`) });
       await expect(row).toHaveCount(1, { timeout: 30_000 });
-      await expect(row.locator(".dev-share-badge")).toHaveText("Shared with 1 other tree");
+      await expect(row.locator(".dev-share-badge")).toHaveText("Shared with 2 other trees");
       await expect(row.locator(".dev-row-frees")).toHaveText("frees ≈ 0 B");
     }
+
+    // 96 MB listed is 32 MB of blocks. No one tree frees any of it, and
+    // deleting all three frees it once.
+    const summary = page.locator(".dev-summary-net");
+    await expect(summary.locator(".changes-delta-big")).toHaveText("0 B – 32.0 MB");
+    await expect(summary.locator(".changes-delta-label")).toHaveText("reclaimable on this scan · 96.0 MB listed");
+    const note = page.locator(".dev-sharing-note");
+    await expect(note).toContainText(
+      "96.0 MB of these trees is APFS clones sharing blocks with files elsewhere. "
+      + "Each copy counts at full size, but together they hold about 32.0 MB of blocks. "
+      + "Deleting a tree frees only its own blocks: about 0 B if you deleted everything listed, "
+      + "up to 32.0 MB if no copy is left elsewhere.",
+    );
   });
 });

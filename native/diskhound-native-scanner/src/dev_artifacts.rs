@@ -61,6 +61,10 @@ struct AccRec {
     measured: bool,
     clone_size: u64,
     clone_private_size: u64,
+    /// Each clone file's share of the blocks it shares: its shared bytes
+    /// divided by the copies APFS counts for its full-clone group. See
+    /// `SidecarClone::clone_shared_blocks`.
+    clone_block_share: u64,
 }
 
 pub struct DevArtifactAcc {
@@ -111,6 +115,7 @@ impl DevArtifactAcc {
                 measured: false,
                 clone_size: 0,
                 clone_private_size: 0,
+                clone_block_share: 0,
             }
         });
         entry.size = entry.size.saturating_add(occupancy);
@@ -118,10 +123,15 @@ impl DevArtifactAcc {
         if let (Some(attrs), false) = (clone, extra_hardlink) {
             entry.measured = true;
             if attrs.may_share() {
+                let private = attrs.clone_private_of(occupancy);
                 entry.clone_size = entry.clone_size.saturating_add(occupancy);
-                entry.clone_private_size = entry
-                    .clone_private_size
-                    .saturating_add(attrs.clone_private_of(occupancy));
+                entry.clone_private_size = entry.clone_private_size.saturating_add(private);
+                // A modified clone has no group, so its copies are
+                // unknown: count its shared bytes whole.
+                let copies = attrs.full_clone_group().map_or(1, |(_, refcnt)| u64::from(refcnt));
+                entry.clone_block_share = entry
+                    .clone_block_share
+                    .saturating_add((occupancy - private) / copies);
             }
         }
         Some(entry.id)
@@ -161,6 +171,12 @@ struct SidecarClone {
     clone_private_size: u64,
     clone_internal_size: u64,
     clone_shared_size: u64,
+    /// The blocks behind `clone_shared_size`, each copy counted as 1/k of
+    /// a group of k full clones (a modified clone counts whole). Summed
+    /// over any set of trees, it is at least what deleting all of them
+    /// frees beyond each tree's own blocks: a group whose every copy is
+    /// in the set sums to its size, one with copies elsewhere frees 0.
+    clone_shared_blocks: u64,
     shared_roots: u64,
     shared_with: Vec<String>,
 }
@@ -173,16 +189,21 @@ fn sidecar_clone(acc: &DevArtifactAcc, rec: &AccRec, share: Option<&RootCloneSha
         return None;
     }
     let internal_files = share.map_or(0, |s| s.internal_file_bytes).min(rec.clone_size);
+    let internal = share.map_or(0, |s| s.internal_bytes);
+    // Clone bytes that are neither private nor inside a group this
+    // tree fully owns: some other file still references them.
+    let clone_shared_size = rec
+        .clone_size
+        .saturating_sub(rec.clone_private_size)
+        .saturating_sub(internal_files);
     Some(SidecarClone {
         clone_size: rec.clone_size,
         clone_private_size: rec.clone_private_size,
-        clone_internal_size: share.map_or(0, |s| s.internal_bytes),
-        // Clone bytes that are neither private nor inside a group this
-        // tree fully owns: some other file still references them.
-        clone_shared_size: rec
-            .clone_size
-            .saturating_sub(rec.clone_private_size)
-            .saturating_sub(internal_files),
+        clone_internal_size: internal,
+        clone_shared_size,
+        // The copies of a group this tree owns outright share out to its
+        // size, which `clone_internal_size` already holds.
+        clone_shared_blocks: rec.clone_block_share.saturating_sub(internal).min(clone_shared_size),
         shared_roots: share.map_or(0, |s| s.neighbors.len() as u64),
         shared_with: share
             .map(|s| {
@@ -479,10 +500,50 @@ mod tests {
                 clone_private_size: 0,
                 clone_internal_size: 1000,
                 clone_shared_size: 4096,
+                // Half of the store/project pair's 4096.
+                clone_shared_blocks: 2048,
                 shared_roots: 1,
                 shared_with: vec!["/Users/dev/Library/pnpm/store".to_string()],
             }
         );
+    }
+
+    #[test]
+    fn shared_blocks_count_each_copy_once_per_group() {
+        use crate::clone_attrs::{CloneAttrs, EF_MAY_SHARE_BLOCKS, EF_SHARES_ALL_BLOCKS};
+        const SIZE: u64 = 1_000_000;
+        let copy_of = |id: u64, refcnt: u32, private: u64| CloneAttrs {
+            private_size: Some(private),
+            clone_id: id,
+            clone_refcnt: refcnt,
+            ext_flags: EF_MAY_SHARE_BLOCKS | EF_SHARES_ALL_BLOCKS,
+        };
+        let mut acc = DevArtifactAcc::new();
+        let mut groups = CloneGroups::new();
+        // One file cloned 50 ways: 5 copies in each of ten projects.
+        for project in 0..10 {
+            for copy in 0..5 {
+                let attrs = copy_of(7, 50, 0);
+                let path = format!("/Users/dev/p{project}/node_modules/pkg/{copy}.js");
+                let root = acc.add(&path, SIZE, false, Some(&attrs)).unwrap();
+                groups.add(&attrs, SIZE, root);
+            }
+        }
+        // A modified clone: no group, so its 900 KB still shared count whole.
+        acc.add("/Users/dev/p0/node_modules/pkg/edited.js", SIZE, false, Some(&copy_of(8, 1, 100_000)));
+
+        let shares = groups.attribute(acc.root_id_count());
+        let mut blocks = 0;
+        for project in 0..10 {
+            let rec = &acc.artifacts[&format!("/Users/dev/p{project}/node_modules")];
+            let info = sidecar_clone(&acc, rec, shares.get(rec.id as usize)).unwrap();
+            let edited = if project == 0 { 900_000 } else { 0 };
+            assert_eq!(info.clone_shared_size, 5 * SIZE + edited);
+            assert_eq!(info.clone_shared_blocks, 5 * SIZE / 50 + edited);
+            blocks += info.clone_shared_blocks;
+        }
+        // 50 MB of listed copies, 1 MB of blocks (plus the edited clone).
+        assert_eq!(blocks, SIZE + 900_000);
     }
 
     #[test]

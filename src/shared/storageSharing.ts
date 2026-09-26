@@ -102,6 +102,12 @@ export interface DevArtifactSharing {
   freesBytes: number | null;
   /** Bytes whose blocks are shared with files outside this tree. */
   sharedBytes: number;
+  /**
+   * The blocks behind `sharedBytes`, counting each copy of a k-way clone
+   * as 1/k of it. Equals `sharedBytes` for sidecars older than
+   * `cloneSharedBlocks`.
+   */
+  sharedBlocks: number;
   /** Other Dev trees sharing clone groups with this one. */
   sharedRoots: number;
   sharedWith: string[];
@@ -118,6 +124,7 @@ export function devArtifactSharing(artifact: Pick<DevArtifact, "path" | "size" |
       measured: false,
       freesBytes: null,
       sharedBytes: 0,
+      sharedBlocks: 0,
       sharedRoots: 0,
       sharedWith: [],
       hint: cloneHintForPath(artifact.path),
@@ -131,10 +138,12 @@ export function devArtifactSharing(artifact: Pick<DevArtifact, "path" | "size" |
   // tree fully owns (counted once). Equivalently: size minus bytes
   // shared outside, minus the extra copies inside owned groups.
   const frees = clamp(nonClone + clonePrivate + Math.max(0, clone.cloneInternalSize), 0, size);
+  const shared = clamp(clone.cloneSharedSize, 0, cloneSize);
   return {
     measured: true,
     freesBytes: frees,
-    sharedBytes: clamp(clone.cloneSharedSize, 0, cloneSize),
+    sharedBytes: shared,
+    sharedBlocks: clamp(clone.cloneSharedBlocks ?? shared, 0, shared),
     sharedRoots: Math.max(0, clone.sharedRoots),
     sharedWith: clone.sharedWith ?? [],
     hint: null,
@@ -147,17 +156,29 @@ export function isMeaningfullyShared(sharing: DevArtifactSharing, size: number):
   return sharing.sharedBytes >= Math.max(MiB, size * 0.05);
 }
 
-/** Sum what deleting a set of trees would free, for the Dev summary. */
+/**
+ * What deleting a set of trees together would free, for the Dev summary.
+ *
+ * `freesBytes` sums what each tree frees alone, so it leaves out a clone
+ * group whose every copy is in the set: deleting them all frees it once.
+ * `freesAtMostBytes` adds each tree's share of its shared blocks, which
+ * covers every such group (the copies' 1/k shares sum to its size) and
+ * over-counts only groups with copies elsewhere. The real figure is
+ * between the two, before snapshots and hardlinks.
+ */
 export function summarizeDevSharing(artifacts: ReadonlyArray<Pick<DevArtifact, "path" | "size" | "clone">>): {
   measuredTrees: number;
   totalBytes: number;
   freesBytes: number;
+  freesAtMostBytes: number;
   sharedBytes: number;
+  sharedBlocks: number;
 } {
   let measuredTrees = 0;
   let totalBytes = 0;
   let freesBytes = 0;
   let sharedBytes = 0;
+  let sharedBlocks = 0;
   for (const artifact of artifacts) {
     totalBytes += artifact.size;
     const sharing = devArtifactSharing(artifact);
@@ -168,11 +189,16 @@ export function summarizeDevSharing(artifacts: ReadonlyArray<Pick<DevArtifact, "
     measuredTrees += 1;
     freesBytes += sharing.freesBytes ?? artifact.size;
     sharedBytes += sharing.sharedBytes;
+    sharedBlocks += sharing.sharedBlocks;
   }
-  // Two trees that share a clone group each report the other's side as
-  // "shared". Deleting both frees the group once; this sum stays a
-  // conservative (low) estimate for multi-select deletes.
-  return { measuredTrees, totalBytes, freesBytes, sharedBytes };
+  return {
+    measuredTrees,
+    totalBytes,
+    freesBytes,
+    freesAtMostBytes: Math.min(totalBytes, freesBytes + sharedBlocks),
+    sharedBytes,
+    sharedBlocks,
+  };
 }
 
 // ── Snapshots ───────────────────────────────────────────────

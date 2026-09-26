@@ -149,7 +149,40 @@ describe("summarizeDevSharing", () => {
       }),
       artifact("/b/target", 50),
     ]);
-    expect(summary).toEqual({ measuredTrees: 1, totalBytes: 150, freesBytes: 20 + 50, sharedBytes: 80 });
+    expect(summary).toEqual({
+      measuredTrees: 1,
+      totalBytes: 150,
+      freesBytes: 20 + 50,
+      // No cloneSharedBlocks (older sidecar): the shared bytes stand in.
+      freesAtMostBytes: 150,
+      sharedBytes: 80,
+      sharedBlocks: 80,
+    });
+  });
+
+  it("bounds deleting every tree by each copy's share of the blocks", () => {
+    // A 1 GB file cloned 50 ways, 5 copies in each of ten node_modules:
+    // 50 GB listed, 0 freed by any one tree, 1 GB freed by all of them.
+    const GB = 1_000_000_000;
+    const trees = Array.from({ length: 10 }, (_, i) => artifact(`/p${i}/node_modules`, 5 * GB, {
+      cloneSize: 5 * GB,
+      clonePrivateSize: 0,
+      cloneInternalSize: 0,
+      cloneSharedSize: 5 * GB,
+      cloneSharedBlocks: (5 * GB) / 50,
+      sharedRoots: 9,
+      sharedWith: [],
+    }));
+    expect(summarizeDevSharing(trees)).toMatchObject({
+      totalBytes: 50 * GB,
+      freesBytes: 0,
+      freesAtMostBytes: GB,
+      sharedBytes: 50 * GB,
+      sharedBlocks: GB,
+    });
+    // Half the list: at most 0.5 GB, and in fact nothing comes back
+    // until the other half goes too.
+    expect(summarizeDevSharing(trees.slice(0, 5)).freesAtMostBytes).toBe(GB / 2);
   });
 });
 

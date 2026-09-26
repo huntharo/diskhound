@@ -417,6 +417,10 @@ describe("APFS clone info in the Dev sidecar", () => {
       ],
     }, previous);
     expect(next.roots[0]!.clone).toEqual({ ...clone, cloneSize: 200, cloneSharedSize: 200 });
+    // cloneSharedBlocks scales with the rest when the old sidecar had it.
+    const withBlocks = { ...previous, roots: [{ ...previous.roots[0]!, clone: { ...clone, cloneSharedBlocks: 40 } }] };
+    expect(carryCloneInfo({ ...previous, roots: [{ ...previous.roots[0]!, size: 250, clone: undefined }] }, withBlocks)
+      .roots[0]!.clone?.cloneSharedBlocks).toBe(20);
     expect(next.roots[1]!.clone).toBeUndefined();
   });
 });
