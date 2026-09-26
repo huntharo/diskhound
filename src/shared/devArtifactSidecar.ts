@@ -1,13 +1,10 @@
 import * as FS from "node:fs";
 import * as FSP from "node:fs/promises";
 import * as Path from "node:path";
-import { createInterface } from "node:readline";
-import { createGunzip } from "node:zlib";
 
 import type { DevArtifact, DevArtifactKind, DevArtifactReport } from "./contracts";
 import { classifyArtifactPath } from "./devArtifacts";
 import { occupancyBytes } from "./allocatedSize";
-import { attachPipeErrorHandlers } from "./streamSafety";
 import { basenameOf, dirnameOf, normPath } from "./pathUtils";
 
 export const DEV_ARTIFACTS_SIDECAR_SUFFIX = ".dev-artifacts.json";
@@ -33,7 +30,8 @@ export interface DevArtifactSidecar {
   droppedPaths?: string[];
 }
 
-const PROJECT_MARKERS = new Set([
+/** Lowercase file names that mark their folder as a project. */
+export const PROJECT_MARKERS: ReadonlySet<string> = new Set([
   "package.json",
   "cargo.toml",
   "go.mod",
@@ -123,10 +121,58 @@ function dirsEqual(a: string, b: string): boolean {
 }
 
 /**
- * Build a sidecar from folder-tree directory rollups (path + recursive
- * size + file count). Used when a scan predates the Dev sidecar so we
- * never stream the 7M-file index. Nested classified dirs (target/debug
- * under target) are dropped so occupancy is counted once.
+ * Fold one folder-tree directory rollup (path + recursive size + file
+ * count) into `acc` when the directory is itself an artifact root. Rows
+ * below a root (node_modules/preact) are skipped: the root's own row
+ * already carries their bytes. A root seen twice keeps the larger row.
+ */
+export function noteDirectoryRoot(acc: DevAcc, path: string, size: number, files: number): void {
+  if (size <= 0) return;
+  const match = classifyArtifactPath(path);
+  if (!match || !dirsEqual(match.root, path)) return;
+  const existing = acc.artifacts.get(match.root);
+  if (!existing || size > existing.size) {
+    acc.artifacts.set(match.root, { kind: match.kind, size, files });
+  }
+}
+
+/**
+ * Whether a folder holding a project marker can own an artifact root.
+ * One inside a root (a package.json under node_modules) never can: every
+ * path at or below it classifies to that same outer root. Only the
+ * nearest project at or above a root is kept by compaction.
+ */
+export function projectCanOwnArtifact(projectPath: string): boolean {
+  const match = classifyArtifactPath(projectPath);
+  return !match || !dirIsUnder(match.root, projectPath);
+}
+
+/**
+ * Drop roots nested in another root (target/debug under target) so
+ * occupancy is counted once. Each root checks its own ancestors against
+ * the roots kept so far, shortest first. Returns the ancestor lookups.
+ */
+export function dropNestedRoots(acc: DevAcc): number {
+  const kept = new Set<string>();
+  let lookups = 0;
+  for (const path of [...acc.artifacts.keys()].sort((a, b) => a.length - b.length)) {
+    const key = normalizeDir(path).toLowerCase();
+    let nested = false;
+    for (let i = key.length - 1; i > 0 && !nested; i--) {
+      const c = key.charCodeAt(i);
+      if (c !== 0x2f && c !== 0x5c) continue;
+      lookups += 1;
+      nested = kept.has(key.slice(0, i));
+    }
+    if (nested) acc.artifacts.delete(path);
+    else kept.add(key);
+  }
+  return lookups;
+}
+
+/**
+ * Build a sidecar from folder-tree directory rollups. Used when a scan
+ * predates the Dev sidecar so we never stream the 7M-file index.
  */
 export function sidecarFromDirectoryRoots(
   rootPath: string,
@@ -135,84 +181,9 @@ export function sidecarFromDirectoryRoots(
 ): DevArtifactSidecar {
   const acc = createDevAcc();
   for (const project of projectPaths) acc.projects.add(project);
-  for (const dir of dirs) {
-    if (dir.size <= 0) continue;
-    const match = classifyArtifactPath(dir.path);
-    if (!match || !dirsEqual(match.root, dir.path)) continue;
-    const existing = acc.artifacts.get(match.root);
-    if (!existing || dir.size > existing.size) {
-      acc.artifacts.set(match.root, { kind: match.kind, size: dir.size, files: dir.files });
-    }
-  }
-  const kept = [...acc.artifacts.keys()].sort((a, b) => a.length - b.length);
-  const survivors = new Set<string>();
-  for (const path of kept) {
-    if ([...survivors].some((parent) => dirIsUnder(parent, path))) continue;
-    survivors.add(path);
-  }
-  for (const path of [...acc.artifacts.keys()]) {
-    if (!survivors.has(path)) acc.artifacts.delete(path);
-  }
+  for (const dir of dirs) noteDirectoryRoot(acc, dir.path, dir.size, dir.files);
+  dropNestedRoots(acc);
   return sidecarFromAcc(acc, rootPath);
-}
-
-/**
- * Classify from a folder-tree sidecar (NDJSON.gz). Used for scans that
- * predate `.dev-artifacts.json`. Never opens the 7M-file index.
- * Returns null when the file is missing, unreadable, or has no parents.
- */
-export async function sidecarFromFolderTreeFile(
-  filePath: string,
-  treeRoot: string,
-): Promise<DevArtifactSidecar | null> {
-  if (!FS.existsSync(filePath)) return null;
-
-  const dirs: Array<{ path: string; size: number; files: number }> = [];
-  const projects: string[] = [];
-  let parents = 0;
-
-  const gunzip = createGunzip();
-  const source = FS.createReadStream(filePath);
-  attachPipeErrorHandlers([source, gunzip]);
-  source.pipe(gunzip);
-  const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
-
-  try {
-    for await (const line of rl) {
-      if (!line) continue;
-      let rec: {
-        k?: string;
-        d?: [string, number, number][];
-        f?: [string, number, number][];
-      };
-      try { rec = JSON.parse(line); } catch { continue; }
-      if (typeof rec.k !== "string") continue;
-      parents += 1;
-      if (Array.isArray(rec.f)) {
-        for (const row of rec.f) {
-          if (Array.isArray(row) && typeof row[0] === "string" && isProjectMarkerName(row[0])) {
-            projects.push(rec.k);
-          }
-        }
-      }
-      if (!Array.isArray(rec.d)) continue;
-      for (const row of rec.d) {
-        if (!Array.isArray(row) || row.length < 3) continue;
-        const [path, size, files] = row;
-        if (typeof path !== "string" || typeof size !== "number" || typeof files !== "number") continue;
-        if (size <= 0) continue;
-        dirs.push({ path, size, files });
-      }
-    }
-  } catch {
-    return null;
-  } finally {
-    try { gunzip.destroy(); } catch { /* ok */ }
-    try { source.destroy(); } catch { /* ok */ }
-  }
-
-  if (parents === 0) return null;
-  return sidecarFromDirectoryRoots(treeRoot, dirs, projects);
 }
 
 export function sidecarFromAcc(acc: DevAcc, rootPath: string): DevArtifactSidecar {

@@ -1,10 +1,6 @@
-import { createWriteStream } from "node:fs";
 import * as FSP from "node:fs/promises";
 import * as OS from "node:os";
 import * as Path from "node:path";
-import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
-import { createGzip } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 let tempDir: string;
@@ -49,46 +45,40 @@ describe("sidecarFromDirectoryRoots", () => {
   });
 });
 
-describe("sidecarFromFolderTreeFile", () => {
-  it("classifies from a folder-tree sidecar without an index", async () => {
-    const { sidecarFromFolderTreeFile, reportFromSidecar } = await import("../devArtifactSidecar");
-    const treePath = Path.join(tempDir, "tree.folder-tree.ndjson.gz");
-    const gz = createGzip({ level: 4 });
-    const out = createWriteStream(treePath);
-    await pipeline(
-      Readable.from([
-        `${JSON.stringify({
-          k: "C:\\proj",
-          d: [
-            ["C:\\proj\\target", 80_000_000, 400],
-            ["C:\\proj\\node_modules", 20_000_000, 100],
-          ],
-          f: [["package.json", 200, 1]],
-        })}\n`,
-        `${JSON.stringify({
-          k: "C:\\proj\\target",
-          d: [["C:\\proj\\target\\debug", 50_000_000, 300]],
-          f: [],
-        })}\n`,
-      ]),
-      gz,
-      out,
-    );
-
-    const sidecar = await sidecarFromFolderTreeFile(treePath, "C:\\");
-    expect(sidecar).not.toBeNull();
-    const report = reportFromSidecar(sidecar!);
-    expect(report.totalBytes).toBe(100_000_000);
-    expect(report.artifacts.map((a) => a.path).sort()).toEqual([
-      "C:\\proj\\node_modules",
+describe("dropNestedRoots", () => {
+  it("drops roots under another root, whatever the case or separator", async () => {
+    const { createDevAcc, dropNestedRoots } = await import("../devArtifactSidecar");
+    const acc = createDevAcc();
+    for (const path of [
+      "C:\\proj\\target\\debug",
       "C:\\proj\\target",
+      "C:\\Proj\\Target\\release",
+      "/w/.worktrees/feat",
+      "/w/.worktrees",
+      "/w/targets",
+      "/w/targets2/debug",
+    ]) {
+      acc.artifacts.set(path, { kind: "rust-target", size: 1, files: 1 });
+    }
+    dropNestedRoots(acc);
+    expect([...acc.artifacts.keys()]).toEqual([
+      "C:\\proj\\target",
+      "/w/.worktrees",
+      "/w/targets",
+      "/w/targets2/debug",
     ]);
-    expect(report.projectCount).toBe(1);
   });
+});
 
-  it("returns null when the folder-tree sidecar is missing", async () => {
-    const { sidecarFromFolderTreeFile } = await import("../devArtifactSidecar");
-    await expect(sidecarFromFolderTreeFile(Path.join(tempDir, "missing.ndjson.gz"), "C:\\")).resolves.toBeNull();
+describe("projectCanOwnArtifact", () => {
+  it("rules out projects inside an artifact tree", async () => {
+    const { projectCanOwnArtifact } = await import("../devArtifactSidecar");
+    expect(projectCanOwnArtifact("/src/app")).toBe(true);
+    expect(projectCanOwnArtifact("/src/app/target")).toBe(true);
+    expect(projectCanOwnArtifact("/src/app/.worktrees/feat")).toBe(true);
+    expect(projectCanOwnArtifact("/src/app/node_modules/preact")).toBe(false);
+    expect(projectCanOwnArtifact("C:\\src\\app\\Node_Modules\\@scope\\pkg")).toBe(false);
+    expect(projectCanOwnArtifact("/src/app/.worktrees/feat/packages/ui")).toBe(false);
   });
 });
 
