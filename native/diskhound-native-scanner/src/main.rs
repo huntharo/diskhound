@@ -435,7 +435,7 @@ impl IndexWriter {
     /// then counts only the Dev trees and clone files found inside it.
     #[cfg(test)]
     fn finish(self) -> (io::Result<()>, Option<CloneGroupSummary>) {
-        self.finish_with_tree_totals(&|_| None)
+        self.finish_with_tree_totals(&|_| None, |_| {})
     }
 
     /// Signal the writer thread to finish pending messages, close the
@@ -450,7 +450,9 @@ impl IndexWriter {
     fn finish_with_tree_totals(
         mut self,
         tree_totals: &dyn Fn(&str) -> Option<(u64, u64)>,
+        mut progress: impl FnMut(&'static str),
     ) -> (io::Result<()>, Option<CloneGroupSummary>) {
+        progress("flushing_index");
         if let Some(tx) = self.tx.take() {
             let _ = tx.send(IndexWriteMsg::Finish);
             drop(tx);
@@ -467,6 +469,7 @@ impl IndexWriter {
         // Write the Dev sidecar even if gzip finish failed — classify
         // already ran on every file the writer accepted.
         if let (Some(out), Some(acc)) = (self.dev_output.take(), self.dev_acc.take()) {
+            progress("classifying_dev_artifacts");
             let mut guard = acc.lock().unwrap_or_else(|e| e.into_inner());
             guard.resolve_worktrees(tree_totals);
             match dev_artifacts::write_sidecar(&out, &self.scan_root, &guard, clone_groups.as_ref()) {
@@ -607,6 +610,7 @@ struct ScanSnapshot {
     /// tail where pre-sorted-by-size-desc means bytes plateau at ~98%
     /// while the last few million small files still stream through.
     scan_phase: ScanPhase,
+    finalizing_step: Option<&'static str>,
     /// Set after MFT enumeration; lets the UI render a files-based
     /// progress bar (emitted_files / expected_total_files) during the
     /// indexing phase when the byte-based bar is stuck near 100%.
@@ -650,7 +654,6 @@ enum ScanPhase {
     Indexing,
     /// Post-walk work: inherited-file streaming, final gzip flush,
     /// `Done` snapshot about to fire.
-    #[cfg(windows)]
     Finalizing,
     Complete,
 }
@@ -717,6 +720,7 @@ struct ScanState {
     emit_lite_snapshots: bool,
     /// Current scan phase. Mirrored into each snapshot.
     scan_phase: ScanPhase,
+    finalizing_step: Option<&'static str>,
     /// Expected total file count (populated from MFT records_kept after
     /// MFT enumeration). None for walker path.
     expected_total_files: Option<u64>,
@@ -773,6 +777,7 @@ impl ScanState {
             inherited_files: 0,
             emit_lite_snapshots: false,
             scan_phase: ScanPhase::Starting,
+            finalizing_step: None,
             expected_total_files: None,
             clone_totals: CloneTotals::default(),
             clone_group_summary: None,
@@ -1457,6 +1462,7 @@ fn run() -> Result<(), String> {
     // writing fails, log and continue — Node falls back to the legacy
     // NDJSON streaming path in that case.
     if matches!(final_status, ScanStatus::Done) {
+        emit_finalizing_step(&mut state, "writing_folder_tree");
         if let Err(err) = write_folder_tree_sidecar(&mut state) {
             eprintln!(
                 "[diskhound-native-scanner] folder-tree sidecar: write failed ({err}) — Node will fall back to the streaming worker path"
@@ -1469,9 +1475,19 @@ fn run() -> Result<(), String> {
     // Dev sidecar after Done raced: the rename missed, and Dev Artifacts
     // fell through to a 1m+ folder-tree classify on a 7M-file C: scan.
     if let Some(writer) = state.index_writer.take() {
-        let totals = &state.directory_totals;
-        let (result, clone_summary) = writer
-            .finish_with_tree_totals(&|path| totals.get(path).map(|t| (t.size, t.file_count)));
+        let (result, clone_summary) = writer.finish_with_tree_totals(
+            &|path| state.directory_totals.get(path).map(|t| (t.size, t.file_count)),
+            |step| {
+                if matches!(final_status, ScanStatus::Done) {
+                    // Both callbacks borrow state immutably so the Dev sidecar
+                    // can use folder totals without copying the scan's tree.
+                    let mut snapshot = state.snapshot(ScanStatus::Running, None);
+                    snapshot.scan_phase = ScanPhase::Finalizing;
+                    snapshot.finalizing_step = Some(step);
+                    let _ = emit_message(&Message::Progress { snapshot });
+                }
+            },
+        );
         if let Err(err) = result {
             eprintln!("[diskhound-native-scanner] index writer finish failed ({err})");
         }
@@ -1488,6 +1504,7 @@ fn run() -> Result<(), String> {
 
     if matches!(final_status, ScanStatus::Done) {
         state.scan_phase = ScanPhase::Complete;
+        state.finalizing_step = None;
     }
 
     emit_message(&Message::Done {
@@ -1786,6 +1803,7 @@ fn scan_generic_with_plan_mode(
         return Ok(());
     }
 
+    emit_finalizing_step(state, "finishing_index");
     let mut result = Ok(());
     hardlinks.finish(|link, extra| record_released(state, &mut result, link, extra));
     result?;
@@ -2374,7 +2392,7 @@ fn emit_mft_records_into_state(
         emit_started.elapsed().as_millis(),
         merge_started.elapsed().as_millis(),
     );
-    state.scan_phase = ScanPhase::Finalizing;
+    emit_finalizing_step(state, "finishing_index");
     // Rank the folder tallies once, then turn lite snapshots off so the
     // Done snapshot the caller emits later carries the full top-N payload.
     let finalize_started = Instant::now();
@@ -2814,7 +2832,7 @@ fn scan_windows_sequential(
     // represents 90%+ of total files but doesn't need a visible
     // percentage (the walker's `filesVisited` counter is already
     // credited from the inheritance aggregates).
-    state.scan_phase = ScanPhase::Finalizing;
+    emit_finalizing_step(state, "finishing_index");
     // Rank the finished tallies now. The inherited stream below doesn't
     // change them, and snapshots during it would otherwise show the
     // last in-walk ranking.
@@ -3971,6 +3989,7 @@ impl ScanState {
             error_message,
             last_updated_at: now_ms,
             scan_phase: self.scan_phase,
+            finalizing_step: self.finalizing_step,
             expected_total_files: self.expected_total_files,
             storage_accounting: self.storage_accounting(),
             skipped_mounts: self.skipped_mounts.clone(),
@@ -4022,10 +4041,21 @@ fn early_running_snapshot(root_path: &str, started_at_ms: u64, elapsed_ms: u64) 
         error_message: None,
         last_updated_at: now_ms,
         scan_phase: ScanPhase::Starting,
+        finalizing_step: None,
         expected_total_files: None,
         storage_accounting: None,
         skipped_mounts: Vec::new(),
     }
+}
+
+/// Phase transitions bypass the timed walk throttle so even a short step
+/// is named correctly. This only writes IPC to stdout, never a state file.
+fn emit_finalizing_step(state: &mut ScanState, step: &'static str) {
+    state.scan_phase = ScanPhase::Finalizing;
+    state.finalizing_step = Some(step);
+    let _ = emit_message(&Message::Progress {
+        snapshot: state.snapshot(ScanStatus::Running, None),
+    });
 }
 
 fn maybe_emit_progress(state: &mut ScanState) -> Result<(), String> {
