@@ -23,6 +23,7 @@ use serde::Serialize;
 
 #[cfg(windows)]
 mod usn_journal;
+mod usn_aggregate;
 
 #[cfg(windows)]
 mod mft;

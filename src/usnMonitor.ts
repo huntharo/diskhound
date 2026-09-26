@@ -57,8 +57,11 @@ interface JournalCursorEnd {
   type: "journal-cursor";
   cursor: number;
   journalId: number;
+  /** Files printed. The scanner folds a file's records into one line. */
   recordsEmitted: number;
   recordsDropped: number;
+  /** Journal records read before folding; absent from older scanners. */
+  journalRecords?: number;
 }
 
 interface JournalErrorLine {
@@ -220,7 +223,7 @@ export async function runIncrementalScan(params: {
     rootPath: params.rootPath,
   };
   const statsFor = (counts: { additions: number; modifications: number; deletions: number }): IncrementalStats => ({
-    recordsRead: records.length,
+    recordsRead: cursorEnd.journalRecords ?? records.length,
     recordsDropped: cursorEnd.recordsDropped,
     ...counts,
     elapsedMs: Date.now() - startedAt,

@@ -9,15 +9,18 @@
 //! 1. `open_volume()` — opens a raw volume handle (requires read access)
 //! 2. `query_journal()` — reads journal metadata (id, first/next USN)
 //! 3. `read_journal()` — streams USN records starting at a cursor
-//! 4. `resolve_path()` — turns a FileReferenceNumber into a full path via
+//! 4. `resolve_file()` — turns a FileReferenceNumber into a full path via
 //!    OpenFileById + GetFinalPathNameByHandleW
-//! 5. `run_journal_mode()` — CLI entry point that emits NDJSON records to
-//!    stdout, plus a final cursor line for the caller to persist.
+//! 5. `run_journal_mode()` — CLI entry point that folds the records per
+//!    file (`usn_aggregate`), resolves each file once, emits one NDJSON
+//!    line per file to stdout, plus a final cursor line for the caller
+//!    to persist.
 //!
 //! Output format (one JSON object per line):
 //!   {"type":"journal-record","op":"create"|"modify"|"delete"|"rename",
 //!    "path":"...","size":N,"mtime":ms,"usn":N,"parentRef":N}
-//!   {"type":"journal-cursor","cursor":N,"journalId":N}
+//!   {"type":"journal-cursor","cursor":N,"journalId":N,
+//!    "recordsEmitted":N,"recordsDropped":N,"journalRecords":N}
 //!
 //! What is NOT yet wired up (Phase 2b, follow-up commit):
 //! - JS-side orchestration that applies these records to the persisted
@@ -31,9 +34,10 @@
 use std::ffi::c_void;
 use std::io::{self, Write};
 use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
 
 use serde::Serialize;
+
+use crate::usn_aggregate::{JournalAggregate, JournalEntry};
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE,
@@ -59,6 +63,22 @@ const USN_REASON_FILE_CREATE: u32 = 0x0000_0100;
 const USN_REASON_FILE_DELETE: u32 = 0x0000_0200;
 const USN_REASON_RENAME_NEW_NAME: u32 = 0x0000_2000;
 const USN_REASON_CLOSE: u32 = 0x8000_0000;
+
+/// The reasons that change what the index holds for a file: its bytes,
+/// its existence or its path. Node acts on create, modify, delete and
+/// rename, and drops every other record, so the journal is asked for
+/// only these. A record carries every reason since its file was opened,
+/// so `DATA_EXTEND | CLOSE` still matches, while a close after a
+/// security or timestamp change no longer counts as a change.
+const RELEVANT_REASONS: u32 = USN_REASON_DATA_OVERWRITE
+    | USN_REASON_DATA_EXTEND
+    | USN_REASON_DATA_TRUNCATION
+    | USN_REASON_FILE_CREATE
+    | USN_REASON_FILE_DELETE
+    | USN_REASON_RENAME_NEW_NAME;
+
+/// UTF-16 units for the longest path GetFinalPathNameByHandleW returns.
+const MAX_PATH_UNITS: usize = 32_768;
 
 const WINDOWS_TO_UNIX_EPOCH_TICKS: u64 = 116_444_736_000_000_000;
 
@@ -140,10 +160,15 @@ enum OutputLine {
         cursor: i64,
         #[serde(rename = "journalId")]
         journal_id: u64,
+        /// Files printed, one line each.
         #[serde(rename = "recordsEmitted")]
         records_emitted: u64,
+        /// Files that could not be opened by ID (deleted, or no access).
         #[serde(rename = "recordsDropped")]
         records_dropped: u64,
+        /// Journal records read, before folding them per file.
+        #[serde(rename = "journalRecords")]
+        journal_records: u64,
     },
     JournalError {
         message: String,
@@ -218,16 +243,19 @@ fn query_journal(volume: HANDLE) -> io::Result<JournalInfo> {
     })
 }
 
-/// Read USN records from `start_usn` onwards, calling `handle_record` for
-/// each. Returns the final cursor (the `NextUsn` from the last batch).
+/// Read USN records with a `RELEVANT_REASONS` bit from `start_usn` up to
+/// `end_usn` (the journal's NextUsn when the read began, so a busy volume
+/// cannot keep it going), calling `handle_record` for each. Returns the
+/// cursor to resume from: the `NextUsn` of the last batch.
 fn read_journal<F>(
     volume: HANDLE,
     journal_id: u64,
     start_usn: i64,
+    end_usn: i64,
     mut handle_record: F,
 ) -> io::Result<i64>
 where
-    F: FnMut(&USN_RECORD_V2, &[u16]),
+    F: FnMut(&USN_RECORD_V2),
 {
     #[repr(C)]
     struct ReadUsnJournalDataV0 {
@@ -241,7 +269,7 @@ where
 
     let mut request = ReadUsnJournalDataV0 {
         start_usn,
-        reason_mask: 0xFFFF_FFFF, // all reasons
+        reason_mask: RELEVANT_REASONS,
         return_only_on_close: 0,
         timeout: 0,
         bytes_to_wait_for: 0,
@@ -277,7 +305,6 @@ where
         let next_usn = i64::from_ne_bytes(buffer[0..8].try_into().unwrap());
 
         let mut offset = 8;
-        let mut emitted_in_batch = 0;
         while offset + std::mem::size_of::<USN_RECORD_V2>() <= bytes_returned as usize {
             let record_ptr = unsafe { buffer.as_ptr().add(offset) as *const USN_RECORD_V2 };
             let record = unsafe { &*record_ptr };
@@ -289,36 +316,23 @@ where
             // Only process V2 records for now. V3/V4 have 128-bit file IDs
             // and require a different parse; on NTFS V2 covers everything.
             if record.MajorVersion == 2 {
-                let name_offset = record.FileNameOffset as usize;
-                let name_length_bytes = record.FileNameLength as usize;
-                if name_offset + name_length_bytes <= record_length {
-                    let name_ptr =
-                        unsafe { (record_ptr as *const u8).add(name_offset) as *const u16 };
-                    let name_len_u16 = name_length_bytes / 2;
-                    let name_slice = unsafe { std::slice::from_raw_parts(name_ptr, name_len_u16) };
-                    handle_record(record, name_slice);
-                    emitted_in_batch += 1;
-                }
+                handle_record(record);
             }
 
             offset += record_length;
         }
 
-        // If we made no forward progress, bail out — otherwise we'd spin.
-        if next_usn == last_cursor && emitted_in_batch == 0 {
-            last_cursor = next_usn;
+        // Follow NextUsn, not the record count: with a reason mask a
+        // batch can skip a stretch of records and return none of them.
+        // Stop when it stops moving (the tail) or passes where the
+        // journal ended when this read began.
+        if next_usn <= last_cursor {
             break;
         }
         last_cursor = next_usn;
-
-        // When the buffer was big enough for "most of" the journal but more
-        // remains, DeviceIoControl tells us so by setting NextUsn < journal's
-        // NextUsn. We keep looping. When we reach the tail, NextUsn stops
-        // advancing and emitted_in_batch drops to 0 — we exit above.
-        if emitted_in_batch == 0 {
+        if next_usn >= end_usn {
             break;
         }
-
         request.start_usn = next_usn;
     }
 
@@ -371,7 +385,7 @@ fn file_basic_info(handle: HANDLE) -> Option<FILE_BASIC_INFO> {
 /// Returns None for files that can't be opened (deleted, insufficient
 /// permissions, race conditions). Callers should expect a meaningful
 /// fraction to fail on system volumes.
-fn resolve_file(volume: HANDLE, file_ref: u64) -> Option<ResolvedFile> {
+fn resolve_file(volume: HANDLE, file_ref: u64, path_buffer: &mut [u16]) -> Option<ResolvedFile> {
     let descriptor = FILE_ID_DESCRIPTOR {
         dwSize: std::mem::size_of::<FILE_ID_DESCRIPTOR>() as u32,
         Type: FILE_ID_TYPE_FILE_ID,
@@ -406,18 +420,17 @@ fn resolve_file(volume: HANDLE, file_ref: u64) -> Option<ResolvedFile> {
         .map(|info| windows_filetime_to_unix_ms(info.LastWriteTime))
         .unwrap_or(0);
 
-    let mut buffer = vec![0u16; 32_768];
     let chars_written = unsafe {
-        GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, 0)
+        GetFinalPathNameByHandleW(handle, path_buffer.as_mut_ptr(), path_buffer.len() as u32, 0)
     };
 
     unsafe { CloseHandle(handle) };
 
-    if chars_written == 0 || chars_written as usize >= buffer.len() {
+    if chars_written == 0 || chars_written as usize >= path_buffer.len() {
         return None;
     }
 
-    let path = String::from_utf16_lossy(&buffer[..chars_written as usize]);
+    let path = String::from_utf16_lossy(&path_buffer[..chars_written as usize]);
     // Strip the `\\?\` extended-length prefix for consistency with the scanner.
     Some(ResolvedFile {
         path: path
@@ -475,59 +488,67 @@ pub fn run_journal_mode(drive_letter: char, start_cursor: Option<i64>) -> Result
         return Ok(());
     }
 
-    let mut emitted: u64 = 0;
-    let mut dropped: u64 = 0;
+    let lines = collect_changes(volume, info.journal_id, effective_start, info.next_usn);
+    unsafe { CloseHandle(volume) };
+    for line in lines.map_err(|e| format!("Failed to read USN journal on {drive_letter}: {e}"))? {
+        let _ = emit(&line);
+    }
+    Ok(())
+}
 
-    let final_cursor = read_journal(volume, info.journal_id, effective_start, |record, name_u16| {
-        let resolved = match resolve_file(volume, record.FileReferenceNumber) {
-            Some(p) => p,
-            None => {
-                dropped += 1;
-                return;
-            }
-        };
-
-        // Sanity check: the emitted record's name should match the tail of
-        // the resolved path. If it doesn't (e.g. the file was renamed
-        // between journal write and our resolve), log the journal's name
-        // as a hint.
-        let _name = String::from_utf16_lossy(name_u16);
-        let basename = Path::new(&resolved.path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
-        let _ = basename; // used to assert basename == _name in a stricter build
-
-        let is_directory = resolved.is_directory.unwrap_or(
-            (record.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0,
-        );
-        let line = OutputLine::JournalRecord {
-            op: JournalOp::from_reason(record.Reason),
-            path: resolved.path,
+/// Reads the journal from `start` to `end` and folds the records per
+/// file first, so each file is opened and resolved once however many
+/// records it left. Returns one `JournalRecord` line per file that still
+/// opens, then the `JournalCursor` line.
+fn collect_changes(volume: HANDLE, journal_id: u64, start: i64, end: i64) -> io::Result<Vec<OutputLine>> {
+    let mut journal = JournalAggregate::default();
+    let final_cursor = read_journal(volume, journal_id, start, end, |record| {
+        journal.add(JournalEntry {
             file_ref: record.FileReferenceNumber,
             parent_ref: record.ParentFileReferenceNumber,
             usn: record.Usn,
-            reason_mask: record.Reason,
+            reason: record.Reason,
             timestamp: windows_filetime_to_unix_ms(record.TimeStamp),
+            attributes: record.FileAttributes,
+        });
+    })?;
+
+    let journal_records = journal.records();
+    let mut lines = Vec::new();
+    let mut dropped: u64 = 0;
+    let mut path_buffer = vec![0u16; MAX_PATH_UNITS];
+    for entry in journal.into_files() {
+        let Some(resolved) = resolve_file(volume, entry.file_ref, &mut path_buffer) else {
+            dropped += 1;
+            continue;
+        };
+        let is_directory = resolved.is_directory.unwrap_or(
+            (entry.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0,
+        );
+        lines.push(OutputLine::JournalRecord {
+            op: JournalOp::from_reason(entry.reason),
+            path: resolved.path,
+            file_ref: entry.file_ref,
+            parent_ref: entry.parent_ref,
+            usn: entry.usn,
+            reason_mask: entry.reason,
+            timestamp: entry.timestamp,
             size: resolved.allocated_size,
             mtime: resolved.mtime_ms,
             is_directory,
             link_count: resolved.number_of_links,
-        };
-        let _ = emit(&line);
-        emitted += 1;
-    })
-    .map_err(|e| format!("Failed to read USN journal on {drive_letter}: {e}"))?;
+        });
+    }
 
-    let _ = emit(&OutputLine::JournalCursor {
+    let records_emitted = lines.len() as u64;
+    lines.push(OutputLine::JournalCursor {
         cursor: final_cursor,
-        journal_id: info.journal_id,
-        records_emitted: emitted,
+        journal_id,
+        records_emitted,
         records_dropped: dropped,
+        journal_records,
     });
-
-    unsafe { CloseHandle(volume) };
-    Ok(())
+    Ok(lines)
 }
 
 /// Cheap query of the current journal state. Used right after a full scan
@@ -581,6 +602,63 @@ mod tests {
     fn journal_record_keeps_zero_allocated_size() {
         let json = serde_json::to_string(&record(Some(0))).unwrap();
         assert!(json.contains("\"size\":0"), "missing zero size in {json}");
+    }
+
+    /// Reads the real journal of the temp dir's volume. Needs the rights
+    /// to open the volume (an elevated process, as on CI runners) and an
+    /// active journal, and skips without them.
+    #[test]
+    fn a_file_written_in_several_sessions_comes_back_as_one_line() {
+        use std::io::Write;
+
+        let dir = std::env::temp_dir().join(format!("diskhound-usn-fold-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = format!("fold-{}.bin", std::process::id());
+        let file = dir.join(&name);
+        let dir_text = dir.to_string_lossy().to_string();
+        let drive = dir_text.split(':').next().and_then(|head| head.chars().last()).unwrap();
+
+        let volume = match open_volume(drive) {
+            Ok(volume) => volume,
+            Err(err) => {
+                eprintln!("skipped: cannot open volume {drive}: ({err})");
+                return;
+            }
+        };
+        let before = match query_journal(volume) {
+            Ok(info) => info,
+            Err(err) => {
+                eprintln!("skipped: no USN journal on {drive}: ({err})");
+                unsafe { CloseHandle(volume) };
+                return;
+            }
+        };
+        // Five write sessions: create, then an extend and a close each.
+        for session in 0..5u8 {
+            let mut out = std::fs::OpenOptions::new().create(true).append(true).open(&file).unwrap();
+            out.write_all(&[session; 8192]).unwrap();
+        }
+        let after = query_journal(volume).unwrap();
+        let lines = collect_changes(volume, before.journal_id, before.next_usn, after.next_usn).unwrap();
+        unsafe { CloseHandle(volume) };
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mine: Vec<&OutputLine> = lines
+            .iter()
+            .filter(|line| matches!(line, OutputLine::JournalRecord { path, .. } if path.ends_with(&name)))
+            .collect();
+        assert_eq!(mine.len(), 1, "one line for the file, not one per record: {mine:?}");
+        let OutputLine::JournalRecord { op, reason_mask, size, .. } = mine[0] else { unreachable!() };
+        assert!(matches!(op, JournalOp::Create), "{op:?}");
+        assert_ne!(reason_mask & USN_REASON_FILE_CREATE, 0);
+        assert_ne!(reason_mask & USN_REASON_DATA_EXTEND, 0);
+        assert!(size.unwrap_or(0) >= 5 * 8192, "allocated size {size:?}");
+
+        let Some(OutputLine::JournalCursor { cursor, records_emitted, journal_records, .. }) = lines.last() else {
+            panic!("no cursor line");
+        };
+        assert!(journal_records > records_emitted, "{journal_records} records, {records_emitted} lines");
+        assert!(*cursor >= after.next_usn);
     }
 
     #[test]
