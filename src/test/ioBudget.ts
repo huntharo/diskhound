@@ -488,11 +488,31 @@ function realDelay(ms: number): Promise<void> {
   return new Promise((resolve) => realSetTimeout(resolve, ms));
 }
 
+const settleHooks = new Set<() => void>();
+
+/**
+ * Runs `hook` each time a measurement settles, once no fs work is in
+ * flight: before its window opens and again before it closes. It is
+ * for writes the app defers on a timer, such as main's buffered
+ * crash.log lines. Flushed here, they land in the window that caused
+ * them, not in whichever window is open when the timer fires. Returns
+ * a function that removes the hook.
+ */
+export function onSettle(hook: () => void): () => void {
+  settleHooks.add(hook);
+  return () => settleHooks.delete(hook);
+}
+
 async function settle(): Promise<void> {
   const startedAt = realNow();
   while (true) {
     await nextMacrotask();
-    if (inflight.size === 0) return;
+    if (inflight.size === 0) {
+      // Only now, so lines logged as that work finished go out in
+      // the same flush.
+      for (const hook of settleHooks) hook();
+      if (inflight.size === 0) return;
+    }
     if (realNow() - startedAt > SETTLE_TIMEOUT_MS) {
       throw new Error(
         `measureFsIo waited ${SETTLE_TIMEOUT_MS} ms for fs work that is still running:\n  `
@@ -612,9 +632,11 @@ export async function measureFsIo<T>(
   fn: () => T | Promise<T>,
   options: MeasureOptions = {},
 ): Promise<{ result: T; io: FsIo }> {
-  await settle();
   await expectFsInstrumentationLive();
   if (options.countProcesses) await expectProcessInstrumentationLive();
+  // After the probes, so what the app logged while they ran flushes
+  // before the window opens.
+  await settle();
   const window: Window = { io: emptyIo(options.countProcesses) };
   openWindows = [...openWindows, window];
   try {
