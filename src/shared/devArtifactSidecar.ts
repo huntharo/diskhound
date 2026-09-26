@@ -119,6 +119,25 @@ function dirIsUnder(parent: string, child: string): boolean {
   return cLower.startsWith(pLower + "\\") || cLower.startsWith(pLower + "/");
 }
 
+/**
+ * Keys (see `pathKey`) of every folder above `path`: its key cut at
+ * each `\` or `/`. A folder is under a parent when the parent's key is
+ * one of these, so a Set of keys answers "is this under any of them?"
+ * in one pass over the path instead of one comparison per parent.
+ */
+function forEachAncestorKey(path: string, visit: (key: string) => boolean | void): boolean {
+  const key = pathKey(path);
+  for (let i = 0; i < key.length; i += 1) {
+    const ch = key.charCodeAt(i);
+    if ((ch === 0x2f || ch === 0x5c) && visit(key.slice(0, i)) === true) return true;
+  }
+  return false;
+}
+
+function hasAncestorIn(path: string, keys: ReadonlySet<string>): boolean {
+  return keys.size > 0 && forEachAncestorKey(path, (key) => keys.has(key));
+}
+
 function dirsEqual(a: string, b: string): boolean {
   return normalizeDir(a).toLowerCase() === normalizeDir(b).toLowerCase();
 }
@@ -559,14 +578,19 @@ export function planRescanTargets(
     seen.add(key);
     targets.push(rec.path);
   }
+  if (extraRoots.length === 0) return targets;
+  // `seen` holds every target's key; `above` every key a target is under.
+  const above = new Set<string>();
+  const noteAbove = (path: string) => forEachAncestorKey(path, (key) => { above.add(key); });
+  for (const path of targets) noteAbove(path);
   const extras = [...extraRoots].sort((a, b) => a.length - b.length);
   for (const path of extras) {
     const key = pathKey(path);
-    if (seen.has(key)) continue;
-    if (targets.some((parent) => dirIsUnder(parent, path) || dirsEqual(parent, path))) continue;
-    if (targets.some((child) => dirIsUnder(path, child))) continue;
+    // Already a target, under one, or holding one: the walk covers it.
+    if (seen.has(key) || hasAncestorIn(path, seen) || above.has(key)) continue;
     seen.add(key);
     targets.push(path);
+    noteAbove(path);
   }
   return targets;
 }

@@ -15,10 +15,10 @@ import {
   type ScanSnapshot,
   type UpdateStatus,
 } from "../shared/contracts";
-import { duplicateGroupReclaimable } from "../shared/duplicateReclaim";
 import { formatScanRoot } from "../shared/pathUtils";
 import { formatBytes } from "./lib/format";
 import { clearDeletedPaths } from "./lib/deletedPaths";
+import { appendDuplicateProgress } from "./lib/duplicateStream";
 import { useLiveDiskSpace } from "./lib/hooks";
 import { setColorBlindPalette } from "./lib/treemap";
 import { setProcessPaletteColorBlind } from "./components/MemoryView";
@@ -583,31 +583,9 @@ export function App() {
       if (p.newGroups && p.newGroups.length > 0) {
         setDuplicateAnalysesByRoot((prev) => {
           const next = new Map(prev);
-          const existing = next.get(key);
-          const combinedGroups = existing?.groups
-            ? [...existing.groups, ...p.newGroups!]
-            : [...p.newGroups!];
-          // Running totals so the UI header shows live counts;
-          // finalised at scan-end via onDuplicateResult.
-          const totalWastedBytes = combinedGroups.reduce(
-            (sum, g) => sum + duplicateGroupReclaimable(g),
-            0,
-          );
-          const totalDuplicateFiles = combinedGroups.reduce(
-            (sum, g) => sum + g.files.length,
-            0,
-          );
-          next.set(key, {
-            groups: combinedGroups,
-            totalWastedBytes,
-            totalGroups: combinedGroups.length,
-            totalDuplicateFiles,
-            rootPath: p.rootPath,
-            filesWalked: p.filesWalked,
-            filesHashed: p.filesHashed,
-            elapsedMs: p.elapsedMs,
-            analyzedAt: existing?.analyzedAt ?? Date.now(),
-          });
+          // Appends and keeps running totals for the live header in
+          // O(new groups); finalised at scan-end via onDuplicateResult.
+          next.set(key, appendDuplicateProgress(next.get(key), p));
           return next;
         });
       }
