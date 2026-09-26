@@ -81,6 +81,29 @@ async function scan(rootRel: string, name: string, extra: Partial<ScanStartInput
 const logged = (text: string) =>
   errorLog.mock.calls.some((call: unknown[]) => String(call[0]).includes(text));
 
+it("reports walking, finalizing, and complete on a first scan and baseline rescan", async () => {
+  write("root/data.bin", 8 * 1024);
+  settleDirMtimes(at("root"));
+  let baselineIndex: string | undefined;
+  for (const name of ["first", "rescan"]) {
+    const snapshots: ScanSnapshot[] = [];
+    const indexOutput = at(`out/${name}.ndjson.gz`);
+    await runScan({ rootPath: at("root"), options: {}, indexOutput, baselineIndex }, (message) => {
+      if (message.type === "error") throw new Error(message.message);
+      snapshots.push(message.snapshot);
+    });
+
+    expect(snapshots[0]).toMatchObject({ status: "running", scanPhase: "walking", filesVisited: 0 });
+    expect(snapshots.some((s) => s.scanPhase === "walking" && s.filesVisited > 0 && s.bytesSeen > 0)).toBe(true);
+    expect(snapshots.some((s) => s.scanPhase === "starting")).toBe(false);
+    expect(snapshots.at(-2)).toMatchObject({ status: "running", scanPhase: "finalizing", filesVisited: 1 });
+    expect(snapshots.at(-1)).toMatchObject({ status: "done", scanPhase: "complete", filesVisited: 1 });
+    expect(readIndex(indexOutput).filter((line) => line.t !== "d")).toHaveLength(1);
+    baselineIndex = indexOutput;
+  }
+  expect(logged("Phase-1 inheritance")).toBe(true);
+});
+
 describe.skipIf(process.platform === "win32")("scanWorker hardlinks", () => {
   it("counts a hardlinked file once and flags its later links", async () => {
     const shared = write("root/a.bin", 64 * 1024);
