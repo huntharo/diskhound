@@ -61,6 +61,43 @@ describe("scan snapshot store (last-scan.json)", () => {
   });
 });
 
+describe("scan snapshot store, deferred writes", () => {
+  it("writes a deferred snapshot once, at quit, even after a later scan started", async () => {
+    const store = await createScanSnapshotStore(dataDir);
+    const done = completedScanSnapshot(ROOT, FINISHED_AT);
+    const restamped = { ...done, finishedAt: FINISHED_AT + 60_000, lastUpdatedAt: FINISHED_AT + 60_000 };
+
+    const { io } = await measureFsIo(async () => {
+      await store.set(restamped, { deferWrite: true });
+      // A manual rescan starts and is quit before it finishes.
+      for (const snapshot of progressSnapshots(done, 50)) await store.set(snapshot);
+      store.flush();
+      store.flush();
+    });
+
+    expectIoBudget({
+      scenario: "scan-store-deferred-then-quit",
+      note: "a restamped snapshot kept in memory (a USN tick that found nothing changed), a scan's progress, then before-quit: 1 write of last-scan.json (~2.8 MB) per session, and a second flush writes nothing",
+      io,
+    });
+    const saved = JSON.parse(FS.readFileSync(Path.join(dataDir, "last-scan.json"), "utf8")) as ScanSnapshot;
+    expect(saved.finishedAt).toBe(FINISHED_AT + 60_000);
+  });
+
+  it("drops a deferred snapshot once a later completed scan is written", async () => {
+    const store = await createScanSnapshotStore(dataDir);
+    const done = completedScanSnapshot(ROOT, FINISHED_AT);
+    await store.set({ ...done, finishedAt: FINISHED_AT + 60_000 }, { deferWrite: true });
+    await store.set({ ...done, finishedAt: FINISHED_AT + 120_000 });
+
+    const { io } = await measureFsIo(() => store.flush());
+
+    expect(io.writeFile).toBe(0);
+    const saved = JSON.parse(FS.readFileSync(Path.join(dataDir, "last-scan.json"), "utf8")) as ScanSnapshot;
+    expect(saved.finishedAt).toBe(FINISHED_AT + 120_000);
+  });
+});
+
 describe("scan history", () => {
   it("writes the snapshot and the index once per completed scan", async () => {
     initScanHistory(dataDir);
