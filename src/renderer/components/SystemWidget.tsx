@@ -14,6 +14,7 @@ import type {
 } from "../../shared/contracts";
 import { formatBytes, formatCount, relativeTime } from "../lib/format";
 import { saveLocalPreference } from "../lib/localPreference";
+import { reportPollFailure } from "../lib/pollFailure";
 import { nativeApi } from "../nativeApi";
 
 /**
@@ -350,18 +351,27 @@ export function SystemWidget() {
   }, []);
 
   const refreshMemory = useCallback(async () => {
-    const snap = await nativeApi.getMemorySnapshot();
+    const snap = await nativeApi.getMemorySnapshot().catch((error: unknown) => {
+      reportPollFailure("SystemWidget memory", error);
+      return null;
+    });
     if (snap) setMemory(snap);
   }, []);
 
   const refreshDiskIo = useCallback(async () => {
-    const snap = await nativeApi.getDiskIoSnapshot();
+    const snap = await nativeApi.getDiskIoSnapshot().catch((error: unknown) => {
+      reportPollFailure("SystemWidget disk I/O", error);
+      return null;
+    });
     if (snap) setDiskIo(snap);
   }, []);
 
   const refreshGpu = useCallback(async () => {
     if (!gpuAvailable) return;
-    const snap = await nativeApi.getGpuSnapshot();
+    const snap = await nativeApi.getGpuSnapshot().catch((error: unknown) => {
+      reportPollFailure("SystemWidget GPU", error);
+      return null;
+    });
     if (snap) setGpu(snap);
   }, [gpuAvailable]);
 
