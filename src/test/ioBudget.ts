@@ -632,9 +632,11 @@ export async function measureFsIo<T>(
   fn: () => T | Promise<T>,
   options: MeasureOptions = {},
 ): Promise<{ result: T; io: FsIo }> {
-  await settle();
   await expectFsInstrumentationLive();
   if (options.countProcesses) await expectProcessInstrumentationLive();
+  // After the probes, so what the app logged while they ran flushes
+  // before the window opens.
+  await settle();
   const window: Window = { io: emptyIo(options.countProcesses) };
   openWindows = [...openWindows, window];
   try {

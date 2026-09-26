@@ -396,10 +396,11 @@ export function fakeElectron(): Record<string, unknown> {
   return { ...electron, default: electron };
 }
 
-/** The preload's side of the fake IPC, for rendererHarness.ts. */
 /** setTimeout's largest delay, ~24.8 days. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
 let crashLogSettled = false;
+/** Tags main has logged, for waiting on startup work that only logs when done. */
+const loggedTags = new Set<string>();
 
 /**
  * crash.log with its 2 s flush timer pushed out of any test's reach.
@@ -418,11 +419,18 @@ export function settledCrashLog(
       const log = original.createCrashLog({ ...options, flushDelayMs: MAX_TIMER_MS });
       onSettle(() => log.flush());
       crashLogSettled = true;
-      return log;
+      return {
+        ...log,
+        write: (tag, message, writeOptions) => {
+          loggedTags.add(tag);
+          log.write(tag, message, writeOptions);
+        },
+      };
     },
   };
 }
 
+/** The preload's side of the fake IPC, for rendererHarness.ts. */
 export function rendererIpcState(): Pick<HarnessState, "rendererIpc" | "rendererInflight"> {
   return current();
 }
@@ -504,6 +512,19 @@ export async function bootMainProcess(options: BootOptions = {}): Promise<MainPr
   const restored = await booted.invoke<{ status?: string; rootPath?: string | null } | null>("diskhound:get-current-snapshot");
   if (restored?.status === "done" && restored.rootPath) {
     await booted.invoke("diskhound:get-folder-children", restored.rootPath, restored.rootPath);
+  }
+  // On Linux, startup also installs a .desktop file and icons into
+  // HOME without awaiting it, and logs a linux-integration line when
+  // done (the temp HOME is empty, so it always writes). Wait for that
+  // line, or it lands in a test's first measurement.
+  if (process.platform === "linux") {
+    const waitedAt = Date.now();
+    while (!loggedTags.has("linux-integration")) {
+      if (Date.now() - waitedAt > BOOT_TIMEOUT_MS) {
+        throw new Error(`main.ts's Linux desktop integration did not log in ${BOOT_TIMEOUT_MS} ms.`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
   }
   return booted;
 }
