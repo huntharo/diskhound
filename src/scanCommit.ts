@@ -106,11 +106,7 @@ export function dropPrunedScans(hooks: Pick<CommitHooks, "onPruned">): string[] 
  * snapshot JSON.
  */
 export async function deletePrunedScanFiles(id: string): Promise<void> {
-  await Promise.all([
-    FS.unlink(folderTreeSidecarPath(id)).catch(() => {}),
-    deleteIndex(id),
-    deleteFullDiffCachesForScan(id),
-  ]);
+  await Promise.all([deleteIndex(id), deleteFullDiffCachesForScan(id)]);
 }
 
 /** Native writes the Dev sidecar before Done. Rename pending → history

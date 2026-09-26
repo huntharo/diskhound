@@ -3584,13 +3584,21 @@ void (async () => {
         entries = await FS.readdir(dir, { withFileTypes: true });
       } catch { return { bytes, count, orphanPending: { bytes: orphanBytes, count: orphanCount } }; }
       const orphanCutoff = Date.now() - 60 * 60 * 1000; // 1 hour
+      // USN rescans hard-link their predecessor's sidecars, so one set
+      // of bytes can have several names here. Count it once.
+      const seenLinks = new Set<string>();
       for (const entry of entries) {
         if (!entry.isFile()) continue;
         const full = Path.join(dir, entry.name);
         try {
           const stat = await FS.stat(full);
-          bytes += stat.size;
           count++;
+          if (stat.nlink > 1) {
+            const inode = `${stat.dev}:${stat.ino}`;
+            if (seenLinks.has(inode)) continue;
+            seenLinks.add(inode);
+          }
+          bytes += stat.size;
           if (entry.name.startsWith("pending-") && stat.mtimeMs < orphanCutoff) {
             orphanBytes += stat.size;
             orphanCount++;

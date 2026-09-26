@@ -294,7 +294,7 @@ describe("scheduled full scan", () => {
 
     expectIoBudget({
       scenario: "scheduled-full-scan",
-      note: "a scheduled full scan's commit at the 7-scan cap: the history snapshot (~2.7 MB) and index, 3 renames of the scanner's pending files, last-scan.json (the same ~2.7 MB again), disk-baselines.json, settings.json, and the pruned scan's files. ~5.6 MB here; the Rust scanner also writes the index (~330 MB at 7M files) and folder-tree sidecar (~50 MB), so ~390 MB per scan: 4/day and ~1.5 GB/day at the 6 h default, up to 1,440/day and ~560 GB/day at the 1-minute minimum. The full-diff warm is its own scenario",
+      note: "a scheduled full scan's commit at the 7-scan cap: the history snapshot (~2.7 MB) and index, 3 renames of the scanner's pending files, last-scan.json (the same ~2.7 MB again), disk-baselines.json, settings.json, and the pruned scan's 5 files (was 6: its folder-tree sidecar was unlinked twice). ~5.6 MB here; the Rust scanner also writes the index (~330 MB at 7M files) and folder-tree sidecar (~50 MB), so ~385 MB per scan: 4/day and ~1.5 GB/day at the 6 h default, up to 1,440/day and ~555 GB/day at the 1-minute minimum. The full-diff warm after it is its own scenario",
       io,
     });
     expect(result.prunedIds).toEqual([ids[0]]);
@@ -406,7 +406,7 @@ describe("scheduled USN rescan (Windows)", () => {
 
     expectIoBudget({
       scenario: "usn-tick-small-change",
-      note: "a USN tick with 4 changed files: the whole index rewritten (~330 MB at 7M files), the history snapshot and last-scan.json (~2.3 MB each), both sidecars copied (~50 MB at 7M), disk-baselines.json and the cursor, and a real scan pruned from history: ~385 MB per tick, ~1.5 GB/day at the 6 h default and ~555 GB/day at the 1-minute minimum if every tick finds a change",
+      note: "a USN tick with 4 changed files: the whole index rewritten (~330 MB at 7M files), the history snapshot and last-scan.json (~2.3 MB each), both sidecars hard-linked (0 B, was ~50 MB of copies), disk-baselines.json and the cursor, and a real scan pruned from history. ~335 MB per tick: ~1.3 GB/day at the 6 h default, ~480 GB/day at the 1-minute minimum if every tick finds a change",
       io,
     });
     expect(result).toMatchObject({ changed: true, stats: { additions: 1, modifications: 2, deletions: 1 } });

@@ -4028,6 +4028,15 @@ fn sidecar_path_next_to(index_path: &Path) -> PathBuf {
     PathBuf::from(out)
 }
 
+/// Gives `dest` the bytes of `source` without writing them again: a
+/// hard link, or a copy on a volume without hard links (FAT32, exFAT).
+fn link_or_copy(source: &Path, dest: &Path) -> io::Result<&'static str> {
+    match std::fs::hard_link(source, dest) {
+        Ok(()) => Ok("linked"),
+        Err(_) => std::fs::copy(source, dest).map(|_| "copied"),
+    }
+}
+
 fn write_folder_tree_sidecar(state: &mut ScanState) -> io::Result<()> {
     let output_path = match state.input.folder_tree_output.as_ref() {
         Some(p) => p.clone(),
@@ -4046,11 +4055,13 @@ fn write_folder_tree_sidecar(state: &mut ScanState) -> io::Result<()> {
     // every drill-in shows "This folder appears empty in the scan
     // index."
     //
-    // Instead: if we have a baseline index (rescan), copy its sidecar
-    // to the new scan's sidecar path. The tree contents are still
-    // accurate since nothing changed. This preserves the Folders-tab
-    // fast path across rescans without needing to rebuild from
-    // scratch.
+    // Instead: if we have a baseline index (rescan), give the new
+    // scan's sidecar path the baseline sidecar's bytes. The tree
+    // contents are still accurate since nothing changed. This
+    // preserves the Folders-tab fast path across rescans without
+    // needing to rebuild from scratch. A hard link, so the ~50 MB a
+    // 7M-file drive's sidecar holds are not written again; Node
+    // replaces sidecars by rename, which leaves the other name alone.
     if state.folder_tree_files.is_empty() {
         // Guard against the "empty sidecar copy-chain" pathology: if a
         // prior scan wrote an empty/near-empty sidecar (e.g. because
@@ -4066,12 +4077,12 @@ fn write_folder_tree_sidecar(state: &mut ScanState) -> io::Result<()> {
                 .map(|m| m.len())
                 .unwrap_or(0);
             if baseline_size >= MIN_BASELINE_SIDECAR_BYTES {
-                match std::fs::copy(&baseline_sidecar, &output_path) {
-                    Ok(bytes) => {
+                match link_or_copy(&baseline_sidecar, &output_path) {
+                    Ok(how) => {
                         eprintln!(
-                            "[diskhound-native-scanner] folder-tree sidecar: reused baseline sidecar ({:?}) — {} bytes copied to {:?} in {} ms (no tree work done on inheritance-only scan)",
+                            "[diskhound-native-scanner] folder-tree sidecar: reused baseline sidecar ({:?}) — {} bytes {how} to {:?} in {} ms (no tree work done on inheritance-only scan)",
                             baseline_sidecar,
-                            bytes,
+                            baseline_size,
                             output_path,
                             sidecar_started.elapsed().as_millis()
                         );
@@ -4949,6 +4960,36 @@ mod scaling_tests {
         let everything = InheritedPrefixes::new(&[SEP.to_string()]);
         assert!(everything.covers(&format!("{a}{SEP}f.txt")));
         assert!(!InheritedPrefixes::new(&[]).covers(&a));
+    }
+}
+
+#[cfg(test)]
+mod folder_tree_sidecar_reuse_tests {
+    use super::*;
+    use crate::test_support::{test_state, TempTree};
+    use std::fs;
+
+    /// A rescan that inherited every folder has no tree of its own and
+    /// reuses the baseline's sidecar, without writing its bytes again.
+    #[test]
+    fn inheritance_only_scan_links_the_baseline_sidecar() {
+        let tree = TempTree::new("sidecar-reuse");
+        tree.write("root/a.txt", 1);
+        let baseline_index = tree.write("scan-indexes/base.ndjson.gz", 64);
+        let baseline_sidecar = tree.write("scan-indexes/base.folder-tree.ndjson.gz", 4096);
+        let output = tree.path("scan-indexes/pending.folder-tree.ndjson.gz");
+        let mut state = test_state(&tree.path("root"), &tree.path("scan-indexes/pending.ndjson.gz"));
+        state.input.baseline_index = Some(baseline_index);
+        state.input.folder_tree_output = Some(output.clone());
+
+        write_folder_tree_sidecar(&mut state).unwrap();
+
+        assert_eq!(fs::read(&output).unwrap(), fs::read(&baseline_sidecar).unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(fs::metadata(&output).unwrap().nlink(), 2, "the sidecar was copied, not linked");
+        }
     }
 }
 

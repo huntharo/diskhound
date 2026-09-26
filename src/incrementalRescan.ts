@@ -165,20 +165,24 @@ export async function runIncrementalRescan(
     // rescan (deltas are a tiny fraction of total entries) and is
     // refreshed on the next full scan. A slightly stale sidecar
     // beats a 300 MB rebuild that might OOM.
+    //
+    // The bytes are the predecessor's, so the new name is a hard link
+    // to them rather than a ~50 MB copy. Every writer of a sidecar
+    // replaces it by rename, which leaves the other name's bytes alone.
     try {
       const prevSidecar = folderTreeSidecarPath(mostRecent.id);
       const nextSidecar = folderTreeSidecarPath(historyId);
       if (FS_SYNC.existsSync(prevSidecar) && !FS_SYNC.existsSync(nextSidecar)) {
-        await FS.copyFile(prevSidecar, nextSidecar);
+        const how = await linkOrCopy(prevSidecar, nextSidecar);
         deps.log(
           "folder-tree-sidecar-carry-forward",
-          `usn scan ${historyId} carried forward sidecar from ${mostRecent.id}`,
+          `usn scan ${historyId} ${how} sidecar from ${mostRecent.id}`,
         );
       }
       const prevDev = devArtifactsSidecarPath(mostRecent.id);
       const nextDev = devArtifactsSidecarPath(historyId);
       if (FS_SYNC.existsSync(prevDev) && !FS_SYNC.existsSync(nextDev)) {
-        await FS.copyFile(prevDev, nextDev);
+        await linkOrCopy(prevDev, nextDev);
       }
       // Do not JSON.parse the Dev sidecar here. That blocked the
       // window on large C: sidecars. Dev open adopts a pending
@@ -203,4 +207,18 @@ export async function runIncrementalRescan(
   await setCursor(result.newCursor);
 
   return { rootPath, changed: true, stats: result.stats };
+}
+
+/**
+ * Gives `dest` the bytes of `source` without writing them again. Copies
+ * on a volume without hard links (FAT32, exFAT).
+ */
+async function linkOrCopy(source: string, dest: string): Promise<"linked" | "copied"> {
+  try {
+    await FS.link(source, dest);
+    return "linked";
+  } catch {
+    await FS.copyFile(source, dest);
+    return "copied";
+  }
 }
