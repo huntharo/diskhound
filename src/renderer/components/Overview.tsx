@@ -36,6 +36,7 @@ import { FileIcon } from "./FileIcon";
 import { toast } from "./Toasts";
 import type { TreemapLayout } from "../lib/treemap";
 import { Treemap } from "./Treemap";
+import { ScanProgressPanel } from "./ScanProgressPanel";
 
 const MONITORING_NUDGE_DISMISSED_KEY = "diskhound:monitoring-nudge-dismissed";
 const TREEMAP_FOLDERS_STORAGE_KEY = "diskhound:treemap-folders";
@@ -50,10 +51,8 @@ interface Props {
   onViewDev?: () => void;
   /**
    * Scan progress percent (0–99) when a scan is live and we have
-   * enough drive metadata to compute a ratio. null otherwise — the
-   * metric strip and scanning empty-state use it to decide whether
-   * to show a progress bar / "X%" label vs. the older indeterminate
-   * spinner copy.
+   * a meaningful denominator. null otherwise, for an animated
+   * indeterminate bar without a fabricated percentage.
    */
   scanPercent?: number | null;
   /** Drive cards, to link the other disks a scan left out. */
@@ -470,6 +469,15 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
               ))}
             </div>
 
+            {snapshot.status === "running" && (
+              <ScanProgressPanel
+                snapshot={snapshot}
+                elapsedMs={displayElapsedMs}
+                percent={scanPercent}
+                hasResults={treemapFiles.length > 0}
+              />
+            )}
+
             {condensedMode && (
               <div className={`treemap-featured ${dominantExpanded ? "expanded" : "collapsed"}`}>
                 <button
@@ -521,136 +529,8 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
             )}
 
             <div className="treemap-stage">
-              {/* A running scan on this root but no data yet → show scanning
-               * state, not the generic "Run a scan" empty state. This is
-               * the fix for the "came back to window and treemap says run
-               * a scan even though it's scanning" bug. */}
-              {snapshot.status === "running" && treemapFiles.length === 0 ? (
-                <div className="treemap-empty">
-                  <div className="treemap-empty-icon">
-                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.7">
-                      <circle cx="12" cy="12" r="9" strokeDasharray="6 4" />
-                      <path d="M12 2L12 6M12 18L12 22M2 12L6 12M18 12L22 12" />
-                    </svg>
-                  </div>
-                  {(() => {
-                    // Three distinct pre-results states:
-                    //   1. First second: "Starting…" (no real signal yet)
-                    //   2. filesVisited === 0 after a bit: we're likely in
-                    //      the rescan baseline-load phase on a big index
-                    //   3. filesVisited > 0: actively walking
-                    const hasFiles = snapshot.filesVisited > 0;
-                    const phase = snapshot.scanPhase;
-                    const expected = snapshot.expectedTotalFiles;
-                    // Phase-aware title. During "finalizing" we know the
-                    // heavy work is done — tell the user that directly
-                    // rather than leaving them on "Scanning..." while
-                    // folder-tree / index cleanup wraps up.
-                    // Single title for the whole running-scan lifecycle.
-                    // Earlier we swapped between "Starting" / "Reading
-                    // metadata" / "Scanning" / "Finalizing" — each
-                    // transition was a visible text flash that users
-                    // read as a glitch. Phase-specific detail now goes
-                    // in the subtitle (which has a persistent elapsed
-                    // counter so the flash is absorbed), keeping the
-                    // title stable from scan-start to completion.
-                    const title = `Scanning ${snapshot.rootPath}…`;
-                    // Phase-specific pre-scan copy. We dispatch on
-                    // `phase` FIRST (what's actually happening) and
-                    // only use elapsed time as a secondary qualifier
-                    // for long-waits. Previously `displayElapsedMs`
-                    // was measured from scan-start, so messages like
-                    // "30-60 seconds" read wrong when baseline
-                    // loading already burned the first 60 seconds.
-                    //
-                    // Phase semantics:
-                    //   - starting            : baseline index load
-                    //     (rescan-only). 0-90 s typical; 0-5 s on
-                    //     first scan since there's no baseline.
-                    //   - reading_metadata    : NTFS MFT bulk read.
-                    //     10-60 s typical; no file paths yet.
-                    //   - (no phase / else)   : walker or pre-emit
-                    //     in edge cases.
-                    //
-                    // Done/Indexing/Finalizing have richer copy
-                    // below (sub) that supersedes this.
-                    let preScanCopy: string;
-                    if (phase === "starting") {
-                      preScanCopy = displayElapsedMs < 5_000
-                        ? "Getting ready…"
-                        : displayElapsedMs < 45_000
-                          ? "Loading the prior scan's index — this speeds up the rescan"
-                          : displayElapsedMs < 120_000
-                            ? "Still loading the prior scan's index — typical on drives with millions of files"
-                            : "Still loading the prior scan's index — large drives or slow disks can take 2-3 minutes";
-                    } else if (phase === "reading_metadata") {
-                      preScanCopy = displayElapsedMs < 20_000
-                        ? "Reading the volume's filesystem metadata — paths will be reconstructed in a moment"
-                        : "Reading the volume's filesystem metadata — typically 15-60 seconds of work, depending on file count";
-                    } else {
-                      preScanCopy = displayElapsedMs < 30_000
-                        ? "Getting ready — first files should appear in a few seconds"
-                        : "Indexing files — tiles will stream in as they're processed";
-                    }
-                    // During the indexing phase the scanner pre-sorts
-                    // records biggest-first so bytes saturate the
-                    // progress bar at ~98% long before the millions of
-                    // small files finish streaming. When we have an
-                    // expected file count, show a secondary files-based
-                    // fraction that actually moves the whole time.
-                    let filesFraction: string | null = null;
-                    if (
-                      phase === "indexing"
-                      && typeof expected === "number"
-                      && expected > 0
-                    ) {
-                      filesFraction = `${formatCount(snapshot.filesVisited)} / ${formatCount(expected)} files indexed`;
-                    }
-                    const sub =
-                      phase === "finalizing"
-                        ? `Building folder tree and flushing index — almost done (${formatElapsed(displayElapsedMs)} elapsed).`
-                        : filesFraction !== null
-                          ? `${filesFraction} · ${formatBytes(snapshot.bytesSeen)} · ${formatElapsed(displayElapsedMs)} elapsed`
-                          : hasFiles
-                            ? `${formatCount(snapshot.filesVisited)} files · ${formatBytes(snapshot.bytesSeen)} · ${formatElapsed(displayElapsedMs)} elapsed${
-                                typeof scanPercent === "number" ? ` · ${scanPercent}%` : ""
-                              }`
-                            : `${preScanCopy} (${formatElapsed(displayElapsedMs)} elapsed).`;
-                    // Override the byte-based progress bar with a
-                    // files-based fraction during indexing so it keeps
-                    // advancing linearly instead of plateauing at 98%.
-                    // During finalizing we explicitly DROP the
-                    // numeric bar (indeterminate feel) — the fixed
-                    // percent was confusing users since it looked
-                    // stuck at 98% while the sidecar-write + index
-                    // finalize does its last 30-60s of work.
-                    const displayPercent =
-                      phase === "finalizing"
-                        ? null
-                        : phase === "indexing"
-                            && typeof expected === "number"
-                            && expected > 0
-                          ? Math.min(99, Math.round((snapshot.filesVisited / expected) * 100))
-                          : scanPercent;
-                    return (
-                      <>
-                        <div style={{ fontSize: 13, color: "var(--text)" }}>{title}</div>
-                        {typeof displayPercent === "number" && (
-                          <div className="scanning-empty-progress" aria-hidden="true">
-                            <div
-                              className="scanning-empty-progress-fill"
-                              style={{ width: `${displayPercent}%` }}
-                            />
-                          </div>
-                        )}
-                        <div style={{ fontSize: 11, color: "var(--text-muted)", maxWidth: 480, textAlign: "center" }}>
-                          {sub}
-                        </div>
-                      </>
-                    );
-                  })()}
-                </div>
-              ) : typeFilter !== "all" && treemapFiles.length === 0 && snapshot.status === "done" ? (
+              {snapshot.status === "running" && treemapFiles.length === 0 ? null
+                : typeFilter !== "all" && treemapFiles.length === 0 && snapshot.status === "done" ? (
                 <div className="treemap-empty">
                   <div className="treemap-empty-icon">&#x25A6;</div>
                   <div style={{ fontSize: 13, color: "var(--text)" }}>

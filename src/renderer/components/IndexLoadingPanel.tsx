@@ -10,6 +10,9 @@ interface Props {
   compact?: boolean;
   /** Scan root, shown so a full-view loader is not mistaken for "the PC". */
   eyebrow?: string;
+  /** Omit when there is no meaningful denominator. */
+  progressPercent?: number | null;
+  detail?: string;
 }
 
 function formatElapsed(sec: number): string {
@@ -27,20 +30,30 @@ function activeStage(stages: Stage[], elapsedSec: number): Stage {
   return current;
 }
 
-export function IndexLoadingPanel({ title, stages, elapsedSec, compact, eyebrow }: Props) {
+export function IndexLoadingPanel({ title, stages, elapsedSec, compact, eyebrow, progressPercent, detail }: Props) {
   const stage = activeStage(stages, elapsedSec);
+  const determinate = typeof progressPercent === "number" && Number.isFinite(progressPercent);
   return (
     <div className={`index-loading ${compact ? "compact" : ""}`}>
       {eyebrow ? <div className="index-loading-root">{eyebrow}</div> : null}
       <div className="index-loading-ring" aria-hidden="true" />
       <div className="index-loading-title">{title}</div>
-      <div className="index-loading-bar" aria-hidden="true">
-        <div className="index-loading-bar-fill" />
+      <div
+        className={`index-loading-bar ${determinate ? "determinate" : ""}`}
+        role="progressbar"
+        aria-label={title}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={determinate ? progressPercent : undefined}
+        aria-valuetext={determinate ? `${progressPercent}% · ${stage.label}` : stage.label}
+      >
+        <div className="index-loading-bar-fill" style={determinate ? { width: `${progressPercent}%` } : undefined} />
       </div>
       <div key={stage.label} className="index-loading-status">
         {stage.label}
       </div>
-      <div className="index-loading-elapsed">{formatElapsed(elapsedSec)}</div>
+      {detail ? <div className="index-loading-detail">{detail}</div> : null}
+      <div className="index-loading-elapsed">{formatElapsed(elapsedSec)} elapsed</div>
     </div>
   );
 }
