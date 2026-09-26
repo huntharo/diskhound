@@ -5324,6 +5324,21 @@ mod windows_visit_once_tests {
         for changed in [root.clone(), root.join("y")] {
             baseline.dir_mtimes.remove(&normalize_path(&changed));
         }
+        // The walkers take a folder's mtime from its parent's listing.
+        // NTFS keeps that copy in the parent's index and can update it
+        // after the first scan read it, so the first scan's value can be
+        // older than the rescan's (CI saw x walked, not inherited). Take
+        // the mtimes the rescan will see.
+        for unchanged in [root.join("x"), root.join("y").join("z")] {
+            let listed = std::fs::read_dir(unchanged.parent().unwrap())
+                .unwrap()
+                .map(Result::unwrap)
+                .find(|entry| entry.path() == unchanged)
+                .unwrap();
+            // Read from the listing's find data, with no extra stat.
+            let mtime = unix_timestamp_ms(listed.metadata().unwrap().modified().unwrap());
+            baseline.dir_mtimes.insert(normalize_path(&unchanged), mtime);
+        }
         let mut state = state_for(input, Some(baseline), io);
         let index = walk(&mut state, &root, &index_path);
 
