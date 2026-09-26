@@ -1421,8 +1421,11 @@ fn scan_generic_with_plan(
     // Directory enumeration is embarrassingly parallel at the I/O layer,
     // since reads of separate directories hit different inode blocks.
     //
-    // DISKHOUND_PARALLEL_THREADS env var lets users override,
-    // matching the Windows walker for consistency.
+    // At most 8 threads, like the Windows walker. On an 18-core M5 Max a
+    // full `/` scan (21.4M files) took 2m 51s at 16 threads and 3m 22s at
+    // 8, but 16 used 31% more CPU time (995 s vs 759 s) and peaked near
+    // 1,000% CPU instead of 650%. Past 8, extra threads mostly add kernel
+    // time. DISKHOUND_PARALLEL_THREADS overrides it.
     let thread_override = std::env::var("DISKHOUND_PARALLEL_THREADS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
@@ -1432,7 +1435,7 @@ fn scan_generic_with_plan(
         if logical <= 2 {
             logical
         } else {
-            logical.clamp(4, 16)
+            logical.clamp(4, 8)
         }
     });
 
