@@ -1,3 +1,4 @@
+import * as FS from "node:fs";
 import * as FSP from "node:fs/promises";
 import * as OS from "node:os";
 import * as Path from "node:path";
@@ -5,7 +6,8 @@ import * as Path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { FullFileChange } from "../contracts";
-import { computeFullDiffFromIndexFiles } from "../fullDiffWorkerRuntime";
+import type { FullDiffSortJob, FullDiffWorkerInput } from "../fullDiffWorkerProtocol";
+import { computeFullDiffFromIndexFiles, sortIndexIntoRuns } from "../fullDiffWorkerRuntime";
 import { indexFilePath, initScanIndex, openIndexWriter } from "../scanIndex";
 
 let tempDir: string;
@@ -258,6 +260,66 @@ describe("computeFullDiffFromIndexFiles", () => {
     expect(totals).toEqual({ ...expected.totals, baselineId: `${id}-a`, currentId: `${id}-b`, truncated: false });
     expect(canonical(changes)).toEqual(canonical(expected.changes));
     expect(expected.totals.totalChanges).toBeGreaterThan(300);
+  });
+
+  describe("with the baseline sorted elsewhere", () => {
+    async function pair(id: string, files: number): Promise<FullDiffWorkerInput> {
+      const lines = (seed: number) => Array.from({ length: files }, (_, i) => ({ p: `/data/f${i}.bin`, s: i % seed === 0 ? i + 1 : i, m: 1 }));
+      return {
+        baselineId: `${id}-a`,
+        currentId: `${id}-b`,
+        baselinePath: await writeIndex(`${id}-a`, lines(7)),
+        currentPath: await writeIndex(`${id}-b`, lines(5)),
+        caseSensitive: true,
+        sortChunkRecords: 10,
+      };
+    }
+    const tempDirOf = (input: FullDiffWorkerInput) =>
+      Path.join(OS.tmpdir(), `diskhound-diff-${input.baselineId}-${input.currentId}-${process.pid}`);
+
+    it("hands it the baseline and sorts the current index here", async () => {
+      const input = await pair("elsewhere", 500);
+      const jobs: FullDiffSortJob[] = [];
+      const result = await computeFullDiffFromIndexFiles(input, {
+        sortElsewhere: (job, signal) => {
+          jobs.push(job);
+          return sortIndexIntoRuns(job, signal);
+        },
+      });
+      expect(jobs.map((job) => job.indexPath)).toEqual([input.baselinePath]);
+      expect(result).toEqual(await computeFullDiffFromIndexFiles(input));
+      expect(result?.totalChanges).toBeGreaterThan(0);
+      expect(FS.existsSync(tempDirOf(input))).toBe(false);
+    });
+
+    it("stops sorting here and removes the runs when the other side fails", async () => {
+      const input = await pair("elsewhere-fails", 5_000);
+      let signal: AbortSignal | undefined;
+      await expect(computeFullDiffFromIndexFiles(input, {
+        sortElsewhere: async (_job, sortSignal) => {
+          signal = sortSignal;
+          throw new Error("Full diff worker out of memory");
+        },
+      })).rejects.toThrow("Full diff worker out of memory");
+      expect(signal?.aborted).toBe(true);
+      expect(FS.existsSync(tempDirOf(input))).toBe(false);
+    });
+
+    it("stops the other side when the current index is unreadable", async () => {
+      const input = await pair("current-corrupt", 50);
+      await FSP.writeFile(input.currentPath, "not gzip");
+      let stopped = false;
+      await expect(computeFullDiffFromIndexFiles(input, {
+        sortElsewhere: (_job, signal) => new Promise<never>((_resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            stopped = true;
+            reject(signal.reason);
+          });
+        }),
+      })).rejects.toThrow(/header/);
+      expect(stopped).toBe(true);
+      expect(FS.existsSync(tempDirOf(input))).toBe(false);
+    });
   });
 
   it("returns null when neither index exists", async () => {

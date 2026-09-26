@@ -9,7 +9,8 @@ import { indexFilePath } from "./scanIndex";
 /**
  * Loads or computes the per-file diff between two scans: the memory
  * cache, then full-diff-cache/ on disk, then the worker's external sort
- * over both indexes, which spills every record to OS.tmpdir(). main.ts
+ * over both indexes, which writes every record, sorted and deflated,
+ * to OS.tmpdir() (~12 B per file per side on a real disk). main.ts
  * owns the IPC handlers; this module owns the disk work, so the I/O
  * budget tests measure the same code the app runs.
  */
