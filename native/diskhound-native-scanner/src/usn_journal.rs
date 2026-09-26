@@ -723,6 +723,15 @@ mod tests {
     #[test]
     fn deleted_and_renamed_files_keep_their_recorded_paths() {
         let dir = std::env::temp_dir().join(format!("diskhound-usn-remove-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Windows runners can supply an 8.3 TEMP path (RUNNER~1), while
+        // OpenFileById resolves long names. Normalize the existing parent
+        // before any files disappear, using the reader's prefix convention.
+        let canonical_dir = std::fs::canonicalize(&dir).unwrap();
+        let canonical_text = canonical_dir.to_str().unwrap();
+        let dir = std::path::PathBuf::from(
+            canonical_text.strip_prefix(r"\\?\").unwrap_or(canonical_text),
+        );
         let dest = dir.join("destination");
         std::fs::create_dir_all(&dest).unwrap();
         let deleted = dir.join("deleted.bin");
