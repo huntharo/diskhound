@@ -4004,6 +4004,44 @@ button, input, select, textarea { font: inherit; }
   word-break: break-word;
 }
 
+/* Settings → Diagnostics: status pills, captured sessions, handoff text. */
+.diagnostics-status {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0 8px;
+}
+.diagnostics-status .perf-status { margin-top: 0; }
+.diagnostics-last-event { padding: 0 12px; }
+.diagnostics-gate-warning { margin: 4px 0 8px; }
+/* Full-width rows; .setting-row's align-items would center them. */
+.diagnostics-captures { align-items: stretch; }
+.diagnostics-sessions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.diagnostics-session {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-row);
+}
+.diagnostics-session-name {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.diagnostics-session-meta {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  word-break: break-word;
+}
+.diagnostics-handoff { max-height: 220px; }
+
 /* Toggle switch */
 .toggle {
   position: relative;

@@ -1,6 +1,7 @@
 import { Worker } from "node:worker_threads";
 
 import { resolveBundledWorkerScript } from "./bundledWorkerPath";
+import { trackWorker } from "./workerHeapRegistry";
 import type { PermanentDeleteProgress } from "./contracts";
 import type {
   PermanentDeleteWorkerRequest,
@@ -21,6 +22,7 @@ export async function runPermanentDeleteWorker(
   options: RunPermanentDeleteWorkerOptions,
 ): Promise<void> {
   const worker = new Worker(options.workerPath);
+  trackWorker(worker, "permanent-delete");
   const request: PermanentDeleteWorkerRequest = {
     type: "delete",
     requestId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
