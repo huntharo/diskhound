@@ -57,7 +57,7 @@ interface JournalCursorEnd {
   type: "journal-cursor";
   cursor: number;
   journalId: number;
-  /** Files printed. The scanner folds a file's records into one line. */
+  /** Operations printed, including deletes for old names. */
   recordsEmitted: number;
   recordsDropped: number;
   /** Journal records read before folding; absent from older scanners. */
@@ -178,7 +178,11 @@ export async function runIncrementalScan(params: {
   const byPath = new Map<string, JournalRecord>();
   for (const r of relevant) {
     if (r.op === "close" || r.op === "other") continue;
-    byPath.set(normPath(r.path), r);
+    const path = normPath(r.path);
+    const previous = byPath.get(path);
+    // Native output is grouped by file reference, not journal order. A
+    // path may have been renamed away and then reused by another file.
+    if (!previous || r.usn >= previous.usn) byPath.set(path, r);
   }
 
   const deletes = new Set<string>();
@@ -285,9 +289,8 @@ export function getCursorForRoot(rootPath: string): VolumeCursor | null {
 /**
  * Quick "are there any changes since last scan" probe used by the
  * rescan fast-path. Spawns the Rust scanner in `journal` mode against
- * the volume's saved cursor; if zero records have been emitted since
- * then, the volume is unchanged and the caller can skip the full scan
- * entirely.
+ * the volume's saved cursor; if no records were emitted or dropped,
+ * the volume is unchanged and the caller can skip the full scan.
  *
  * Returns:
  *   - { changed: false, newCursor } — safe to reuse last snapshot
@@ -335,7 +338,9 @@ export async function checkUsnForAnyChanges(
   }
 
   return {
-    changed: journal.cursorEnd.recordsEmitted > 0,
+    // An unresolved path cannot be proven outside the root. In particular,
+    // a deleted parent can hide an entire removed subtree from the output.
+    changed: journal.cursorEnd.recordsEmitted > 0 || journal.cursorEnd.recordsDropped > 0,
     recordCount: journal.cursorEnd.recordsEmitted,
     newCursor: journal.cursorEnd.cursor,
     newJournalId: journal.cursorEnd.journalId,

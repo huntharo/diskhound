@@ -13,8 +13,8 @@
 //!    OpenFileById + GetFinalPathNameByHandleW
 //! 5. `run_journal_mode()` — CLI entry point that folds the records per
 //!    file (`usn_aggregate`), resolves each file once, emits one NDJSON
-//!    line per file to stdout, plus a final cursor line for the caller
-//!    to persist.
+//!    line per current file and deleted name, plus a final cursor line
+//!    for the caller to persist.
 //!
 //! Output format (one JSON object per line):
 //!   {"type":"journal-record","op":"create"|"modify"|"delete"|"rename",
@@ -22,22 +22,19 @@
 //!   {"type":"journal-cursor","cursor":N,"journalId":N,
 //!    "recordsEmitted":N,"recordsDropped":N,"journalRecords":N}
 //!
-//! What is NOT yet wired up (Phase 2b, follow-up commit):
-//! - JS-side orchestration that applies these records to the persisted
-//!   snapshot + index so the Changes tab updates from journal events.
-//! - Handling journal wrap-around (journal ID changes → full rescan needed).
-//! - Permission handling: some records for system files will fail path
-//!   resolution; those records are currently dropped with a diagnostic.
+//! Unresolved current files and removed names with unresolved parents are
+//! counted in recordsDropped; a failed lookup alone never proves deletion.
 
 #![cfg(windows)]
 
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::io::{self, Write};
 use std::os::windows::ffi::OsStrExt;
 
 use serde::Serialize;
 
-use crate::usn_aggregate::{JournalAggregate, JournalEntry};
+use crate::usn_aggregate::{JournalAggregate, JournalEntry, RENAME_OLD_NAME};
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE,
@@ -75,7 +72,8 @@ const RELEVANT_REASONS: u32 = USN_REASON_DATA_OVERWRITE
     | USN_REASON_DATA_TRUNCATION
     | USN_REASON_FILE_CREATE
     | USN_REASON_FILE_DELETE
-    | USN_REASON_RENAME_NEW_NAME;
+    | USN_REASON_RENAME_NEW_NAME
+    | RENAME_OLD_NAME;
 
 /// UTF-16 units for the longest path GetFinalPathNameByHandleW returns.
 const MAX_PATH_UNITS: usize = 32_768;
@@ -112,7 +110,7 @@ impl JournalOp {
         if reason & USN_REASON_FILE_DELETE != 0 {
             return JournalOp::Delete;
         }
-        if reason & USN_REASON_RENAME_NEW_NAME != 0 {
+        if reason & (USN_REASON_RENAME_NEW_NAME | RENAME_OLD_NAME) != 0 {
             return JournalOp::Rename;
         }
         if reason & USN_REASON_FILE_CREATE != 0 {
@@ -160,10 +158,10 @@ enum OutputLine {
         cursor: i64,
         #[serde(rename = "journalId")]
         journal_id: u64,
-        /// Files printed, one line each.
+        /// Operations printed, including deletes for old names.
         #[serde(rename = "recordsEmitted")]
         records_emitted: u64,
-        /// Files that could not be opened by ID (deleted, or no access).
+        /// Operations whose required current-file or removed-name path did not resolve.
         #[serde(rename = "recordsDropped")]
         records_dropped: u64,
         /// Journal records read, before folding them per file.
@@ -255,7 +253,7 @@ fn read_journal<F>(
     mut handle_record: F,
 ) -> io::Result<i64>
 where
-    F: FnMut(&USN_RECORD_V2),
+    F: FnMut(&USN_RECORD_V2, String),
 {
     #[repr(C)]
     struct ReadUsnJournalDataV0 {
@@ -316,7 +314,16 @@ where
             // Only process V2 records for now. V3/V4 have 128-bit file IDs
             // and require a different parse; on NTFS V2 covers everything.
             if record.MajorVersion == 2 {
-                handle_record(record);
+                let name_start = record.FileNameOffset as usize;
+                let name_len = record.FileNameLength as usize;
+                if name_start < 60 || name_len % 2 != 0 || name_start + name_len > record_length {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid USN filename"));
+                }
+                let units: Vec<u16> = buffer[offset + name_start..offset + name_start + name_len]
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect();
+                handle_record(record, String::from_utf16_lossy(&units));
             }
 
             offset += record_length;
@@ -498,14 +505,15 @@ pub fn run_journal_mode(drive_letter: char, start_cursor: Option<i64>) -> Result
 
 /// Reads the journal from `start` to `end` and folds the records per
 /// file first, so each file is opened and resolved once however many
-/// records it left. Returns one `JournalRecord` line per file that still
-/// opens, then the `JournalCursor` line.
+/// records it left. Keeps deleted/old names as separate delete operations,
+/// then emits the current state and the `JournalCursor` line.
 fn collect_changes(volume: HANDLE, journal_id: u64, start: i64, end: i64) -> io::Result<Vec<OutputLine>> {
     let mut journal = JournalAggregate::default();
-    let final_cursor = read_journal(volume, journal_id, start, end, |record| {
+    let final_cursor = read_journal(volume, journal_id, start, end, |record, name| {
         journal.add(JournalEntry {
             file_ref: record.FileReferenceNumber,
             parent_ref: record.ParentFileReferenceNumber,
+            name,
             usn: record.Usn,
             reason: record.Reason,
             timestamp: windows_filetime_to_unix_ms(record.TimeStamp),
@@ -514,32 +522,10 @@ fn collect_changes(volume: HANDLE, journal_id: u64, start: i64, end: i64) -> io:
     })?;
 
     let journal_records = journal.records();
-    let mut lines = Vec::new();
-    let mut dropped: u64 = 0;
     let mut path_buffer = vec![0u16; MAX_PATH_UNITS];
-    for entry in journal.into_files() {
-        let Some(resolved) = resolve_file(volume, entry.file_ref, &mut path_buffer) else {
-            dropped += 1;
-            continue;
-        };
-        let is_directory = resolved.is_directory.unwrap_or(
-            (entry.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0,
-        );
-        lines.push(OutputLine::JournalRecord {
-            op: JournalOp::from_reason(entry.reason),
-            path: resolved.path,
-            file_ref: entry.file_ref,
-            parent_ref: entry.parent_ref,
-            usn: entry.usn,
-            reason_mask: entry.reason,
-            timestamp: entry.timestamp,
-            size: resolved.allocated_size,
-            mtime: resolved.mtime_ms,
-            is_directory,
-            link_count: resolved.number_of_links,
-        });
-    }
-
+    let (mut lines, dropped) = resolve_changes(journal, |file_ref| {
+        resolve_file(volume, file_ref, &mut path_buffer)
+    });
     let records_emitted = lines.len() as u64;
     lines.push(OutputLine::JournalCursor {
         cursor: final_cursor,
@@ -549,6 +535,80 @@ fn collect_changes(volume: HANDLE, journal_id: u64, start: i64, end: i64) -> io:
         journal_records,
     });
     Ok(lines)
+}
+
+/// Cache successes and failures, including parent directories shared by
+/// many deleted files. A reference used as both a file and a parent still
+/// incurs only one OpenFileById during this read.
+fn resolve_changes(
+    journal: JournalAggregate,
+    mut resolve: impl FnMut(u64) -> Option<ResolvedFile>,
+) -> (Vec<OutputLine>, u64) {
+    let mut cache: HashMap<u64, Option<ResolvedFile>> = HashMap::new();
+    let mut lines = Vec::new();
+    let mut dropped = 0;
+    for file in journal.into_files() {
+        for removed in file.removed_names.values() {
+            crate::work::step();
+            emit_removed(removed, &mut cache, &mut resolve, &mut lines, &mut dropped);
+        }
+        let entry = file.latest;
+        // The deleted name has already been emitted. Resolving its ID
+        // can fail, or return a surviving hard link at a different path.
+        if entry.reason & USN_REASON_FILE_DELETE != 0 {
+            continue;
+        }
+        let resolved = cache.entry(entry.file_ref).or_insert_with(|| resolve(entry.file_ref));
+        if let Some(resolved) = resolved {
+            lines.push(record_line(&entry, JournalOp::from_reason(entry.reason), resolved));
+        } else if !file.removed_names.contains_key(&(entry.parent_ref, entry.name.clone())) {
+            // A lookup can fail for a live file (access denied, sharing
+            // restrictions, or a path-query error). Only FILE_DELETE and
+            // RENAME_OLD_NAME justify removing a name from the index.
+            dropped += 1;
+        }
+    }
+    (lines, dropped)
+}
+
+fn emit_removed(
+    entry: &JournalEntry,
+    cache: &mut HashMap<u64, Option<ResolvedFile>>,
+    resolve: &mut impl FnMut(u64) -> Option<ResolvedFile>,
+    lines: &mut Vec<OutputLine>,
+    dropped: &mut u64,
+) {
+    let parent = cache.entry(entry.parent_ref).or_insert_with(|| resolve(entry.parent_ref));
+    if let Some(parent) = parent.as_ref().filter(|_| !entry.name.is_empty()) {
+        let removed = ResolvedFile {
+            path: format!("{}\\{}", parent.path.trim_end_matches('\\'), entry.name),
+            allocated_size: None,
+            mtime_ms: 0,
+            is_directory: None,
+            number_of_links: None,
+        };
+        lines.push(record_line(entry, JournalOp::Delete, &removed));
+    } else {
+        *dropped += 1;
+    }
+}
+
+fn record_line(entry: &JournalEntry, op: JournalOp, resolved: &ResolvedFile) -> OutputLine {
+    OutputLine::JournalRecord {
+        op,
+        path: resolved.path.clone(),
+        file_ref: entry.file_ref,
+        parent_ref: entry.parent_ref,
+        usn: entry.usn,
+        reason_mask: entry.reason,
+        timestamp: entry.timestamp,
+        size: resolved.allocated_size,
+        mtime: resolved.mtime_ms,
+        is_directory: resolved.is_directory.unwrap_or(
+            (entry.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0,
+        ),
+        link_count: resolved.number_of_links,
+    }
 }
 
 /// Cheap query of the current journal state. Used right after a full scan
@@ -573,8 +633,12 @@ pub fn query_cursor(drive_letter: char) -> Result<(), String> {
 }
 
 #[cfg(test)]
+mod test_support;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use super::test_support::Fixture;
 
     fn record(size: Option<u64>) -> OutputLine {
         OutputLine::JournalRecord {
@@ -611,41 +675,21 @@ mod tests {
     fn a_file_written_in_several_sessions_comes_back_as_one_line() {
         use std::io::Write;
 
-        let dir = std::env::temp_dir().join(format!("diskhound-usn-fold-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let name = format!("fold-{}.bin", std::process::id());
-        let file = dir.join(&name);
-        let dir_text = dir.to_string_lossy().to_string();
-        let drive = dir_text.split(':').next().and_then(|head| head.chars().last()).unwrap();
-
-        let volume = match open_volume(drive) {
-            Ok(volume) => volume,
-            Err(err) => {
-                eprintln!("skipped: cannot open volume {drive}: ({err})");
-                return;
-            }
-        };
-        let before = match query_journal(volume) {
-            Ok(info) => info,
-            Err(err) => {
-                eprintln!("skipped: no USN journal on {drive}: ({err})");
-                unsafe { CloseHandle(volume) };
-                return;
-            }
-        };
+        let Some(fixture) = Fixture::new() else { return };
+        let name = "fold.bin";
+        let file = fixture.root().join(name);
+        let before = fixture.cursor();
         // Five write sessions: create, then an extend and a close each.
         for session in 0..5u8 {
             let mut out = std::fs::OpenOptions::new().create(true).append(true).open(&file).unwrap();
             out.write_all(&[session; 8192]).unwrap();
         }
-        let after = query_journal(volume).unwrap();
-        let lines = collect_changes(volume, before.journal_id, before.next_usn, after.next_usn).unwrap();
-        unsafe { CloseHandle(volume) };
-        let _ = std::fs::remove_dir_all(&dir);
+        let after = fixture.cursor();
+        let lines = fixture.changes(before);
 
         let mine: Vec<&OutputLine> = lines
             .iter()
-            .filter(|line| matches!(line, OutputLine::JournalRecord { path, .. } if path.ends_with(&name)))
+            .filter(|line| matches!(line, OutputLine::JournalRecord { path, .. } if path.eq_ignore_ascii_case(&file.to_string_lossy())))
             .collect();
         assert_eq!(mine.len(), 1, "one line for the file, not one per record: {mine:?}");
         let OutputLine::JournalRecord { op, reason_mask, size, .. } = mine[0] else { unreachable!() };
@@ -659,6 +703,189 @@ mod tests {
         };
         assert!(journal_records > records_emitted, "{journal_records} records, {records_emitted} lines");
         assert!(*cursor >= after.next_usn);
+    }
+
+    #[test]
+    fn deleted_and_renamed_files_keep_their_recorded_paths() {
+        let Some(fixture) = Fixture::new() else { return };
+        let dir = fixture.root();
+        let dest = dir.join("destination");
+        std::fs::create_dir_all(&dest).unwrap();
+        let deleted = dir.join("deleted.bin");
+        let old = dir.join("old-名前.bin");
+        let middle = dest.join("middle.bin");
+        let new = dest.join("new-名前.bin");
+        std::fs::write(&deleted, [1; 8192]).unwrap();
+        std::fs::write(&old, [2; 8192]).unwrap();
+        let before = fixture.cursor();
+        std::fs::remove_file(&deleted).unwrap();
+        std::fs::rename(&old, &middle).unwrap();
+        std::fs::rename(&middle, &new).unwrap();
+        let created = dir.join("created.bin");
+        std::fs::write(&created, [3; 8192]).unwrap();
+        let lines = fixture.changes(before);
+
+        for (path, expected) in [
+            (&deleted, "delete"), (&old, "delete"), (&middle, "delete"),
+            (&new, "rename"), (&created, "create"),
+        ] {
+            let path_text = path.to_string_lossy();
+            let mine: Vec<_> = lines.iter().filter(|line| matches!(line,
+                OutputLine::JournalRecord { path, .. } if path.eq_ignore_ascii_case(&path_text)
+            )).collect();
+            assert_eq!(mine.len(), 1, "expected one {expected} at {path_text}: {mine:?}");
+            let json = serde_json::to_value(mine[0]).unwrap();
+            assert_eq!(json["op"], expected, "{path_text}: {json}");
+        }
+    }
+
+    #[test]
+    fn real_access_denied_is_dropped_and_the_live_file_survives() {
+        let Some(fixture) = Fixture::new() else { return };
+        let before = fixture.cursor();
+        let mut denied = fixture.deny_attributes_on_new_file();
+        let after = fixture.cursor();
+        let mut file_refs = std::collections::HashSet::new();
+        let mut path_buffer = vec![0u16; MAX_PATH_UNITS];
+        read_journal(fixture.volume(), before.journal_id, before.next_usn, after.next_usn, |record, name| {
+            if name == "permission.bin" {
+                if let Some(parent) = resolve_file(fixture.volume(), record.ParentFileReferenceNumber, &mut path_buffer) {
+                    if parent.path.eq_ignore_ascii_case(&fixture.root().to_string_lossy()) {
+                        file_refs.insert(record.FileReferenceNumber);
+                    }
+                }
+            }
+        }).unwrap();
+        assert_eq!(file_refs.len(), 1, "must observe the real fixture's journal record");
+        let file_ref = *file_refs.iter().next().unwrap();
+        assert!(resolve_file(fixture.volume(), file_ref, &mut path_buffer).is_none(),
+            "fixture DACL must actually prevent OpenFileById attribute access");
+        let lines = fixture.changes(before);
+        assert!(!lines.iter().any(|line| matches!(line,
+            OutputLine::JournalRecord { file_ref: seen, .. } if *seen == file_ref
+        )), "an inaccessible live file must not emit a delete or fabricated metadata");
+        assert!(matches!(lines.last(), Some(OutputLine::JournalCursor { records_dropped, .. }) if *records_dropped >= 1));
+        denied.restore().unwrap();
+        assert_eq!(std::fs::read(&denied.path).unwrap(), b"owned USN permission fixture");
+        assert!(resolve_file(fixture.volume(), file_ref, &mut path_buffer).is_some());
+    }
+
+    #[test]
+    fn permission_fixture_restores_its_acl_during_unwind() {
+        let Some(fixture) = Fixture::new() else { return };
+        let path = fixture.root().join("permission.bin");
+        let panic = std::panic::catch_unwind(|| {
+            let _denied = fixture.deny_attributes_on_new_file();
+            panic!("intentional fixture unwind");
+        }).unwrap_err();
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"intentional fixture unwind"));
+        assert_eq!(std::fs::read(path).unwrap(), b"owned USN permission fixture");
+    }
+
+    #[test]
+    fn deleting_a_parent_reports_its_unresolvable_child_as_dropped() {
+        let Some(fixture) = Fixture::new() else { return };
+        let parent = fixture.root().join("removed-parent");
+        std::fs::create_dir(&parent).unwrap();
+        let child = parent.join("child.bin");
+        std::fs::write(&child, [1; 8192]).unwrap();
+        let before = fixture.cursor();
+        std::fs::remove_file(&child).unwrap();
+        std::fs::remove_dir(&parent).unwrap();
+        let lines = fixture.changes(before);
+        assert!(lines.iter().any(|line| matches!(line,
+            OutputLine::JournalRecord { op: JournalOp::Delete, path, is_directory: true, .. }
+                if path.eq_ignore_ascii_case(&parent.to_string_lossy())
+        )));
+        assert!(matches!(lines.last(), Some(OutputLine::JournalCursor { records_dropped, .. }) if *records_dropped >= 1));
+        assert!(!lines.iter().any(|line| matches!(line,
+            OutputLine::JournalRecord { path, .. } if path.eq_ignore_ascii_case(&child.to_string_lossy())
+        )), "without the deleted parent there is no resolved child path to emit");
+    }
+
+    #[test]
+    fn failed_current_file_lookup_does_not_infer_deletion() {
+        for reason in [USN_REASON_FILE_CREATE, USN_REASON_DATA_EXTEND, USN_REASON_RENAME_NEW_NAME] {
+            let mut journal = JournalAggregate::default();
+            journal.add(JournalEntry {
+                file_ref: 7,
+                parent_ref: 5,
+                name: "still-present.bin".into(),
+                usn: 1,
+                reason,
+                timestamp: 0,
+                attributes: 0,
+            });
+            let (lines, dropped) = resolve_changes(journal, |id| {
+                // Model an inaccessible live file whose parent is accessible.
+                // OpenFileById and path-query failures share the same None.
+                if id == 7 { return None; }
+                assert_eq!(id, 5);
+                Some(ResolvedFile {
+                    path: r"C:\accessible-parent".into(),
+                    allocated_size: None,
+                    mtime_ms: 0,
+                    is_directory: Some(true),
+                    number_of_links: None,
+                })
+            });
+            assert!(lines.is_empty(), "lookup failure emitted an operation: {lines:?}");
+            assert_eq!(dropped, 1, "uncertainty must remain visible to the caller");
+        }
+    }
+
+    #[test]
+    fn removed_names_and_parent_cache_scale_with_files_and_parents() {
+        fn run(files: u64, parents: u64) -> u64 {
+            let mut journal = JournalAggregate::default();
+            for id in 0..files {
+                journal.add(JournalEntry {
+                    file_ref: id + parents,
+                    parent_ref: id % parents,
+                    name: format!("old-{id}"),
+                    usn: 1,
+                    reason: RENAME_OLD_NAME,
+                    timestamp: 0,
+                    attributes: 0,
+                });
+                journal.add(JournalEntry {
+                    file_ref: id + parents,
+                    parent_ref: id % parents,
+                    name: format!("new-{id}"),
+                    usn: 2,
+                    reason: USN_REASON_RENAME_NEW_NAME,
+                    timestamp: 0,
+                    attributes: 0,
+                });
+            }
+            let mut calls = HashMap::<u64, u64>::new();
+            crate::work::take();
+            let (lines, dropped) = resolve_changes(journal, |id| {
+                *calls.entry(id).or_default() += 1;
+                // Missing parent paths are cached too. Unresolved current
+                // file IDs remain dropped, even when their parent resolves.
+                if id >= parents || id == 0 { return None; }
+                Some(ResolvedFile {
+                    path: format!(r"C:\parent-{id}"),
+                    allocated_size: None,
+                    mtime_ms: 0,
+                    is_directory: Some(true),
+                    number_of_links: None,
+                })
+            });
+            assert!(calls.values().all(|count| *count == 1));
+            assert_eq!(calls.len() as u64, files + parents);
+            assert_eq!(dropped, files + files / parents);
+            assert_eq!(lines.len() as u64 + dropped, 2 * files);
+            assert!(lines.iter().all(|line| matches!(line,
+                OutputLine::JournalRecord { op: JournalOp::Delete, .. }
+            )));
+            crate::work::take() + calls.values().sum::<u64>()
+        }
+        let small = run(2_000, 20);
+        let large = run(16_000, 160);
+        assert!(large <= small * 16);
+        assert!(large <= 5 * 16_000);
     }
 
     #[test]

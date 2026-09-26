@@ -2,9 +2,12 @@ import * as FS from "node:fs";
 import * as FSP from "node:fs/promises";
 import * as OS from "node:os";
 import * as Path from "node:path";
+import { gunzipSync } from "node:zlib";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { checkUsnForAnyChanges } from "../usnMonitor";
+import { normPath } from "../shared/pathUtils";
 import { runIncrementalRescan, type IncrementalRescanDeps } from "../incrementalRescan";
 import { commitCompletedScan, settingsWithRecentScan } from "../scanCommit";
 import type { DiskDelta, ScanSnapshot } from "../shared/contracts";
@@ -217,14 +220,14 @@ async function seedHistoryAtCap(): Promise<string[]> {
   return ids;
 }
 
-function journalRecord(filePath: string, op: string, size: number | null, mtime: number) {
+function journalRecord(filePath: string, op: string, size: number | null, mtime: number, identity = { fileRef: 1, usn: 3 }) {
   return JSON.stringify({
     type: "journal-record",
     op,
     path: filePath,
-    fileRef: 1,
+    fileRef: identity.fileRef,
     parentRef: 2,
-    usn: 3,
+    usn: identity.usn,
     reasonMask: 0,
     timestamp: mtime,
     ...(size === null ? {} : { size }),
@@ -233,13 +236,13 @@ function journalRecord(filePath: string, op: string, size: number | null, mtime:
   });
 }
 
-function journalCursor(records: number) {
+function journalCursor(records: number, dropped = 0) {
   return JSON.stringify({
     type: "journal-cursor",
     cursor: 2_000_000,
     journalId: JOURNAL_ID,
     recordsEmitted: records,
-    recordsDropped: 0,
+    recordsDropped: dropped,
   });
 }
 
@@ -338,6 +341,30 @@ describe("scheduled USN rescan (Windows)", () => {
     expect(getCursor("C:")?.cursor).toBe(2_000_000);
   });
 
+  it("preserves the saved index when a live file's journal lookup was dropped", async () => {
+    const ids = await seedHistoryAtCap();
+    await saveCursor();
+    const previousIndex = indexFilePath(ids.at(-1)!);
+    const previousBytes = FS.readFileSync(previousIndex);
+    // A create/modify/rename record whose file could not be opened by ID:
+    // native emits no delete, and reports the unresolved operation instead.
+    journal.lines = [journalCursor(0, 1)];
+    const { deps, calls } = incrementalDeps();
+
+    const { io, result } = await measureFsIo(() => runIncrementalRescan(ROOT, deps));
+
+    expectIoBudget({
+      scenario: "usn-tick-unresolved-file",
+      note: "an unresolved current-file lookup is reported as dropped, never as a delete: preserve the index and history, with 1 snapshot read and 0 writes (0 writes/day and 0 MB/day at both the 6 h default and the 1-minute minimum; deferred session flushes use the existing quit budget). The manual probe requests a full rescan on dropped records",
+      io,
+    });
+    expect(result).toMatchObject({ changed: false, stats: { recordsDropped: 1, deletions: 0 } });
+    expect(getScanHistory(ROOT).map((entry) => entry.id)).toEqual([...ids].reverse());
+    expect(FS.readFileSync(previousIndex)).toEqual(previousBytes);
+    expect(calls).toMatchObject({ warmFullDiff: 0, onCommitted: 0 });
+    expect(calls.published[0]?.filesVisited).toBe(FILES);
+  });
+
   it("writes an hour of no-op ticks once, at quit", async () => {
     await seedHistoryAtCap();
     await saveCursor();
@@ -387,6 +414,64 @@ describe("scheduled USN rescan (Windows)", () => {
     expect(result).toMatchObject({ changed: false });
     expect(getScanHistory(ROOT).map((entry) => entry.id)).toEqual([...ids].reverse());
     expect(FS.readdirSync(Path.join(dataDir, "scan-indexes")).filter((name) => name.startsWith("pending-"))).toEqual([]);
+  });
+
+  it("removes deleted and renamed paths from the committed index", async () => {
+    const ids = await seedHistoryAtCap();
+    await saveCursor();
+    const [gone, old, reused] = baseTree.files;
+    const renamedPath = Path.join(ROOT, "renamed.bin");
+    journal.lines = [
+      journalRecord(gone!.path, "delete", null, now, { fileRef: 1, usn: 10 }),
+      journalRecord(old!.path, "delete", null, now, { fileRef: 2, usn: 20 }),
+      journalRecord(renamedPath, "rename", old!.size, old!.mtime, { fileRef: 2, usn: 21 }),
+      // Grouping by file reference can put an older removal after the
+      // current file at a reused path. USN, not output order, must win.
+      journalRecord(reused!.path, "create", reused!.size, reused!.mtime, { fileRef: 3, usn: 30 }),
+      journalRecord(reused!.path, "delete", null, now, { fileRef: 4, usn: 5 }),
+      journalCursor(5),
+    ];
+    const { deps, calls } = incrementalDeps();
+    const { io, result } = await measureFsIo(() => runIncrementalRescan(ROOT, deps));
+
+    expectIoBudget({
+      scenario: "usn-tick-delete-and-rename",
+      note: "one delete and one rename, including an older delete at a reused path: 5 writeFile calls and 1 index stream, the same persistence as an existing changed tick, with 2 sidecar links and history pruning. At 7M files ~335 MB/tick: 24 content writes/day and ~1,340 MB/day at the 6 h default; 8,640 content writes/day and ~482,400 MB/day at the 1-minute minimum if every tick changes files. No per-record writes added; this records the existing whole-index rewrite cost",
+      io,
+    });
+    expect(result).toMatchObject({ changed: true, stats: { additions: 1, modifications: 0, deletions: 2 } });
+    expect(calls).toMatchObject({ onCommitted: 1, warmFullDiff: 1 });
+    const newest = getScanHistory(ROOT)[0]!;
+    expect(newest.id).not.toBe(ids.at(-1));
+    const entries = gunzipSync(FS.readFileSync(indexFilePath(newest.id))).toString("utf8")
+      .trim().split("\n").map((line) => JSON.parse(line) as { p: string; s?: number; t?: string });
+    const files = new Map(entries.filter((entry) => entry.t !== "d").map((entry) => [normPath(entry.p), entry]));
+    expect(files.size).toBe(FILES - 1);
+    expect(files.has(normPath(gone!.path))).toBe(false);
+    expect(files.has(normPath(old!.path))).toBe(false);
+    expect(files.get(normPath(renamedPath))?.s).toBe(old!.size);
+    expect(files.get(normPath(reused!.path))?.s).toBe(reused!.size);
+    expect(calls.published[0]?.filesVisited).toBe(FILES - 1);
+    expect(getCursor("C:")?.cursor).toBe(2_000_000);
+  });
+
+  it.each([
+    { emitted: 0, dropped: 1, changed: true },
+    { emitted: 1, dropped: 0, changed: true },
+    { emitted: 0, dropped: 0, changed: false },
+  ])("manual probe with $emitted emitted and $dropped dropped records", async ({ emitted, dropped, changed }) => {
+    await saveCursor();
+    journal.lines = [
+      ...(emitted ? [journalRecord(baseTree.files[0]!.path, "delete", null, now)] : []),
+      journalCursor(emitted, dropped),
+    ];
+    const { io, result } = await measureFsIo(() => checkUsnForAnyChanges("diskhound-native-scanner", ROOT));
+    expectIoBudget({
+      scenario: "usn-manual-probe",
+      note: "manual USN probe, including dropped records whose paths cannot be ruled outside the root: 0 writes and 0 MB/day at both the 6 h default and the 1-minute minimum; an uncertain probe requests a full scan",
+      io,
+    });
+    expect(result).toMatchObject({ changed, recordCount: emitted });
   });
 
   it("rewrites the index when files under the root changed", async () => {
