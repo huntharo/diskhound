@@ -341,6 +341,30 @@ describe("scheduled USN rescan (Windows)", () => {
     expect(getCursor("C:")?.cursor).toBe(2_000_000);
   });
 
+  it("preserves the saved index when a live file's journal lookup was dropped", async () => {
+    const ids = await seedHistoryAtCap();
+    await saveCursor();
+    const previousIndex = indexFilePath(ids.at(-1)!);
+    const previousBytes = FS.readFileSync(previousIndex);
+    // A create/modify/rename record whose file could not be opened by ID:
+    // native emits no delete, and reports the unresolved operation instead.
+    journal.lines = [journalCursor(0, 1)];
+    const { deps, calls } = incrementalDeps();
+
+    const { io, result } = await measureFsIo(() => runIncrementalRescan(ROOT, deps));
+
+    expectIoBudget({
+      scenario: "usn-tick-unresolved-file",
+      note: "an unresolved current-file lookup is reported as dropped, never as a delete: preserve the index and history, with 1 snapshot read and 0 writes (0 writes/day and 0 MB/day at both the 6 h default and the 1-minute minimum; deferred session flushes use the existing quit budget). The manual probe requests a full rescan on dropped records",
+      io,
+    });
+    expect(result).toMatchObject({ changed: false, stats: { recordsDropped: 1, deletions: 0 } });
+    expect(getScanHistory(ROOT).map((entry) => entry.id)).toEqual([...ids].reverse());
+    expect(FS.readFileSync(previousIndex)).toEqual(previousBytes);
+    expect(calls).toMatchObject({ warmFullDiff: 0, onCommitted: 0 });
+    expect(calls.published[0]?.filesVisited).toBe(FILES);
+  });
+
   it("writes an hour of no-op ticks once, at quit", async () => {
     await seedHistoryAtCap();
     await saveCursor();

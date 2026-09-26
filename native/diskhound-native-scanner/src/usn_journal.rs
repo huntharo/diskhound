@@ -22,8 +22,8 @@
 //!   {"type":"journal-cursor","cursor":N,"journalId":N,
 //!    "recordsEmitted":N,"recordsDropped":N,"journalRecords":N}
 //!
-//! If neither the file nor its parent resolves, the operation is counted
-//! in recordsDropped; callers cannot assume those paths are unchanged.
+//! Unresolved current files and removed names with unresolved parents are
+//! counted in recordsDropped; a failed lookup alone never proves deletion.
 
 #![cfg(windows)]
 
@@ -161,7 +161,7 @@ enum OutputLine {
         /// Operations printed, including deletes for old names.
         #[serde(rename = "recordsEmitted")]
         records_emitted: u64,
-        /// Operations whose file and parent paths could not be resolved.
+        /// Operations whose required current-file or removed-name path did not resolve.
         #[serde(rename = "recordsDropped")]
         records_dropped: u64,
         /// Journal records read, before folding them per file.
@@ -562,9 +562,10 @@ fn resolve_changes(
         if let Some(resolved) = resolved {
             lines.push(record_line(&entry, JournalOp::from_reason(entry.reason), resolved));
         } else if !file.removed_names.contains_key(&(entry.parent_ref, entry.name.clone())) {
-            // The file vanished after the journal boundary, or cannot be
-            // opened. Its parent and recorded name can still locate it.
-            emit_removed(&entry, &mut cache, &mut resolve, &mut lines, &mut dropped);
+            // A lookup can fail for a live file (access denied, sharing
+            // restrictions, or a path-query error). Only FILE_DELETE and
+            // RENAME_OLD_NAME justify removing a name from the index.
+            dropped += 1;
         }
     }
     (lines, dropped)
@@ -783,7 +784,38 @@ mod tests {
     }
 
     #[test]
-    fn fallback_and_parent_cache_scale_with_files_and_parents() {
+    fn failed_current_file_lookup_does_not_infer_deletion() {
+        for reason in [USN_REASON_FILE_CREATE, USN_REASON_DATA_EXTEND, USN_REASON_RENAME_NEW_NAME] {
+            let mut journal = JournalAggregate::default();
+            journal.add(JournalEntry {
+                file_ref: 7,
+                parent_ref: 5,
+                name: "still-present.bin".into(),
+                usn: 1,
+                reason,
+                timestamp: 0,
+                attributes: 0,
+            });
+            let (lines, dropped) = resolve_changes(journal, |id| {
+                // Model an inaccessible live file whose parent is accessible.
+                // OpenFileById and path-query failures share the same None.
+                if id == 7 { return None; }
+                assert_eq!(id, 5);
+                Some(ResolvedFile {
+                    path: r"C:\accessible-parent".into(),
+                    allocated_size: None,
+                    mtime_ms: 0,
+                    is_directory: Some(true),
+                    number_of_links: None,
+                })
+            });
+            assert!(lines.is_empty(), "lookup failure emitted an operation: {lines:?}");
+            assert_eq!(dropped, 1, "uncertainty must remain visible to the caller");
+        }
+    }
+
+    #[test]
+    fn removed_names_and_parent_cache_scale_with_files_and_parents() {
         fn run(files: u64, parents: u64) -> u64 {
             let mut journal = JournalAggregate::default();
             for id in 0..files {
@@ -810,8 +842,8 @@ mod tests {
             crate::work::take();
             let (lines, dropped) = resolve_changes(journal, |id| {
                 *calls.entry(id).or_default() += 1;
-                // Missing parent paths are cached too. Missing file IDs
-                // use their parent's path with the latest recorded name.
+                // Missing parent paths are cached too. Unresolved current
+                // file IDs remain dropped, even when their parent resolves.
                 if id >= parents || id == 0 { return None; }
                 Some(ResolvedFile {
                     path: format!(r"C:\parent-{id}"),
@@ -823,7 +855,7 @@ mod tests {
             });
             assert!(calls.values().all(|count| *count == 1));
             assert_eq!(calls.len() as u64, files + parents);
-            assert_eq!(dropped, 2 * files / parents);
+            assert_eq!(dropped, files + files / parents);
             assert_eq!(lines.len() as u64 + dropped, 2 * files);
             assert!(lines.iter().all(|line| matches!(line,
                 OutputLine::JournalRecord { op: JournalOp::Delete, .. }
