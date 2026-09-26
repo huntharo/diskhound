@@ -5,6 +5,7 @@ import { Worker } from "node:worker_threads";
 import { createGunzip } from "node:zlib";
 
 import { resolveBundledWorkerScript } from "./bundledWorkerPath";
+import { INDEX_FILE_LINE_RE } from "./indexLineParse";
 import { unescapeJsonPath } from "./jsonPathUnescape";
 import { normPath } from "./pathUtils";
 import type {
@@ -60,9 +61,11 @@ export async function buildFolderTreeFromIndex(
   // Fast-path regex for file entries: the scanner always emits exactly
   // this shape, so pattern-matching it bypasses serde_json's object
   // allocation and the two .indexOf() calls JSON.parse does internally.
-  // Format: {"p":"<escapedPath>","s":<size>,"m":<mtime>}
+  // Format: {"p":"<escapedPath>","s":<size>,"m":<mtime>} plus the
+  // optional suffixes INDEX_FILE_LINE_RE lists (ignored here — folder
+  // rollups stay allocated size, like `du`).
   // (dir entries use "t":"d" and are skipped cheaply below.)
-  const FILE_LINE_RE = /^\{"p":"((?:\\.|[^"\\])*)","s":(\d+),"m":(\d+)\}$/;
+  const FILE_LINE_RE = INDEX_FILE_LINE_RE;
 
   for await (const line of rl) {
     if (!line) continue;

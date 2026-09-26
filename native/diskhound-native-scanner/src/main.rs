@@ -28,6 +28,7 @@ mod usn_aggregate;
 mod mft;
 
 mod sample;
+mod clone_attrs;
 mod dev_artifacts;
 mod index_line;
 #[cfg(not(windows))]
@@ -36,6 +37,8 @@ mod hardlinks;
 mod walk_prune;
 #[cfg(test)]
 mod test_support;
+
+use clone_attrs::{CloneAttrs, CloneGroupSummary, CloneGroups, CloneTotals, OUTSIDE_ROOTS};
 
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{GetLastError, ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE};
@@ -213,7 +216,9 @@ struct ScanOptions {}
 /// compression is inherently sequential on one stream).
 struct IndexWriter {
     tx: Option<crossbeam_channel::Sender<IndexWriteMsg>>,
-    handle: Option<std::thread::JoinHandle<io::Result<()>>>,
+    /// Writer thread result plus the APFS clone groups it collected
+    /// (returned even when gzip failed, so the Dev sidecar keeps them).
+    handle: Option<std::thread::JoinHandle<(io::Result<()>, CloneGroups)>>,
     dev_acc: Option<Arc<Mutex<dev_artifacts::DevArtifactAcc>>>,
     dev_output: Option<PathBuf>,
     scan_root: String,
@@ -225,6 +230,12 @@ enum IndexWriteMsg {
         size: u64,
         mtime: u64,
         extra_hardlink: bool,
+        /// `(st_dev, st_ino)` when the file has more than one name
+        /// (Unix walker). Written as `"i"` so Duplicates can tell names
+        /// of one file from real copies without a stat.
+        link_id: Option<(u64, u64)>,
+        /// APFS private size / clone id (macOS walker only).
+        clone: Option<CloneAttrs>,
     },
     Dir { path: String, mtime: u64 },
     Finish,
@@ -245,7 +256,11 @@ impl IndexWriter {
         let (tx, rx) = crossbeam_channel::bounded::<IndexWriteMsg>(32_768);
         let handle = std::thread::Builder::new()
             .name("diskhound-index-writer".to_string())
-            .spawn(move || -> io::Result<()> {
+            .spawn(move || -> (io::Result<()>, CloneGroups) {
+                // Full-clone groups keyed by APFS clone id. Lives on this
+                // thread because Dev root classification happens here.
+                let mut clone_groups = CloneGroups::new();
+                let result = (|| -> io::Result<()> {
                 // 1 MB buffer between gzip encoder and File — reduces
                 // write syscalls from thousands per second to tens.
                 let buffered = BufWriter::with_capacity(1 << 20, file);
@@ -266,6 +281,8 @@ impl IndexWriter {
                             size,
                             mtime,
                             extra_hardlink,
+                            link_id,
+                            clone,
                         } => {
                             line.clear();
                             // Hand-rolled `{"p":"<esc>","s":N,"m":M}\n`.
@@ -286,12 +303,53 @@ impl IndexWriter {
                             if extra_hardlink {
                                 line.extend_from_slice(br#","h":1"#);
                             }
+                            // Every name of a hardlinked file carries the
+                            // same `dev:ino`, owner included: `h` alone
+                            // can't say which names are one file, because
+                            // it marks the owner of *this* scan root and
+                            // Duplicates often reads a wider root's index.
+                            // Compare ids within one index only; APFS can
+                            // renumber st_dev on remount.
+                            if let Some((dev, ino)) = link_id {
+                                line.extend_from_slice(br#","i":""#);
+                                append_u64_decimal(&mut line, dev);
+                                line.push(b':');
+                                append_u64_decimal(&mut line, ino);
+                                line.push(b'"');
+                            }
+                            // APFS clones: `v` = private bytes (what
+                            // deleting this file alone frees; the rest
+                            // of `s` is shared with another clone),
+                            // `k` = shares blocks with a clone. `k`
+                            // without `v` means the private size is
+                            // unknown (PRIVATESIZE unavailable); readers
+                            // count it as 0, like CloneAttrs does. A
+                            // clone that no longer shares any block gets
+                            // neither. Field order is fixed (h, v, k) so
+                            // the TS / Rust fast-path parsers stay
+                            // regex-cheap.
+                            if let Some(attrs) = clone.as_ref().filter(|a| a.may_share()) {
+                                match attrs.private_size.map(|private| private.min(size)) {
+                                    Some(private) if private >= size => {}
+                                    Some(private) => {
+                                        line.extend_from_slice(br#","v":"#);
+                                        append_u64_decimal(&mut line, private);
+                                        line.extend_from_slice(br#","k":1"#);
+                                    }
+                                    None => line.extend_from_slice(br#","k":1"#),
+                                }
+                            }
                             line.extend_from_slice(b"}\n");
                             run.write(&mut encoder, &line)?;
-                            if let Some(acc) = &dev_acc_thread {
-                                acc.lock()
+                            let dev_root = match &dev_acc_thread {
+                                Some(acc) => acc
+                                    .lock()
                                     .unwrap_or_else(|e| e.into_inner())
-                                    .add(&path, size, extra_hardlink);
+                                    .add(&path, size, extra_hardlink, clone.as_ref()),
+                                None => None,
+                            };
+                            if let (Some(attrs), false) = (clone.as_ref(), extra_hardlink) {
+                                clone_groups.add(attrs, size, dev_root.unwrap_or(OUTSIDE_ROOTS));
                             }
                         }
                         IndexWriteMsg::Dir { path, mtime } => {
@@ -310,6 +368,8 @@ impl IndexWriter {
                 let mut buffered = encoder.finish()?;
                 buffered.flush()?;
                 Ok(())
+                })();
+                (result, clone_groups)
             })?;
         Ok(IndexWriter {
             tx: Some(tx),
@@ -340,13 +400,23 @@ impl IndexWriter {
         Ok(())
     }
 
-    fn write_entry(&mut self, path: &str, size: u64, mtime: u64, extra_hardlink: bool) -> io::Result<()> {
+    fn write_entry(
+        &mut self,
+        path: &str,
+        size: u64,
+        mtime: u64,
+        extra_hardlink: bool,
+        link_id: Option<(u64, u64)>,
+        clone: Option<CloneAttrs>,
+    ) -> io::Result<()> {
         if let Some(tx) = self.tx.as_ref() {
             tx.send(IndexWriteMsg::File {
                 path: path.to_string(),
                 size,
                 mtime,
                 extra_hardlink,
+                link_id,
+                clone,
             })
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "index writer thread exited"))?;
         }
@@ -355,25 +425,28 @@ impl IndexWriter {
 
     /// Signal the writer thread to finish pending messages, close the
     /// gzip stream cleanly, and flush to disk. Blocks on the join so
-    /// the caller knows the file is complete before returning.
-    fn finish(mut self) -> io::Result<()> {
+    /// the caller knows the file is complete before returning. Also
+    /// returns the clone-group summary, None when the writer thread
+    /// panicked and its groups are lost.
+    fn finish(mut self) -> (io::Result<()>, Option<CloneGroupSummary>) {
         if let Some(tx) = self.tx.take() {
             let _ = tx.send(IndexWriteMsg::Finish);
             drop(tx);
         }
-        let join_err = if let Some(handle) = self.handle.take() {
+        let (join_err, clone_groups) = if let Some(handle) = self.handle.take() {
             match handle.join() {
-                Ok(result) => result.err(),
-                Err(_) => Some(io::Error::other("index writer thread panicked")),
+                Ok((result, groups)) => (result.err(), Some(groups)),
+                Err(_) => (Some(io::Error::other("index writer thread panicked")), None),
             }
         } else {
-            None
+            (None, None)
         };
+        let clone_summary = clone_groups.as_ref().map(CloneGroups::summary);
         // Write the Dev sidecar even if gzip finish failed — classify
         // already ran on every file the writer accepted.
         if let (Some(out), Some(acc)) = (self.dev_output.take(), self.dev_acc.take()) {
             let guard = acc.lock().unwrap_or_else(|e| e.into_inner());
-            match dev_artifacts::write_sidecar(&out, &self.scan_root, &guard) {
+            match dev_artifacts::write_sidecar(&out, &self.scan_root, &guard, clone_groups.as_ref()) {
                 Ok(()) => eprintln!(
                     "[diskhound-native-scanner] dev-artifacts sidecar: wrote {} ({} roots)",
                     out.display(),
@@ -384,10 +457,11 @@ impl IndexWriter {
                 ),
             }
         }
-        match join_err {
+        let result = match join_err {
             Some(err) => Err(err),
             None => Ok(()),
-        }
+        };
+        (result, clone_summary)
     }
 }
 
@@ -512,10 +586,27 @@ struct ScanSnapshot {
     /// indexing phase when the byte-based bar is stuck near 100%.
     /// None for the walker path where this number isn't known upfront.
     expected_total_files: Option<u64>,
+    /// APFS clone / private-size tallies (macOS walker). Mirrors
+    /// `ScanStorageAccounting` in src/shared/contracts.ts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    storage_accounting: Option<StorageAccountingOut>,
     /// Mount points below the root the walk left out because they are
     /// another disk. The UI links the ones with a drive pill.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     skipped_mounts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageAccountingOut {
+    measured_files: u64,
+    measured_bytes: u64,
+    clone_files: u64,
+    clone_bytes: u64,
+    clone_private_bytes: u64,
+    clone_duplicate_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    approximate: bool,
 }
 
 /// Coarse-grained scan progress phases. The UI switches status copy
@@ -600,6 +691,11 @@ struct ScanState {
     /// Expected total file count (populated from MFT records_kept after
     /// MFT enumeration). None for walker path.
     expected_total_files: Option<u64>,
+    /// APFS clone / private-size sums over every recorded file that
+    /// came with clone attributes (macOS walker only).
+    clone_totals: CloneTotals,
+    /// Full-clone dedupe from the index writer; set just before Done.
+    clone_group_summary: Option<CloneGroupSummary>,
     /// Disk touches so far. Shared with walker threads.
     io: Arc<IoStats>,
     /// Other disks the walk left out. See walk_prune.
@@ -648,6 +744,8 @@ impl ScanState {
             emit_lite_snapshots: false,
             scan_phase: ScanPhase::Starting,
             expected_total_files: None,
+            clone_totals: CloneTotals::default(),
+            clone_group_summary: None,
             io,
             skipped_mounts: Vec::new(),
         }
@@ -937,7 +1035,7 @@ fn stream_inherited_files_into(
         // Write to new index so the index remains a complete baseline for
         // the NEXT scan.
         if let Some(writer) = state.index_writer.as_mut() {
-            let _ = writer.write_entry(&normalized, size, mtime, extra_hardlink);
+            let _ = writer.write_entry(&normalized, size, mtime, extra_hardlink, rec.link_id, None);
         }
 
         // Update top-N + extension aggregates. Note: directory_totals +
@@ -1327,9 +1425,19 @@ fn run() -> Result<(), String> {
     // Dev sidecar after Done raced: the rename missed, and Dev Artifacts
     // fell through to a 1m+ folder-tree classify on a 7M-file C: scan.
     if let Some(writer) = state.index_writer.take() {
-        if let Err(err) = writer.finish() {
+        let (result, clone_summary) = writer.finish();
+        if let Err(err) = result {
             eprintln!("[diskhound-native-scanner] index writer finish failed ({err})");
         }
+        if let Some(summary) = clone_summary.filter(|summary| summary.groups > 0) {
+            eprintln!(
+                "[diskhound-native-scanner] clone groups: {} groups, {} duplicate bytes{}",
+                summary.groups,
+                summary.duplicate_bytes,
+                if summary.truncated { " (capped)" } else { "" },
+            );
+        }
+        state.clone_group_summary = clone_summary;
     }
 
     if matches!(final_status, ScanStatus::Done) {
@@ -1465,6 +1573,24 @@ fn scan_generic_with_plan(
     let pruned_for_walk = Arc::clone(&pruned);
     let io_for_walk = Arc::clone(&state.io);
 
+    // macOS: dua-core's bulk folder reads also return each file's APFS
+    // clone id (set only for files that may share blocks). The loop below
+    // reads the rest (copy count, private size) for those files alone.
+    #[cfg(target_os = "macos")]
+    let clone_attrs_enabled = clone_attrs::enable_for_root(root_path);
+    #[cfg(target_os = "macos")]
+    eprintln!(
+        "[diskhound-native-scanner] macos: APFS clone attributes {}",
+        if clone_attrs_enabled { "on" } else { "off" }
+    );
+    #[cfg(target_os = "macos")]
+    let walk_options = dua_core::Options {
+        apfs_clone_metadata: clone_attrs_enabled,
+        ..dua_core::Options::default()
+    };
+    #[cfg(not(target_os = "macos"))]
+    let walk_options = dua_core::Options::default();
+
     // dua-core asks once about every directory it could read, the root
     // included, and reads exactly the ones it gets `true` for. Prune there,
     // BEFORE descending: /proc and /dev hold kernel-generated entries (a
@@ -1476,7 +1602,7 @@ fn scan_generic_with_plan(
         root_path,
         thread_count,
         dua_core::Order::Completion,
-        dua_core::Options::default(),
+        walk_options,
         move |entry| {
             if entry.depth > 0 {
                 let path = entry.path();
@@ -1548,13 +1674,28 @@ fn scan_generic_with_plan(
             continue;
         };
 
+        // One `getattrlist` per clone file for its copy count and private
+        // size; other files come back from the bulk read alone.
+        #[cfg(target_os = "macos")]
+        let clone = clone_attrs_enabled.then(|| {
+            if metadata.clone_id().is_some() {
+                state.io.count_stat();
+            }
+            clone_attrs::file_clone_attrs(&path, metadata.clone_id())
+        });
+        #[cfg(not(target_os = "macos"))]
+        let clone = None;
+        let nlink = metadata.nlink();
         let link = hardlinks::Link {
             path,
             size: allocated_size(&metadata),
             modified_at: metadata_modified_at_ms(&metadata),
+            // Every name of a multi-link file carries its id, owner included.
+            link_id: (nlink > 1).then(|| (metadata.dev(), metadata.ino())),
+            clone,
         };
-        if metadata.nlink() <= 1 {
-            record_file_with_link_flag(state, unix_file_record(link), false)?;
+        if nlink <= 1 {
+            record_file_with_link_flag(state, unix_file_record(&link), false, None, clone)?;
             continue;
         }
         // Held until every name of the inode is in, so the owner is the
@@ -1604,7 +1745,7 @@ fn scan_generic_with_plan(
 /// A file record from the path and metadata the walker read. Held
 /// hardlinks keep only these three, so a held name costs one path.
 #[cfg(not(windows))]
-fn unix_file_record(link: hardlinks::Link) -> ScanFileRecord {
+fn unix_file_record(link: &hardlinks::Link) -> ScanFileRecord {
     let name = link
         .path
         .file_name()
@@ -1631,7 +1772,7 @@ fn record_released(
     extra: bool,
 ) {
     if result.is_ok() {
-        *result = record_file_with_link_flag(state, unix_file_record(link), extra);
+        *result = record_file_with_link_flag(state, unix_file_record(&link), extra, link.link_id, link.clone);
     }
 }
 
@@ -1640,7 +1781,8 @@ fn record_released(
 /// on Linux an `fstatat` for every entry, and the root's `lstat`; on macOS
 /// `getattrlistbulk` covers files and symlinks, and each directory (the
 /// root too) takes an `lstat`, because the bulk attributes do not fill a
-/// directory's `stat` fields. Not counted: when a folder's bulk
+/// directory's `stat` fields. The walk loop counts its own per-clone
+/// `getattrlist`. Not counted: when a folder's bulk
 /// reads spend more time waiting than executing, dua-core lists it again
 /// and stats each entry; that decision is made on timing.
 #[cfg(not(windows))]
@@ -2323,6 +2465,8 @@ fn emit_shard(
                     size: rec.size,
                     mtime: rec.mtime_ms,
                     extra_hardlink: rec.extra_hardlink,
+                    link_id: None,
+                    clone: None,
                 });
             }
         }
@@ -3569,26 +3713,34 @@ fn enumerate_windows_directory(
 
 /// Windows walkers can't read link counts, so they keep `h:1` on a path
 /// the previous index flagged. The Unix walker decides from the inode.
+/// Windows has no APFS clone attributes to pass.
 #[cfg(windows)]
 fn record_file(state: &mut ScanState, file_record: ScanFileRecord) -> Result<(), String> {
     let extra_hardlink = state
         .baseline
         .as_ref()
         .is_some_and(|baseline| baseline.extra_hardlink_paths.contains(&file_record.path));
-    record_file_with_link_flag(state, file_record, extra_hardlink)
+    record_file_with_link_flag(state, file_record, extra_hardlink, None, None)
 }
 
 /// An extra hardlink still counts as a file in its folder and keeps its
 /// size in the index and folder-tree rows, but adds 0 bytes and stays off
-/// the largest-files and extension lists.
+/// the largest-files and extension lists. `link_id` is `(dev, ino)` for a
+/// file with several names and `clone` its APFS clone attributes; both
+/// come from the Unix walker only (None elsewhere).
 fn record_file_with_link_flag(
     state: &mut ScanState,
     file_record: ScanFileRecord,
     extra_hardlink: bool,
+    link_id: Option<(u64, u64)>,
+    clone: Option<CloneAttrs>,
 ) -> Result<(), String> {
     let occupancy = if extra_hardlink { 0 } else { file_record.size };
     state.files_visited += 1;
     state.bytes_seen += occupancy;
+    if let (Some(attrs), false) = (clone.as_ref(), extra_hardlink) {
+        state.clone_totals.add(occupancy, attrs);
+    }
     if !extra_hardlink && state.largest_files.would_keep(file_record.size, &file_record.path) {
         state.largest_files.offer(file_record.clone());
     }
@@ -3635,7 +3787,14 @@ fn record_file_with_link_flag(
     // snapshot protocol keep working.
     if let Some(writer) = state.index_writer.as_mut() {
         if writer
-            .write_entry(&file_record.path, file_record.size, file_record.modified_at, extra_hardlink)
+            .write_entry(
+                &file_record.path,
+                file_record.size,
+                file_record.modified_at,
+                extra_hardlink,
+                link_id,
+                clone,
+            )
             .is_err()
         {
             state.index_writer = None;
@@ -3727,8 +3886,29 @@ impl ScanState {
             last_updated_at: now_ms,
             scan_phase: self.scan_phase,
             expected_total_files: self.expected_total_files,
+            storage_accounting: self.storage_accounting(),
             skipped_mounts: self.skipped_mounts.clone(),
         }
+    }
+
+    fn storage_accounting(&self) -> Option<StorageAccountingOut> {
+        let totals = &self.clone_totals;
+        if totals.measured_files == 0 {
+            return None;
+        }
+        // Groups are tracked on the index writer thread and arrive when it
+        // finishes. Until then, or when it failed or was dropped after a
+        // write error, the double count is unknown rather than zero.
+        let duplicate_bytes = self.clone_group_summary.map(|summary| summary.duplicate_bytes);
+        Some(StorageAccountingOut {
+            measured_files: totals.measured_files,
+            measured_bytes: totals.measured_bytes,
+            clone_files: totals.clone_files,
+            clone_bytes: totals.clone_bytes,
+            clone_private_bytes: totals.clone_private_bytes,
+            clone_duplicate_bytes: duplicate_bytes,
+            approximate: self.clone_group_summary.is_some_and(|s| s.truncated),
+        })
     }
 }
 
@@ -3757,6 +3937,7 @@ fn early_running_snapshot(root_path: &str, started_at_ms: u64, elapsed_ms: u64) 
         last_updated_at: now_ms,
         scan_phase: ScanPhase::Starting,
         expected_total_files: None,
+        storage_accounting: None,
         skipped_mounts: Vec::new(),
     }
 }
@@ -4822,7 +5003,7 @@ mod scaling_tests {
         let mut state = state(limit);
         work::take();
         for i in 0..files {
-            record_file_with_link_flag(&mut state, file(i), false).unwrap();
+            record_file_with_link_flag(&mut state, file(i), false, None, None).unwrap();
             refresh_hottest_directories(&mut state);
         }
         finalize_hottest_directories(&mut state);
@@ -4854,25 +5035,25 @@ mod scaling_tests {
     #[test]
     fn progress_snapshots_rank_folders_during_the_walk() {
         let mut state = state(10);
-        record_file_with_link_flag(&mut state, file(0), false).unwrap();
+        record_file_with_link_flag(&mut state, file(0), false, None, None).unwrap();
         refresh_hottest_directories(&mut state);
         let first: Vec<String> = state.hottest_directories.iter().map(|d| d.path.clone()).collect();
         assert_eq!(first, vec![root(), group(0), leaf(0)]);
 
         // Not due again until 3 more files (one per folder ranked) are in.
         for i in [10, 20] {
-            record_file_with_link_flag(&mut state, file(i), false).unwrap();
+            record_file_with_link_flag(&mut state, file(i), false, None, None).unwrap();
             refresh_hottest_directories(&mut state);
             assert_eq!(state.hottest_directories.len(), 3);
         }
-        record_file_with_link_flag(&mut state, file(30), false).unwrap();
+        record_file_with_link_flag(&mut state, file(30), false, None, None).unwrap();
         refresh_hottest_directories(&mut state);
         assert_eq!(state.hottest_directories.len(), 6);
 
         // Lite snapshots carry no folders, so they don't re-rank.
         state.emit_lite_snapshots = true;
         for i in 4..20 {
-            record_file_with_link_flag(&mut state, file(10 * i), false).unwrap();
+            record_file_with_link_flag(&mut state, file(10 * i), false, None, None).unwrap();
         }
         refresh_hottest_directories(&mut state);
         assert_eq!(state.hottest_directories.len(), 6);
@@ -5035,7 +5216,7 @@ mod scaling_tests {
 
     #[cfg(not(windows))]
     fn held(path: String) -> hardlinks::Link {
-        hardlinks::Link { path: path.into(), size: 4096, modified_at: 0 }
+        hardlinks::Link { path: path.into(), size: 4096, modified_at: 0, link_id: None, clone: None }
     }
 
     /// `inodes` files with two names each, in two folders the walk reads
@@ -5182,7 +5363,7 @@ mod unix_hardlink_scan_tests {
     fn scan(root: &Path, index_output: &Path) -> (ScanState, Vec<String>) {
         let mut state = test_state(root, index_output);
         scan_generic(root, &mut state).unwrap();
-        state.index_writer.take().unwrap().finish().unwrap();
+        state.index_writer.take().unwrap().finish().0.unwrap();
 
         let reader = BufReader::new(GzDecoder::new(File::open(index_output).unwrap()));
         let mut extra: Vec<String> = reader
@@ -5268,6 +5449,40 @@ mod unix_hardlink_scan_tests {
                 "scan {run} picked a different owner"
             );
         }
+    }
+
+    #[test]
+    fn every_name_of_a_hardlinked_file_carries_its_link_id() {
+        let tree = TempTree::new("hardlink-ids");
+        let root = tree.path("root");
+        let shared = tree.write("root/a.bin", 8 * 1024);
+        tree.link(&shared, "root/sub/b.bin");
+        tree.write("root/solo.bin", 8 * 1024);
+        // Owner inside the root, other name outside: still linked.
+        let outside = tree.write("elsewhere/lib.so", 8 * 1024);
+        tree.link(&outside, "root/vendor/lib.so");
+        let index = tree.path("index.ndjson.gz");
+
+        let mut state = test_state(&root, &index);
+        scan_generic(&root, &mut state).unwrap();
+        state.index_writer.take().unwrap().finish().0.unwrap();
+
+        let reader = BufReader::new(GzDecoder::new(File::open(&index).unwrap()));
+        let ids: HashMap<String, Option<(u64, u64)>> = reader
+            .lines()
+            .map(|line| line.unwrap())
+            .filter_map(|line| index_line::parse_index_line(&line))
+            .filter(|rec| !rec.is_dir)
+            .map(|rec| (rec.path, rec.link_id))
+            .collect();
+        let root_s = normalize_path(&root);
+        let id_of = |rel: &str| ids[&format!("{root_s}/{rel}")];
+        let meta = fs::metadata(&shared).unwrap();
+        assert_eq!(id_of("a.bin"), Some((meta.dev(), meta.ino())), "the owner carries it too");
+        assert_eq!(id_of("sub/b.bin"), id_of("a.bin"));
+        assert!(id_of("vendor/lib.so").is_some());
+        assert_ne!(id_of("vendor/lib.so"), id_of("a.bin"));
+        assert_eq!(id_of("solo.bin"), None);
     }
 }
 
@@ -5582,5 +5797,51 @@ mod unix_prune_scan_tests {
         scan_generic_with_plan(&root, &mut state, PrunePlan::default()).unwrap();
         let snapshot = serde_json::to_value(state.snapshot(ScanStatus::Done, None)).unwrap();
         assert!(snapshot.get("skippedMounts").is_none());
+    }
+}
+
+#[cfg(test)]
+mod index_writer_clone_tests {
+    use super::*;
+    use crate::clone_attrs::EF_MAY_SHARE_BLOCKS;
+    use crate::test_support::TempTree;
+
+    #[test]
+    fn writes_private_size_only_when_known_and_drops_clones_that_share_nothing() {
+        let tree = TempTree::new("clone-suffix");
+        let index = tree.path("index.ndjson.gz");
+        let clone = |private_size| CloneAttrs {
+            private_size,
+            clone_id: 0,
+            clone_refcnt: 0,
+            ext_flags: EF_MAY_SHARE_BLOCKS,
+        };
+        let mut writer = IndexWriter::create(&index, None, "/r".into()).unwrap();
+        for (path, attrs) in [
+            ("/r/full", Some(clone(Some(0)))),
+            ("/r/edited", Some(clone(Some(100)))),
+            ("/r/unknown", Some(clone(None))),
+            ("/r/rewritten", Some(clone(Some(4096)))),
+            ("/r/plain", Some(CloneAttrs::default())),
+        ] {
+            writer.write_entry(path, 4096, 1, false, None, attrs).unwrap();
+        }
+        writer.finish().0.unwrap();
+
+        let mut lines: Vec<String> = BufReader::new(GzDecoder::new(File::open(&index).unwrap()))
+            .lines()
+            .map(|line| line.unwrap())
+            .collect();
+        lines.sort();
+        assert_eq!(
+            lines,
+            [
+                r#"{"p":"/r/edited","s":4096,"m":1,"v":100,"k":1}"#,
+                r#"{"p":"/r/full","s":4096,"m":1,"v":0,"k":1}"#,
+                r#"{"p":"/r/plain","s":4096,"m":1}"#,
+                r#"{"p":"/r/rewritten","s":4096,"m":1}"#,
+                r#"{"p":"/r/unknown","s":4096,"m":1,"k":1}"#,
+            ]
+        );
     }
 }

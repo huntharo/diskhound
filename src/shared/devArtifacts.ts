@@ -84,6 +84,7 @@ export const ARTIFACT_SEGMENT_NAMES: ReadonlySet<string> = new Set([
   "target",
   ".cargo",
   "pkg",
+  "pnpm",
   ".cache",
   ".terraform",
   ".terraform.d",
@@ -139,6 +140,16 @@ export function classifyArtifactPath(filePath: string): { root: string; kind: De
 
     if (lower === "pkg" && i + 1 < parts.length && parts[i + 1]!.toLowerCase() === "mod") {
       return { root: joinSegments(filePath, i + 2), kind: "go-module" };
+    }
+
+    // pnpm's global content-addressable store outside a `.pnpm-store`
+    // folder: `$PNPM_HOME/store`, by default ~/Library/pnpm/store (macOS),
+    // ~/.local/share/pnpm/store (Linux) or %LOCALAPPDATA%\pnpm\store
+    // (Windows). Projects' node_modules are clones / hard links of it —
+    // see storageSharing.ts. Same rule as `classify` in the native
+    // scanner's dev_artifacts.rs.
+    if (lower === "pnpm" && i + 1 < parts.length && parts[i + 1]!.toLowerCase() === "store") {
+      return { root: joinSegments(filePath, i + 2), kind: "package-cache" };
     }
 
     if (lower === ".cache" && i + 1 < parts.length) {
