@@ -20,13 +20,17 @@ DiskHound keeps its state in JSON and gzipped NDJSON files under Electron's user
 
 ## Read budgets for IPC and UI
 
-The same harness budgets reads. A UI action on data the app already holds (a tab remount, a drill-in, a poll) should read nothing. Its budget locks that at 0.
+The same harness budgets reads. A UI action on data the app already holds (sort, filter, group, hover, drill-in, a tab remount, a poll) should read nothing. Its budget locks that at 0.
 
 - **IPC handlers.** `src/test/mainProcessHarness.ts` boots the real `src/main.ts` against a fake `electron` and a temp profile. `invoke()` calls the handlers the app ships, so there is no need to move a handler out of main.ts to test it.
   - `src/test/mainProfileFixture.ts` seeds the profile: scan history, indexes, folder-tree and Dev sidecars at realistic sizes.
   - Boot once per test file. main.ts keeps its caches in module state, so a scenario that needs a cold process needs its own file.
   - Bundled workers are not built under vitest, so a worker always fails there. Budget the failure path with that. The success path belongs in E2E.
   - See `src/__tests__/main.*.ioBudget.test.ts`.
+- **Renderer views.** `src/test/rendererHarness.ts` loads the real preload on top of that main process and mounts views in happy-dom. Every `nativeApi` call runs the real handler.
+  - Settle the mount, then budget the clicks.
+  - Assert `takeIpc()` too, where the answer should be no IPC at all.
+  - See `src/__tests__/renderer.views.ioBudget.test.ts`.
 - **Polls.** Pass `{ countProcesses: true }` to `measureFsIo` to also count child processes and workers. A poll that runs `df`, PowerShell or a sampler per tick needs that.
   - Renderer pollers use `startVisiblePoll` or `useVisibleInterval` from `src/renderer/lib/visiblePoll.ts`, so they stop while the window is hidden to the tray. `e2e/tray.spec.ts` checks that no process starts while hidden.
 

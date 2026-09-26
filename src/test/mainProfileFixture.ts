@@ -38,6 +38,11 @@ export interface SeedRoot {
   devSidecar?: "artifacts" | "empty" | "missing";
   /** false leaves out the folder-tree sidecar. */
   folderTree?: boolean;
+  /**
+   * Each scan finds some files bigger than the one before, so Changes
+   * has rows to show. Off by default: every scan is the same.
+   */
+  growth?: boolean;
 }
 
 export interface SeededRoot {
@@ -109,6 +114,31 @@ function buildTree(root: SeedRoot): Tree {
   return { folders, files };
 }
 
+const GROWTH_BYTES = 1_000_000;
+
+/** The tree as scan `scan` saw it: files in the first 10 folders grew by 1 MB per scan. */
+function grownTree(tree: Tree, scan: number): Tree {
+  const growing = new Set(tree.folders.slice(0, 10));
+  return {
+    folders: tree.folders,
+    files: tree.files.map((file) => growing.has(file.parent) ? { ...file, size: file.size + scan * GROWTH_BYTES } : file),
+  };
+}
+
+/** Every 50th largest file and hottest directory grew by 1 MB per scan. */
+function grownSnapshot(snapshot: ScanSnapshot, scan: number): ScanSnapshot {
+  const grow = <T extends { size: number }>(entry: T, i: number): T =>
+    i % 50 === 0 ? { ...entry, size: entry.size + scan * GROWTH_BYTES } : entry;
+  const largestFiles = snapshot.largestFiles.map(grow);
+  const hottestDirectories = snapshot.hottestDirectories.map(grow);
+  return {
+    ...snapshot,
+    largestFiles,
+    hottestDirectories,
+    bytesSeen: snapshot.bytesSeen + Math.ceil(largestFiles.length / 50) * scan * GROWTH_BYTES,
+  };
+}
+
 function indexLines(root: string, tree: Tree): string[] {
   const lines = [JSON.stringify({ p: root, t: "d", m: FINISHED_AT })];
   for (const folder of tree.folders) lines.push(JSON.stringify({ p: folder, t: "d", m: FINISHED_AT }));
@@ -173,19 +203,21 @@ export async function seedProfile(userData: string, options: SeedOptions): Promi
     const scanIds: string[] = [];
     for (let scan = 0; scan < root.scans; scan++) {
       const finishedAt = FINISHED_AT - (root.scans - 1 - scan) * DAY_MS;
+      const completed = completedScanSnapshot(root.rootPath, finishedAt);
       const snapshot: ScanSnapshot = {
-        ...completedScanSnapshot(root.rootPath, finishedAt),
+        ...(root.growth ? grownSnapshot(completed, scan) : completed),
         filesVisited: tree.files.length,
         directoriesVisited: tree.folders.length + 1,
       };
+      const scanTree = root.growth ? grownTree(tree, scan) : tree;
       const id = await saveScanToHistory(snapshot);
       if (!id) throw new Error(`saveScanToHistory refused the seed scan for ${root.rootPath}`);
       scanIds.unshift(id);
       latest.set(root.rootPath, snapshot);
 
-      await gzipLines(indexFilePath(id), indexLines(root.rootPath, tree));
+      await gzipLines(indexFilePath(id), indexLines(root.rootPath, scanTree));
       if (root.folderTree !== false) {
-        await gzipLines(folderTreeSidecarPath(id), folderTreeLines(root.rootPath, tree));
+        await gzipLines(folderTreeSidecarPath(id), folderTreeLines(root.rootPath, scanTree));
       }
       const dev = root.devSidecar ?? "artifacts";
       if (dev !== "missing") {

@@ -36,6 +36,9 @@ import { vi } from "vitest";
  * - BrowserWindow, Tray, Menu, Notification, dialog, shell, screen,
  *   nativeImage and powerMonitor are inert stand-ins. What main sends
  *   to a window's webContents is kept in `sent`.
+ * - `ipcRenderer` and `contextBridge`, for the preload that
+ *   `rendererHarness.ts` loads: its IPC calls main's handlers in this
+ *   process, and main's sends reach its listeners.
  * - `VITE_DEV_SERVER_URL` is set, so startup skips electron-updater,
  *   and `HOME` points into the temp dir, so the Linux desktop
  *   integration writes there instead of into the real home.
@@ -57,6 +60,11 @@ interface HarnessState {
   windows: FakeBrowserWindow[];
   sent: Array<{ channel: string; args: unknown[] }>;
   errorBoxes: string[];
+  /** `ipcRenderer.on` listeners of the preload, if a test loaded it. */
+  rendererListeners: Map<string, Set<Listener>>;
+  /** Channels the preload invoked or sent, oldest first. */
+  rendererIpc: string[];
+  rendererInflight: number;
 }
 
 const realFs = createRequire(import.meta.url)("node:fs") as typeof import("node:fs");
@@ -79,6 +87,9 @@ function current(): HarnessState {
     windows: [],
     sent: [],
     errorBoxes: [],
+    rendererListeners: new Map(),
+    rendererIpc: [],
+    rendererInflight: 0,
   };
   return state;
 }
@@ -118,7 +129,14 @@ class FakeWebContents extends EventEmitter {
   }
 
   send(channel: string, ...args: unknown[]): void {
-    current().sent.push({ channel, args });
+    const harness = current();
+    harness.sent.push({ channel, args });
+    const listeners = harness.rendererListeners.get(channel);
+    if (!listeners?.size) return;
+    // Electron delivers to the renderer asynchronously.
+    queueMicrotask(() => {
+      for (const listener of listeners) listener({ sender: null }, ...args);
+    });
   }
 
   isDestroyed(): boolean {
@@ -336,8 +354,43 @@ export function fakeElectron(): Record<string, unknown> {
     })),
     powerMonitor: lenient(Object.assign(new EventEmitter(), { getSystemIdleTime: () => 0 })),
     nativeTheme: lenient(Object.assign(new EventEmitter(), { shouldUseDarkColors: true, themeSource: "system" })),
+    // For the preload (see rendererHarness.ts): IPC goes straight to
+    // main's handlers in this process.
+    ipcRenderer: lenient({
+      invoke: async (channel: string, ...args: unknown[]) => {
+        harness.rendererIpc.push(channel);
+        harness.rendererInflight++;
+        try {
+          return await callHandler(harness, channel, args);
+        } finally {
+          harness.rendererInflight--;
+        }
+      },
+      send: (channel: string, ...args: unknown[]) => {
+        harness.rendererIpc.push(channel);
+        callListeners(harness, channel, args);
+      },
+      on: (channel: string, listener: Listener) => {
+        const listeners = harness.rendererListeners.get(channel) ?? new Set();
+        listeners.add(listener);
+        harness.rendererListeners.set(channel, listeners);
+      },
+      removeListener: (channel: string, listener: Listener) => {
+        harness.rendererListeners.get(channel)?.delete(listener);
+      },
+    }),
+    contextBridge: lenient({
+      exposeInMainWorld: (key: string, api: unknown) => {
+        (globalThis as Record<string, unknown>)[key] = api;
+      },
+    }),
   };
   return { ...electron, default: electron };
+}
+
+/** The preload's side of the fake IPC, for rendererHarness.ts. */
+export function rendererIpcState(): Pick<HarnessState, "rendererIpc" | "rendererInflight"> {
+  return current();
 }
 
 export interface MainProcess {
