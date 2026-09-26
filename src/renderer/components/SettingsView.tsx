@@ -2,8 +2,13 @@ import { useEffect, useState } from "preact/hooks";
 
 import {
   defaultSettings,
+  HEAP_GATE_MB_MAX,
+  HEAP_GATE_MB_MIN,
+  HEAP_SNAPSHOT_MAX_MB,
   normalizeAppSettings,
   type AppSettings,
+  type DiagnosticsSettings,
+  type DiagnosticsStatus,
   type DiskDelta,
   type MonitoringSnapshot,
   type UpdateStatus,
@@ -289,6 +294,12 @@ export function SettingsView() {
         settings={settings}
         onChange={(next) => void save(next)}
       />
+
+      {/* ── Diagnostics ── */}
+      <DiagnosticsSection
+        settings={settings}
+        onChange={(next) => void save(next)}
+      />
       </div>
     </div>
   );
@@ -541,6 +552,242 @@ function StorageSection({
         >
           {clearing ? "Clearing…" : "Clear all"}
         </button>
+      </div>
+    </div>
+  );
+}
+
+const MB = 1024 * 1024;
+
+function formatMb(bytes: number): string {
+  return `${Math.round(bytes / MB).toLocaleString()} MB`;
+}
+
+/**
+ * Settings → Diagnostics. Opt-in profiling for bug reports: the
+ * main-process hot-CPU profiler, the heap gate and its snapshots, and
+ * the captures they left under <userData>/diagnostics, with a
+ * copyable list of their paths to paste into an issue.
+ */
+function DiagnosticsSection({
+  settings,
+  onChange,
+}: {
+  settings: AppSettings;
+  onChange: (next: AppSettings) => void;
+}) {
+  const [status, setStatus] = useState<DiagnosticsStatus | null>(null);
+  const [busy, setBusy] = useState<"snapshot" | "clear" | null>(null);
+  const [copied, setCopied] = useState(false);
+  const diagnostics = settings.diagnostics;
+
+  const refresh = async () => {
+    try {
+      const next = await nativeApi.getDiagnosticsStatus();
+      if (next) setStatus(next);
+    } catch { /* best effort */ }
+  };
+  // Heap and CPU readings only; the session list is cached in main.
+  useEffect(() => {
+    void refresh();
+    const intervalId = window.setInterval(() => void refresh(), 5_000);
+    return () => window.clearInterval(intervalId);
+  }, []);
+  useEffect(() => { void refresh(); }, [diagnostics]);
+
+  const update = (patch: Partial<DiagnosticsSettings>) =>
+    onChange({ ...settings, diagnostics: { ...diagnostics, ...patch } });
+
+  const reveal = async (sessionName?: string) => {
+    const result = await nativeApi.revealDiagnostics(sessionName);
+    if (result && !result.ok) toast("error", "Couldn't open the diagnostics folder", result.message);
+  };
+
+  const takeSnapshot = async () => {
+    const used = status ? ` (about ${formatMb(status.heap.usedBytes)} now)` : "";
+    const ok = confirm(
+      "Write a heap snapshot of DiskHound's main process?\n\n"
+      + `The file is 1.5 to 2.3 times the heap${used}, and DiskHound freezes while V8 writes it, `
+      + "up to about 20 s at 500 MB. "
+      + `It is skipped above ${HEAP_SNAPSHOT_MAX_MB} MB, where writing one has crashed DiskHound, `
+      + "or if the heap lacks room to build one.",
+    );
+    if (!ok) return;
+    setBusy("snapshot");
+    try {
+      const result = await nativeApi.captureHeapSnapshot();
+      if (result?.ok) toast("success", "Heap snapshot saved", result.path);
+      else toast("warning", "Heap snapshot skipped", result?.message);
+    } finally {
+      setBusy(null);
+      await refresh();
+    }
+  };
+
+  const clearAll = async () => {
+    if (!status || !confirm(`Delete every diagnostics capture (${formatBytes(status.totalBytes)})?`)) return;
+    setBusy("clear");
+    try {
+      const result = await nativeApi.clearDiagnostics();
+      toast("success", "Diagnostics deleted", `Removed ${result.removed} session${result.removed === 1 ? "" : "s"}, freed ${formatBytes(result.bytesFreed)}.`);
+    } catch {
+      toast("error", "Couldn't delete diagnostics");
+    } finally {
+      setBusy(null);
+      await refresh();
+    }
+  };
+
+  const copyHandoff = () => {
+    if (!status) return;
+    void navigator.clipboard.writeText(status.handoffText).then(
+      () => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1_500);
+      },
+      () => toast("error", "Couldn't copy to the clipboard"),
+    );
+  };
+
+  const heap = status?.heap;
+  const limitMb = heap ? Math.round(heap.limitBytes / MB) : 4096;
+  const snapshotsAboveCeiling = diagnostics.heapDiagnostics && diagnostics.heapSnapshots
+    && diagnostics.heapGateMb > HEAP_SNAPSHOT_MAX_MB;
+  const sessions = status?.sessions.filter((session) => session.artifacts.length > 0) ?? [];
+  const workerBytes = heap?.workers.reduce((sum, worker) => sum + (worker.usedBytes ?? 0), 0) ?? 0;
+
+  return (
+    <div className="settings-section">
+      <div className="settings-section-title">Diagnostics</div>
+      <div className="settings-section-note">
+        Profiling for bug reports, off by default. Captures stay on this computer until you delete them;
+        older ones are removed after 30 days or past 6 GB.
+        {status && status.envOverrides.length > 0 && (
+          <>
+            {" "}This launch is overridden by <code>{status.envOverrides.join(" ")}</code>.
+          </>
+        )}
+      </div>
+      <ToggleRow
+        label="Hot-CPU profiles"
+        desc="Keeps V8's sampling profiler recording DiskHound's main thread. When the thread stays above the threshold for two 2 s samples, saves a .cpuprofile reaching up to 60 s back and 15 s on. At most 5 per launch, about 1 MB each."
+        value={diagnostics.hotCpuProfiling}
+        onChange={(v) => update({ hotCpuProfiling: v })}
+      />
+      <NumberRow
+        label="Hot-CPU threshold (%)"
+        desc="Main-thread CPU, as a percentage of one core."
+        value={diagnostics.hotCpuThresholdPercent}
+        min={5}
+        max={100}
+        disabled={!diagnostics.hotCpuProfiling}
+        onChange={(v) => update({ hotCpuThresholdPercent: v })}
+      />
+      <ToggleRow
+        label="Heap diagnostics"
+        desc="Runs V8's sampling heap profiler on the main process, at no measurable cost. When the heap passes the gate, saves its allocation profile (.heapprofile, under a few MB), which shows the code that allocated what the heap holds. At most once a day."
+        value={diagnostics.heapDiagnostics}
+        onChange={(v) => update({ heapDiagnostics: v })}
+      />
+      <NumberRow
+        label="Heap gate (MB)"
+        desc={`DiskHound's main process and its workers share ${limitMb.toLocaleString()} MB of heap. The allocation profile works at any gate; snapshots need one at or below ${HEAP_SNAPSHOT_MAX_MB} MB.`}
+        value={diagnostics.heapGateMb}
+        min={HEAP_GATE_MB_MIN}
+        max={HEAP_GATE_MB_MAX}
+        disabled={!diagnostics.heapDiagnostics}
+        onChange={(v) => update({ heapGateMb: v })}
+      />
+      <ToggleRow
+        label="Full heap snapshots at the gate"
+        desc={`Also writes two .heapsnapshot files 20 s apart, to compare in DevTools. Each is 1.5 to 2.3 times the heap, up to about 1 GB at a 450 MB heap, and DiskHound freezes while V8 writes it, up to about 20 s at 500 MB. Skipped above ${HEAP_SNAPSHOT_MAX_MB} MB, where writing one has crashed DiskHound, or when the heap lacks room for one.`}
+        value={diagnostics.heapDiagnostics && diagnostics.heapSnapshots}
+        disabled={!diagnostics.heapDiagnostics}
+        onChange={(v) => update({ heapSnapshots: v })}
+      />
+      {snapshotsAboveCeiling && (
+        <div className="perf-status perf-status-warn diagnostics-gate-warning">
+          <span className="perf-status-dot" />
+          <span>
+            At a {diagnostics.heapGateMb.toLocaleString()} MB gate the snapshots will be skipped. Lower the gate
+            to {HEAP_SNAPSHOT_MAX_MB} MB or less to get them; the allocation profile is saved either way.
+          </span>
+        </div>
+      )}
+
+      {status && heap && (
+        <div className="diagnostics-status">
+          <div className={`perf-status perf-status-${status.hotCpu.state === "failed" ? "warn" : "ok"}`}>
+            <span className="perf-status-dot" />
+            <span>
+              CPU profiler: {status.hotCpu.state}
+              {status.hotCpu.lastCpuPercent !== null && status.hotCpu.state !== "off"
+                ? ` · main thread ${Math.round(status.hotCpu.lastCpuPercent)}%`
+                : ""}
+              {status.hotCpu.enabled ? ` · ${status.hotCpu.profilesWritten} of ${status.hotCpu.maxProfiles} profiles this launch` : ""}
+            </span>
+          </div>
+          <div className={`perf-status perf-status-${heap.state === "capped" ? "warn" : "ok"}`}>
+            <span className="perf-status-dot" />
+            <span>
+              Heap: main {formatMb(heap.usedBytes)}
+              {heap.workers.length > 0 ? ` + ${heap.workers.length} worker${heap.workers.length === 1 ? "" : "s"} ${formatMb(workerBytes)}` : ""}
+              {" "}of {formatMb(heap.limitBytes)}
+              {heap.enabled ? ` · gate ${formatMb(heap.gateBytes)} ${heap.state} · ${heap.gatesToday} of ${heap.maxGatesPerDay} today` : " · gate off"}
+            </span>
+          </div>
+          {heap.lastEvent && <div className="setting-desc diagnostics-last-event">{heap.lastEvent}</div>}
+        </div>
+      )}
+
+      <div className="setting-row setting-row-stack diagnostics-captures">
+        <div className="setting-row-main">
+          <div>
+            <div className="setting-label">Captures</div>
+            <div className="setting-desc">
+              {!status
+                ? "Loading…"
+                : sessions.length === 0
+                  ? "Nothing captured yet."
+                  : `${sessions.length} session${sessions.length === 1 ? "" : "s"}, ${formatBytes(status.totalBytes)}.`}
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button className="action-btn" onClick={() => void reveal()} title={status?.rootPath}>
+              Reveal folder
+            </button>
+            <button className="action-btn" onClick={() => void takeSnapshot()} disabled={busy !== null}>
+              {busy === "snapshot" ? "Writing…" : "Take heap snapshot"}
+            </button>
+            <button className="action-btn danger" onClick={() => void clearAll()} disabled={busy !== null || sessions.length === 0}>
+              {busy === "clear" ? "Deleting…" : "Delete all"}
+            </button>
+          </div>
+        </div>
+        {sessions.length > 0 && (
+          <div className="diagnostics-sessions">
+            {sessions.map((session) => (
+              <div className="diagnostics-session" key={session.name}>
+                <div>
+                  <div className="diagnostics-session-name">{session.name}</div>
+                  <div className="diagnostics-session-meta">
+                    {session.artifacts.map((artifact) => artifact.filename).join(", ")} · {formatBytes(session.bytes)}
+                  </div>
+                </div>
+                <button className="action-btn" onClick={() => void reveal(session.name)}>Reveal</button>
+              </div>
+            ))}
+          </div>
+        )}
+        {status && (
+          <>
+            <div className="setting-row-main">
+              <div className="setting-desc">Paste this into a bug report. It lists every capture's path.</div>
+              <button className="action-btn" onClick={copyHandoff}>{copied ? "Copied" : "Copy"}</button>
+            </div>
+            <pre className="settings-crash-log-pane diagnostics-handoff">{status.handoffText}</pre>
+          </>
+        )}
       </div>
     </div>
   );
@@ -919,11 +1166,11 @@ function ToggleRow({ label, desc, value, onChange, disabled = false }: {
   );
 }
 
-function NumberRow({ label, value, onChange, desc, min, max }: {
-  label: string; value: number; onChange: (v: number) => void; desc?: string; min?: number; max?: number;
+function NumberRow({ label, value, onChange, desc, min, max, disabled = false }: {
+  label: string; value: number; onChange: (v: number) => void; desc?: string; min?: number; max?: number; disabled?: boolean;
 }) {
   return (
-    <div className="setting-row">
+    <div className={`setting-row ${disabled ? "setting-row-disabled" : ""}`}>
       <div>
         <div className="setting-label">{label}</div>
         {desc && <div className="setting-desc">{desc}</div>}
@@ -934,6 +1181,7 @@ function NumberRow({ label, value, onChange, desc, min, max }: {
         value={value}
         min={min}
         max={max}
+        disabled={disabled}
         onChange={(e) => {
           const v = parseInt((e.target as HTMLInputElement).value, 10);
           if (!isNaN(v)) {

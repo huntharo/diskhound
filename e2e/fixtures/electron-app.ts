@@ -34,6 +34,7 @@ export type SeedSettings = {
   monitoring?: Partial<AppSettings["monitoring"]>;
   notifications?: Partial<AppSettings["notifications"]>;
   storage?: Partial<AppSettings["storage"]>;
+  diagnostics?: Partial<AppSettings["diagnostics"]>;
 };
 
 /**
@@ -51,6 +52,8 @@ export type LaunchOptions = {
   dataDir?: string;
   /** Merged over the E2E defaults. Only written to a fresh profile. */
   settings?: SeedSettings;
+  /** Extra env for the app, such as the DISKHOUND_HEAP_* overrides. */
+  env?: Record<string, string>;
 };
 
 export type AppHandle = {
@@ -164,6 +167,7 @@ export async function launchApp(
       env: appEnv({
         DISKHOUND_NATIVE_SCANNER_PATH: scanner,
         ...(process.platform === "linux" ? { HOME: homeDir } : {}),
+        ...opts.env,
       }),
     });
     return await attach(app, dataDir, diagnostics);

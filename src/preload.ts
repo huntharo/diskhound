@@ -181,6 +181,12 @@ const api: DiskhoundNativeApi = {
   reportRendererError: (payload) =>
     ipcRenderer.send("diskhound:report-renderer-error", payload),
 
+  // Diagnostics
+  getDiagnosticsStatus: () => ipcRenderer.invoke("diskhound:get-diagnostics-status"),
+  revealDiagnostics: (sessionName) => ipcRenderer.invoke("diskhound:reveal-diagnostics", sessionName),
+  captureHeapSnapshot: () => ipcRenderer.invoke("diskhound:capture-heap-snapshot"),
+  clearDiagnostics: () => ipcRenderer.invoke("diskhound:clear-diagnostics"),
+
   // Auto-update
   checkForUpdates: () => ipcRenderer.invoke("diskhound:check-for-updates"),
   quitAndInstall: () => ipcRenderer.send("diskhound:quit-and-install"),
