@@ -1140,6 +1140,7 @@ void (async () => {
           void deleteFolderTreeSidecar(prunedId);
           void deleteIndex(prunedId);
           void deleteFullDiffCachesForScan(prunedId);
+          forgetScanCaches(prunedId);
         }
       }
 
@@ -3407,15 +3408,39 @@ void (async () => {
     if (!current) return { hits: [], truncated: false, filesScanned: 0 };
     return searchIndexFile(indexFilePath(current.id), query);
   });
+  // Reports per scan, empty ones included: Overview and the Dev tab
+  // ask on every mount.
   const devArtifactCache = new Map<string, DevArtifactReport>();
   const devArtifactInflight = new Map<string, Promise<DevArtifactReport | null>>();
   const devRescanAbort = new Map<string, AbortController>();
+  // Scans whose sidecar load found no sidecar, and scans whose full
+  // load found nothing to classify or failed to. Both answer null from
+  // memory for a while, instead of listing scan-indexes and reading
+  // sidecars (or starting another classify worker) on every mount.
+  const devSidecarMissingAt = new Map<string, number>();
+  const devFullLoadEmptyAt = new Map<string, number>();
+  const DEV_ARTIFACT_NEGATIVE_TTL_MS = 10 * 60_000;
+  // Native can write a scan's Dev sidecar after Done (adoptTempDevSidecar
+  // waits 4 s for it), so "none" is only remembered for older scans.
+  const DEV_ARTIFACT_SETTLE_MS = 60_000;
+  const rememberDevNone = (misses: Map<string, number>, scan: { id: string; scannedAt: number }) => {
+    if (Date.now() - scan.scannedAt >= DEV_ARTIFACT_SETTLE_MS) misses.set(scan.id, Date.now());
+  };
+  const recentDevNone = (misses: Map<string, number>, scanId: string) => {
+    const at = misses.get(scanId);
+    return at !== undefined && Date.now() - at < DEV_ARTIFACT_NEGATIVE_TTL_MS;
+  };
+  const setDevReport = (scanId: string, report: DevArtifactReport) => {
+    devArtifactCache.set(scanId, report);
+    devSidecarMissingAt.delete(scanId);
+    devFullLoadEmptyAt.delete(scanId);
+  };
 
   const loadDevReport = (scanId: string, scanRoot: string, previousId?: string) =>
     loadDevArtifactReport(
       devArtifactsSidecarPath(scanId),
       scanRoot,
-      listPendingDevArtifactSidecars(),
+      listPendingDevArtifactSidecars,
       previousId ? devArtifactsSidecarPath(previousId) : null,
     );
 
@@ -3425,13 +3450,21 @@ void (async () => {
     if (!current) return null;
     const cached = devArtifactCache.get(current.id);
     if (cached) return cached;
+    if (recentDevNone(options?.sidecarOnly ? devSidecarMissingAt : devFullLoadEmptyAt, current.id)) {
+      return null;
+    }
 
     const loadKey = `${current.id}:load`;
     let loadPromise = devArtifactInflight.get(loadKey);
+    if (!loadPromise && recentDevNone(devSidecarMissingAt, current.id)) {
+      // Overview's sidecar-only ask just found none: go straight to classifying.
+      loadPromise = Promise.resolve(null);
+    }
     if (!loadPromise) {
       loadPromise = loadDevReport(current.id, rootPath, history[1]?.id)
         .then((report) => {
-          if (report && report.artifacts.length > 0) devArtifactCache.set(current.id, report);
+          if (report) setDevReport(current.id, report);
+          else rememberDevNone(devSidecarMissingAt, current);
           return report;
         })
         .catch((err) => {
@@ -3469,7 +3502,10 @@ void (async () => {
       // sidecar in a worker — never stream the 7M-file index, and
       // never walk 1M+ folder-tree entries on the main thread.
       const treePath = folderTreeSidecarPath(current.id);
-      if (!FS_SYNC.existsSync(treePath)) return null;
+      if (!FS_SYNC.existsSync(treePath)) {
+        rememberDevNone(devFullLoadEmptyAt, current);
+        return null;
+      }
 
       writeCrashLog("dev-artifacts-classify", `scanId=${current.id} via folder-tree worker`);
       const classified = await runDevArtifactsClassifyWorker(
@@ -3481,13 +3517,14 @@ void (async () => {
         },
         { workerPath: devArtifactsWorkerEntry },
       );
-      if (classified.artifacts.length > 0) devArtifactCache.set(current.id, classified);
+      setDevReport(current.id, classified);
       return classified;
     })().catch((err) => {
       writeCrashLog(
         "dev-artifacts",
         err instanceof Error ? (err.stack ?? err.message) : String(err),
       );
+      rememberDevNone(devFullLoadEmptyAt, current);
       return null;
     }).finally(() => {
       devArtifactInflight.delete(current.id);
@@ -3518,8 +3555,7 @@ void (async () => {
       writeCrashLog("dev-artifacts", `forget: no sidecar scanId=${current.id} paths=${list.length}`);
       if (!cached || list.length === 0) return cached ?? null;
       const next = dropArtifactsFromReport(cached, list);
-      if (next.artifacts.length > 0) devArtifactCache.set(current.id, next);
-      else devArtifactCache.delete(current.id);
+      setDevReport(current.id, next);
       return next;
     }
 
@@ -3534,8 +3570,7 @@ void (async () => {
     }
     const previous = history[1] ? await readDevArtifactSidecar(devArtifactsSidecarPath(history[1].id)) : null;
     const report = reportFromSidecar(nextSidecar, previous);
-    if (report.artifacts.length > 0) devArtifactCache.set(current.id, report);
-    else devArtifactCache.delete(current.id);
+    setDevReport(current.id, report);
     writeCrashLog("dev-artifacts", `forgot ${list.length} tree(s) scanId=${current.id}`);
     return report;
   });
@@ -3570,12 +3605,11 @@ void (async () => {
       if (latest && latest.id !== current.id) {
         const adopted = await loadDevReport(latest.id, rootPath, getScanHistory(rootPath)[1]?.id);
         if (adopted && adopted.artifacts.length > 0) {
-          devArtifactCache.set(latest.id, adopted);
+          setDevReport(latest.id, adopted);
           return adopted;
         }
       }
-      if (report.artifacts.length > 0) devArtifactCache.set(current.id, report);
-      else devArtifactCache.delete(current.id);
+      setDevReport(current.id, report);
       return report;
     } catch (err) {
       if (ac.signal.aborted) return null;
@@ -3824,6 +3858,13 @@ void (async () => {
   // so 20 scans of history was silently using 7 GB+ of disk before
   // v0.5.24 reduced the default to 7.
 
+  /** Drops what main caches in memory about a scan that was pruned or cleared. */
+  const forgetScanCaches = (id: string) => {
+    devArtifactCache.delete(id);
+    devSidecarMissingAt.delete(id);
+    devFullLoadEmptyAt.delete(id);
+  };
+
   ipcMain.handle("diskhound:get-storage-stats", async () => {
     const userData = app.getPath("userData");
     const indexesDir = Path.join(userData, "scan-indexes");
@@ -3900,6 +3941,7 @@ void (async () => {
       try { await deleteFolderTreeSidecar(id); } catch { /* ok */ }
       try { await deleteIndex(id); } catch { /* ok */ }
       try { deleteFullDiffCachesForScan(id); } catch { /* ok */ }
+      forgetScanCaches(id);
     }
 
     // Step 4: nuke EVERY file in scan-indexes/ as a belt-and-suspenders
@@ -4231,6 +4273,7 @@ void (async () => {
       void deleteFolderTreeSidecar(prunedId);
       void deleteIndex(prunedId);
       void deleteFullDiffCachesForScan(prunedId);
+      forgetScanCaches(prunedId);
     }
 
     await broadcastSnapshot(result.snapshot);
