@@ -7,7 +7,6 @@ import {
   DEV_SIDECAR_ROOT_CAP,
   planRescanTargets,
   reportFromSidecar,
-  sidecarFromDirectoryRoots,
   type DevArtifactSidecar,
 } from "../devArtifactSidecar";
 import { dropArtifactsFromReport, mergeDiagLogHotspots } from "../devArtifacts";
@@ -26,20 +25,6 @@ function join(parent: string, name: string): string {
   return parent.includes("\\") ? `${parent}\\${name}` : `${parent}/${name}`;
 }
 
-/** Folder-tree rollups for `projects` projects: 3 artifact roots each, one nested. */
-function folderRollups(projects: number): Array<{ path: string; size: number; files: number }> {
-  const dirs: Array<{ path: string; size: number; files: number }> = [];
-  for (let i = 0; i < projects; i += 1) {
-    const project = projectPath(i);
-    dirs.push({ path: project, size: 9_000 + i, files: 90 });
-    dirs.push({ path: join(project, "src"), size: 1_000, files: 10 });
-    dirs.push({ path: join(project, "node_modules"), size: 5_000 + i, files: 50 });
-    dirs.push({ path: join(project, "target"), size: 3_000 + i, files: 30 });
-    dirs.push({ path: join(join(project, "target"), "debug"), size: 2_000, files: 20 });
-  }
-  return dirs;
-}
-
 function sidecarWith(projects: number): DevArtifactSidecar {
   const roots: DevArtifactSidecar["roots"] = [];
   const projectPaths: string[] = [];
@@ -56,35 +41,6 @@ function reportWith(projects: number): DevArtifactReport {
   const sidecar = sidecarWith(projects);
   return reportFromSidecar(sidecar);
 }
-
-describe("sidecarFromDirectoryRoots scaling", () => {
-  const run = (projects: number) => {
-    const dirs = countReads(folderRollups(projects));
-    return measureOpsSync(() => sidecarFromDirectoryRoots("C:\\", dirs, [])).ops;
-  };
-
-  it("drops nested roots in linear work", () => {
-    // ~80 ops per folder, most of it classifyArtifactPath.
-    expectNearLinear("sidecarFromDirectoryRoots", run(PROJECTS), run(PROJECTS * 8), {
-      maxTotal: PROJECTS * 8 * 5 * 160,
-    });
-  });
-
-  it("still keeps the outer root of each nested pair", () => {
-    const sidecar = sidecarFromDirectoryRoots("C:\\", folderRollups(4), []);
-    const paths = sidecar.roots.map((root) => root.path).sort();
-    expect(paths).toEqual([
-      "/home/dev/src/project-1/node_modules",
-      "/home/dev/src/project-1/target",
-      "/home/dev/src/project-3/node_modules",
-      "/home/dev/src/project-3/target",
-      "C:\\Users\\dev\\src\\project-0\\node_modules",
-      "C:\\Users\\dev\\src\\project-0\\target",
-      "C:\\Users\\dev\\src\\project-2\\node_modules",
-      "C:\\Users\\dev\\src\\project-2\\target",
-    ]);
-  });
-});
 
 describe("planRescanTargets scaling", () => {
   it("checks seeded roots against known roots in linear work", () => {

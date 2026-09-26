@@ -6,6 +6,16 @@ export function formatBytes(bytes: number): string {
   return `${val.toFixed(val >= 100 || exp === 0 ? 0 : 1)} ${units[exp]}`;
 }
 
+/** "684–694 GB", "0 B – 32.0 MB", or one value when both ends format alike. */
+export function formatBytesRange(low: number, high: number): string {
+  const lo = formatBytes(low);
+  const hi = formatBytes(high);
+  if (lo === hi) return lo;
+  const [loValue, loUnit] = lo.split(" ");
+  const [hiValue, hiUnit] = hi.split(" ");
+  return loUnit === hiUnit ? `${loValue}–${hiValue} ${hiUnit}` : `${lo} – ${hi}`;
+}
+
 export function formatCount(count: number): string {
   return new Intl.NumberFormat().format(count);
 }

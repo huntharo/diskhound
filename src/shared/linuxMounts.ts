@@ -179,13 +179,19 @@ export function duplicateMountPathsFrom(root: string, mounts: LinuxMount[]): Set
   return duplicates;
 }
 
-/** Directories a Linux walk of `root` skips: other filesystems and second copies. */
-export function mountPathsToSkip(root: string): Set<string> {
-  if (process.platform !== "linux") return new Set();
+/**
+ * Directories a Linux walk of `root` skips: other filesystems, which have
+ * their own drive pill, and second copies of this one.
+ */
+export function linuxMountPrunes(root: string): { foreign: Set<string>; duplicates: Set<string> } {
+  if (process.platform !== "linux") return { foreign: new Set(), duplicates: new Set() };
   try {
     const mounts = parseMountinfo(readFileSync("/proc/self/mountinfo", "utf8"));
-    return new Set([...foreignMountPointsFrom(root, mounts), ...duplicateMountPathsFrom(root, mounts)]);
+    return {
+      foreign: foreignMountPointsFrom(root, mounts),
+      duplicates: duplicateMountPathsFrom(root, mounts),
+    };
   } catch {
-    return new Set();
+    return { foreign: new Set(), duplicates: new Set() };
   }
 }

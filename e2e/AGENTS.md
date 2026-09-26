@@ -59,6 +59,16 @@ wrap the command in `xvfb-run --auto-servernum`.
   Every launch is closed after the test, and the profiles it created
   are removed. When a test fails, the window screenshot, crash.log,
   main-process output and renderer console are attached first.
+- A launch that throws attaches the same files as
+  `app-N-failed-launch-*`. Its main output starts when
+  `electron.launch()` returns, so anything the app printed before then
+  is missing.
+- `handle.close()` is bounded. If the app has not exited 10 s after
+  `app.close()`, its process tree is killed and the close throws.
+  Playwright's own close has no timeout. It also closes every app it
+  launched when the worker exits, so one app that never exits fails
+  worker teardown ("Worker teardown timeout"), and with it the whole
+  run, even when the retry passes.
 - `fixtures/steps.ts` has the shared UI steps: `scanFolderFromPicker`,
   `waitForScanComplete` and `openTab`.
 - The Playwright page is named `page`, not `window`. Inside
@@ -74,6 +84,17 @@ wrap the command in `xvfb-run --auto-servernum`.
   `com.diskhound.app`, the same one the installed app uses. `bun run
   dev` has the same effect. On macOS the unsigned Electron gets
   "Operation not permitted" in the main output, which is harmless.
+- **A relaunch on a slow macOS runner once waited 30 s for `ready`.**
+  In `scan.spec.ts`'s restart test, crash.log had `acquiring
+  single-instance lock` and then `whenReady fired` 31 s later, and
+  `firstWindow` timed out. The lock was not the cause. Playwright's
+  loader holds `app.whenReady()` back until the launch has attached,
+  then until Electron's own `ready`. The launch took 1 s, and a main
+  thread blocked at the lock holds the launch up for as long as it is
+  blocked. So the wait was for Electron's `ready` itself. It ended as
+  Playwright's close sent `app.quit()`, and the app never exited after
+  that. The cause is unknown. If it comes back, read
+  `app-N-failed-launch-main-output.txt`.
 
 ## Known gaps
 
@@ -84,3 +105,6 @@ the bug has to remove the mark.
 
 - `links.spec.ts`, APFS clones (macOS only): a file and its clone count
   twice toward the scan total.
+- `shared-storage.spec.ts`, hardlinks in Duplicates (Windows only): the
+  Windows walkers write no link id (`i`), so both names of a hardlinked
+  file are listed as copies at full size.

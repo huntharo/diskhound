@@ -1,3 +1,4 @@
+import { spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -19,6 +20,11 @@ const REPO_ROOT = join(HERE, "..", "..");
 const MAIN = join(REPO_ROOT, "dist-electron", "main.cjs");
 const SCANNER_NAME =
   process.platform === "win32" ? "diskhound-native-scanner.exe" : "diskhound-native-scanner";
+/** How long app.close() gets before the app is killed. A normal close
+ *  takes under a second, even on a slow CI runner. */
+const CLOSE_TIMEOUT_MS = 10_000;
+/** How long a killed app gets to exit and close its output pipes. */
+const KILL_TIMEOUT_MS = 5_000;
 
 /** Settings groups are merged one level deep by settingsStore, so a
  *  seed only needs the keys it changes. */
@@ -55,11 +61,19 @@ export type AppHandle = {
   userDataDir: string;
   /** Path the next "Browse for folder..." dialog returns. */
   setPickDirectory: (dir: string | null) => Promise<void>;
-  /** Idempotent. The fixture also calls it after each test. */
+  /** Idempotent. The fixture also calls it after each test. Kills the
+   *  app, and throws, if it has not exited 10 s after app.close(). Only
+   *  the first call throws. */
   close: () => Promise<void>;
   /** Main-process stdout and stderr, and renderer console lines. */
   mainOutput: string[];
   rendererConsole: string[];
+};
+
+/** What the report gets for a launch, including one that failed before
+ *  it had a window. */
+type LaunchDiagnostics = Pick<AppHandle, "userDataDir" | "mainOutput" | "rendererConsole"> & {
+  page: Page | null;
 };
 
 let nativeScanner: string | undefined;
@@ -117,8 +131,14 @@ function writeSeedSettings(userDataDir: string, seed: SeedSettings = {}): void {
  * developer already has open is left alone. On Linux, HOME is also
  * redirected: startup writes a .desktop file and icons under
  * ~/.local/share, which would replace the developer's real ones.
+ *
+ * If the launch fails, onFailure gets its output before the app is
+ * closed and a fresh profile removed.
  */
-export async function launchApp(opts: LaunchOptions = {}): Promise<AppHandle> {
+export async function launchApp(
+  opts: LaunchOptions = {},
+  onFailure?: (diagnostics: LaunchDiagnostics) => Promise<void>,
+): Promise<AppHandle> {
   if (!existsSync(MAIN)) {
     throw new Error(`${MAIN} is missing. Run \`bun run test:e2e\`, which builds first.`);
   }
@@ -135,6 +155,7 @@ export async function launchApp(opts: LaunchOptions = {}): Promise<AppHandle> {
     writeSeedSettings(userDataDir, opts.settings);
   }
 
+  const diagnostics: LaunchDiagnostics = { page: null, userDataDir, mainOutput: [], rendererConsole: [] };
   let app: ElectronApplication | null = null;
   try {
     app = await electron.launch({
@@ -145,22 +166,28 @@ export async function launchApp(opts: LaunchOptions = {}): Promise<AppHandle> {
         ...(process.platform === "linux" ? { HOME: homeDir } : {}),
       }),
     });
-    return await attach(app, dataDir, userDataDir);
+    return await attach(app, dataDir, diagnostics);
   } catch (error) {
-    // The fixture only learns about a launch that returns, so clean up here.
-    await app?.close().catch(() => {});
+    // The fixture only learns about a launch that returns, so report and
+    // clean up here.
+    await onFailure?.(diagnostics).catch(() => {});
+    if (app) await closeApp(app).catch(() => {});
     if (opts.dataDir === undefined) removeDir(dataDir);
     throw error;
   }
 }
 
-async function attach(app: ElectronApplication, dataDir: string, userDataDir: string): Promise<AppHandle> {
-  const mainOutput: string[] = [];
+async function attach(
+  app: ElectronApplication,
+  dataDir: string,
+  diagnostics: LaunchDiagnostics,
+): Promise<AppHandle> {
+  const { userDataDir, mainOutput, rendererConsole } = diagnostics;
   app.process().stdout?.on("data", (chunk) => mainOutput.push(String(chunk)));
   app.process().stderr?.on("data", (chunk) => mainOutput.push(String(chunk)));
 
   const page = await app.firstWindow();
-  const rendererConsole: string[] = [];
+  diagnostics.page = page;
   page.on("console", (message) => rendererConsole.push(`[${message.type()}] ${message.text()}`));
   page.on("pageerror", (error) => rendererConsole.push(`[pageerror] ${error.stack ?? error.message}`));
   await page.waitForSelector(".app-shell");
@@ -190,26 +217,86 @@ async function attach(app: ElectronApplication, dataDir: string, userDataDir: st
         (dialog as unknown as { __e2ePick: string | null }).__e2ePick = pick;
       }, dir);
     },
-    close: () => (closed ??= app.close()),
+    close: () => (closed ? closed.catch(() => {}) : (closed = closeApp(app))),
     mainOutput,
     rendererConsole,
   };
 }
 
-async function attachDiagnostics(handle: AppHandle, index: number, testInfo: TestInfo): Promise<void> {
-  const prefix = `app-${index + 1}`;
-  if (!handle.page.isClosed()) {
+/**
+ * app.close(), bounded. Playwright's close runs app.quit() over the Node
+ * inspector and then waits, with no timeout, for the process to exit.
+ * An app that never got ready, or that ignores the quit, would hang
+ * the test until it times out. Playwright also closes every app it
+ * launched when the worker exits, in the same way. That close hangs
+ * too, the worker teardown times out, and the run fails even when the
+ * retry passes. So after CLOSE_TIMEOUT_MS the app is killed, and the
+ * close throws.
+ */
+async function closeApp(app: ElectronApplication): Promise<void> {
+  const child = app.process();
+  // "close" comes after "exit", once stdout and stderr have closed.
+  // That is also when Playwright stops tracking the app.
+  const gone = new Promise<void>((resolve) => child.once("close", () => resolve()));
+  const closing = app.close();
+  if (await settlesWithin(closing, CLOSE_TIMEOUT_MS)) return closing;
+  killProcessTree(child);
+  const killed = await settlesWithin(gone, KILL_TIMEOUT_MS);
+  throw new Error(
+    `The app did not exit within ${CLOSE_TIMEOUT_MS} ms of app.close(), so it was killed` +
+      (killed ? "." : `, and it had still not exited ${KILL_TIMEOUT_MS} ms later.`),
+  );
+}
+
+/** Whether the promise settles, either way, within the time limit. */
+async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), ms);
+  });
+  try {
+    return await Promise.race([promise.then(() => true, () => true), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Kill the app together with its helpers and the scanner. On Windows,
+ * Playwright starts Electron through cmd.exe, so app.process() is the
+ * shell. Elsewhere it makes the app the leader of a new process group.
+ */
+function killProcessTree(child: ChildProcess): void {
+  if (child.pid === undefined) return;
+  if (process.platform === "win32") {
+    spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true });
+    return;
+  }
+  try {
+    process.kill(-child.pid, "SIGKILL");
+  } catch {
+    child.kill("SIGKILL");
+  }
+}
+
+async function attachDiagnostics(
+  diagnostics: LaunchDiagnostics,
+  prefix: string,
+  testInfo: TestInfo,
+): Promise<void> {
+  const { page } = diagnostics;
+  if (page && !page.isClosed()) {
     try {
       await testInfo.attach(`${prefix}-window.png`, {
         // Bounded, so a hung renderer cannot use up teardown before close().
-        body: await handle.page.screenshot({ timeout: 5_000 }),
+        body: await page.screenshot({ timeout: 5_000 }),
         contentType: "image/png",
       });
     } catch {
       // The window can go away between the check and the capture.
     }
   }
-  const crashLog = join(handle.userDataDir, "crash.log");
+  const crashLog = join(diagnostics.userDataDir, "crash.log");
   if (existsSync(crashLog)) {
     await testInfo.attach(`${prefix}-crash.log`, {
       body: readFileSync(crashLog),
@@ -217,11 +304,11 @@ async function attachDiagnostics(handle: AppHandle, index: number, testInfo: Tes
     });
   }
   await testInfo.attach(`${prefix}-main-output.txt`, {
-    body: handle.mainOutput.join(""),
+    body: diagnostics.mainOutput.join(""),
     contentType: "text/plain",
   });
   await testInfo.attach(`${prefix}-renderer-console.txt`, {
-    body: handle.rendererConsole.join("\n"),
+    body: diagnostics.rendererConsole.join("\n"),
     contentType: "text/plain",
   });
 }
@@ -234,7 +321,8 @@ function removeDir(dir: string): void {
 type Fixtures = {
   /** Launches the app. Every launch is closed, and its profile removed,
    *  after the test. On failure the window, crash.log and process output
-   *  are attached to the report first. */
+   *  are attached to the report first. A launch that throws attaches
+   *  them straight away. */
   launch: (opts?: LaunchOptions) => Promise<AppHandle>;
   /** A small folder tree with known file sizes, removed after the test. */
   scanTree: ScanTree;
@@ -242,11 +330,15 @@ type Fixtures = {
 
 export const test = base.extend<Fixtures>({
   launch: async ({}, use, testInfo) => {
-    const handles: AppHandle[] = [];
+    const handles: { handle: AppHandle; prefix: string }[] = [];
     const ownedDirs = new Set<string>();
+    let launches = 0;
     await use(async (opts = {}) => {
-      const handle = await launchApp(opts);
-      handles.push(handle);
+      const prefix = `app-${++launches}`;
+      const handle = await launchApp(opts, (diagnostics) =>
+        attachDiagnostics(diagnostics, `${prefix}-failed-launch`, testInfo),
+      );
+      handles.push({ handle, prefix });
       if (opts.dataDir === undefined) ownedDirs.add(handle.dataDir);
       return handle;
     });
@@ -254,9 +346,15 @@ export const test = base.extend<Fixtures>({
     // Every app is closed and every profile removed even if one step
     // throws. The first error is rethrown at the end.
     const errors: unknown[] = [];
-    for (const [index, handle] of handles.entries()) {
-      if (failed) await attachDiagnostics(handle, index, testInfo).catch((error) => errors.push(error));
-      await handle.close().catch((error) => errors.push(error));
+    for (const { handle, prefix } of handles) {
+      if (failed) await attachDiagnostics(handle, prefix, testInfo).catch((error) => errors.push(error));
+      try {
+        await handle.close();
+      } catch (error) {
+        errors.push(error);
+        // The main output shows what the app did with the quit.
+        if (!failed) await attachDiagnostics(handle, prefix, testInfo).catch(() => {});
+      }
     }
     for (const dir of ownedDirs) {
       try {

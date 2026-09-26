@@ -27,9 +27,9 @@ import type { AffinityRule, ProcessInfo } from "./shared/contracts";
  *     latency on machines with many rules.
  *   - We match the exe name case-insensitively; patterns are stored
  *     lowercased by the settings normalizer so match-time is cheap.
- *   - Errors are swallowed and logged — a rule that fails (process
- *     protected, permission denied, etc.) just stays un-applied; we
- *     retry next tick.
+ *   - Errors are returned, not thrown — a rule that fails (process
+ *     protected, permission denied, etc.) just stays un-applied.
+ *     `shared/affinityEnforcer.ts` logs it and retries on a backoff.
  */
 
 export interface AffinityApplyResult {

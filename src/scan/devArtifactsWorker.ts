@@ -1,10 +1,10 @@
 import { parentPort } from "node:worker_threads";
 
+import { sidecarFromFolderTreeFile } from "../shared/devArtifactFolderTree";
 import {
   readDevArtifactSidecar,
   reportFromSidecar,
   rescanDevArtifactSidecar,
-  sidecarFromFolderTreeFile,
   writeDevArtifactSidecar,
 } from "../shared/devArtifactSidecar";
 import type {

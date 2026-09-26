@@ -605,6 +605,12 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
         </div>
       )}
 
+      {!diff.sizeSemanticsChanged && !diff.hardlinkAccountingChanged && diff.volumeAccountingChanged && (
+        <div className="changes-semantics-note">
+          The older scan walked the startup disk's Data volume twice (once through /System/Volumes/Data) and counted other mounted disks. Newer scans count each folder once and leave other disks to their own scans, so part of this drop is accounting, not freed space. Run one more scan, then compare two scans from after that.
+        </div>
+      )}
+
       {/* ── Summary strip ── */}
       <div className="changes-summary">
         <div
