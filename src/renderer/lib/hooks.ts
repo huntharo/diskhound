@@ -12,6 +12,7 @@ import { toast } from "../components/Toasts";
 import { markDeletedPath, type DeletedPathAction } from "./deletedPaths";
 import { checkFreedSpace, freeBytesBeforeDelete } from "./freedSpaceCheck";
 import { dispatchSettingsUpdated, SETTINGS_UPDATED_EVENT } from "./uiEvents";
+import { startVisiblePoll } from "./visiblePoll";
 
 const DEFAULT_DISK_SPACE_REFRESH_MS = 10_000;
 
@@ -64,11 +65,11 @@ export function useLiveDiskSpace(refreshMs = DEFAULT_DISK_SPACE_REFRESH_MS) {
         if (!cancelled) setLoading(false);
       }
     };
-    void run();
-    const id = window.setInterval(() => void run(), refreshMs);
+    // Each read runs df or PowerShell in main; none while hidden in the tray.
+    const stop = startVisiblePoll(() => void run(), refreshMs, { immediate: true });
     return () => {
       cancelled = true;
-      window.clearInterval(id);
+      stop();
     };
   }, [refreshMs]);
 

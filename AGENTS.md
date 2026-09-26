@@ -29,6 +29,7 @@ The same harness budgets reads. A UI action on data the app already holds (a tab
   - crash.log buffers its lines and appends them on a 2 s timer. The harness's `vi.mock("../shared/crashLog")` line turns that timer off, and the harness flushes whenever a measurement settles. A scenario's lines then count as one append in its own window, and boot refuses to start without that line.
   - See `src/__tests__/main.*.ioBudget.test.ts`.
 - **Polls.** Pass `{ countProcesses: true }` to `measureFsIo` to also count child processes and workers. A poll that runs `df`, PowerShell or a sampler per tick needs that.
+  - Renderer pollers use `startVisiblePoll` or `useVisibleInterval` from `src/renderer/lib/visiblePoll.ts`, so they stop while the window is hidden to the tray. `e2e/tray.spec.ts` checks that no process starts while hidden.
 
 ## E2E
 

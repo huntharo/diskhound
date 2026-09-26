@@ -15,6 +15,7 @@ import type {
 import { formatBytes, formatCount, relativeTime } from "../lib/format";
 import { saveLocalPreference } from "../lib/localPreference";
 import { reportPollFailure } from "../lib/pollFailure";
+import { startVisiblePoll, useVisibleInterval } from "../lib/visiblePoll";
 import { nativeApi } from "../nativeApi";
 
 /**
@@ -299,10 +300,7 @@ export function SystemWidget() {
     });
   }, [applySettingsToTheme]);
 
-  useEffect(() => {
-    const id = window.setInterval(() => setNow(Date.now()), 5_000);
-    return () => window.clearInterval(id);
-  }, []);
+  useVisibleInterval(() => setNow(Date.now()), 5_000);
 
   // Persist layout + active-detail to localStorage on any
   // change (and on mount, where saveLocalPreference skips the
@@ -399,19 +397,18 @@ export function SystemWidget() {
       await refreshAll();
     })();
     const scanUnsub = nativeApi.onScanSnapshot((snapshot) => setScan(snapshot));
-    const diskTimer = window.setInterval(() => void refreshDiskAndScan(), DISK_REFRESH_MS);
-    const memoryTimer = window.setInterval(() => void refreshMemory(), MEMORY_REFRESH_MS);
-    const diskIoTimer = window.setInterval(() => void refreshDiskIo(), DISK_IO_REFRESH_MS);
-    const gpuTimer = gpuAvailable
-      ? window.setInterval(() => void refreshGpu(), GPU_REFRESH_MS)
-      : null;
+    // Every sample starts a process in main (df, the process sampler,
+    // nvidia-smi or PowerShell), so none run while the widget is hidden.
+    const stops = [
+      startVisiblePoll(() => void refreshDiskAndScan(), DISK_REFRESH_MS),
+      startVisiblePoll(() => void refreshMemory(), MEMORY_REFRESH_MS),
+      startVisiblePoll(() => void refreshDiskIo(), DISK_IO_REFRESH_MS),
+      ...(gpuAvailable ? [startVisiblePoll(() => void refreshGpu(), GPU_REFRESH_MS)] : []),
+    ];
     return () => {
       cancelled = true;
       scanUnsub();
-      window.clearInterval(diskTimer);
-      window.clearInterval(memoryTimer);
-      window.clearInterval(diskIoTimer);
-      if (gpuTimer !== null) window.clearInterval(gpuTimer);
+      for (const stop of stops) stop();
     };
   }, [gpuAvailable, refreshAll, refreshDiskAndScan, refreshDiskIo, refreshGpu, refreshMemory]);
 
