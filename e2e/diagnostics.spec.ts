@@ -50,7 +50,8 @@ test("saves a hot-CPU profile that reaches back past the live window", async ({ 
   const artifact = session!.artifacts[0];
   expect(artifact.filename).toBe("main-hot-0001.cpuprofile");
   expect(status.handoffText).toContain(artifact.path);
-  expect(crashLog(handle)).toContain(`[hot-cpu] saved ${artifact.path}`);
+  // crash.log is buffered for up to 2 s.
+  await expect.poll(() => crashLog(handle)).toContain(`[hot-cpu] saved ${artifact.path}`);
 
   const profile = JSON.parse(readFileSync(artifact.path, "utf8")) as {
     startTime: number; endTime: number; nodes: Array<{ callFrame: { functionName: string } }>;
@@ -86,7 +87,7 @@ test("saves an allocation profile when the main heap passes the gate", async ({ 
   const artifact = session?.artifacts.find((entry) => entry.kind === "heapprofile");
   expect(artifact?.filename).toBe("main-gate-0001.heapprofile");
   expect(artifact?.summary).toMatch(/^live allocations at [\d,]+ MB, sampled for \d+ s from [\d,]+ MB$/);
-  expect(crashLog(handle)).toMatch(/\[heap-gate\] main heap [\d,]+ MB of [\d,]+ MB passed the 128 MB gate .*; saved /);
+  await expect.poll(() => crashLog(handle)).toMatch(/\[heap-gate\] main heap [\d,]+ MB of [\d,]+ MB passed the 128 MB gate .*; saved /);
 
   type Node = { callFrame: { functionName: string }; selfSize: number; children: Node[] };
   const profile = JSON.parse(readFileSync(artifact!.path, "utf8")) as { head: Node };

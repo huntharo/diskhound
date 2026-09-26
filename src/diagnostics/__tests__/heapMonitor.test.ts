@@ -224,8 +224,13 @@ describe("HeapMonitor", () => {
       detail: expect.objectContaining({ pauseMs: 6_200 }),
     });
     const lines = f.logged("heap-snapshot");
-    expect(lines).toHaveLength(2);
-    expect(lines[0]).toMatch(new RegExp(`^saved ${f.session.artifactPath("main-gate-0001-a.heapsnapshot").replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")} \\(0 MB\\); main thread paused 6200 ms; main 420 MB`));
+    const pathA = f.session.artifactPath("main-gate-0001-a.heapsnapshot");
+    expect(lines).toHaveLength(4);
+    // Each snapshot's first line goes to disk before V8 blocks the thread.
+    expect(lines[0]).toBe(`writing ${pathA} at 420 MB heap; if DiskHound exits before the next line, the snapshot killed it`);
+    const writing = f.log.mock.calls.filter(([tag, message]) => tag === "heap-snapshot" && String(message).startsWith("writing "));
+    expect(writing.map(([, , options]) => options)).toEqual([{ sync: true }, { sync: true }]);
+    expect(lines[1]).toMatch(new RegExp(`^saved ${pathA.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")} \\(0 MB\\); main thread paused 6200 ms; main 420 MB`));
     expect(f.monitor.status().state).toBe("capped");
   });
 
@@ -332,6 +337,9 @@ describe("HeapMonitor", () => {
     ]);
     await f.run(3600, 3500);
     expect(f.logged("heap-near-limit")).toHaveLength(2);
+    // Both on disk before tick returns: V8's OOM abort skips every flush.
+    expect(f.log.mock.calls.filter(([tag]) => tag === "heap-near-limit").map(([, , options]) => options))
+      .toEqual([{ sync: true }, { sync: true }]);
     await f.run(2700, 3500);
     expect(f.logged("heap-near-limit")).toHaveLength(4);
     expect(f.session.writtenCount("heapprofile")).toBe(3);

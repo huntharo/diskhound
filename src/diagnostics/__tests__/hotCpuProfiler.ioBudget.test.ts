@@ -52,6 +52,7 @@ async function launch(options: { maxProfiles?: number; thresholdPercent?: number
   const cpu = { percent: 1, micros: 0, lastAt: Date.now() };
   const written = { next: deferred() };
   const session = makeSession(dir.path, "hot-cpu");
+  const crash = crashLogLike(dir.path);
   const profiler = new HotCpuProfiler({
     config: hotCpuConfig({ maxProfiles: options.maxProfiles ?? 5, thresholdPercent: options.thresholdPercent ?? 50 }),
     session,
@@ -65,7 +66,7 @@ async function launch(options: { maxProfiles?: number; thresholdPercent?: number
     readHeapUsed: () => 180 * 1024 * 1024,
     now: Date.now,
     monotonicNow: Date.now,
-    log: crashLogLike(dir.path),
+    log: crash,
     onProfileWritten: () => {
       written.next.resolve();
       written.next = deferred();
@@ -74,13 +75,25 @@ async function launch(options: { maxProfiles?: number; thresholdPercent?: number
   profilers.push(profiler);
   // Setup: arming logs one crash.log line per launch.
   await profiler.start();
-  return { dir: dir.path, cpu, written, session, profiler, calls };
+  /**
+   * Setup's crash.log lines go out first; the work's lines get the flush
+   * the 2 s timer would give them.
+   */
+  const measure = <T>(work: () => Promise<T>) => {
+    crash.flush();
+    return measureFsIo(async () => {
+      const result = await work();
+      crash.flush();
+      return result;
+    });
+  };
+  return { dir: dir.path, cpu, written, session, profiler, calls, measure };
 }
 
 describe("hot-CPU profiler disk writes", () => {
   it("writes nothing while the main thread idles for an hour", async () => {
-    const { calls, session } = await launch();
-    const { io } = await measureFsIo(() => vi.advanceTimersByTimeAsync(HOUR));
+    const { calls, session, measure } = await launch();
+    const { io } = await measure(() => vi.advanceTimersByTimeAsync(HOUR));
 
     expectIoBudget({
       scenario: "hot-cpu-idle-hour",
@@ -92,12 +105,12 @@ describe("hot-CPU profiler disk writes", () => {
   });
 
   it("writes one joined profile, its samples and events, and a crash.log line per capture", async () => {
-    const { cpu, written, session } = await launch();
+    const { cpu, written, session, measure } = await launch();
     // Windows rotate at 30, 60 and 90 s. Going hot at 116 s triggers at
     // 120 s, just before the next rotation: the longest lookback, the
     // 60–90 s window plus 30 s of the live one.
     await vi.advanceTimersByTimeAsync(116_000);
-    const { io } = await measureFsIo(async () => {
+    const { io } = await measure(async () => {
       cpu.percent = 95;
       const done = written.next.promise;
       await vi.advanceTimersByTimeAsync(4_000 + 15_000);
@@ -106,7 +119,7 @@ describe("hot-CPU profiler disk writes", () => {
 
     expectIoBudget({
       scenario: "hot-cpu-capture",
-      note: "the first capture of a launch (a 75 s joined profile of 1 ms samples, ~1.6 MB): the session folder, the .cpuprofile, samples.ndjson, events.ndjson, session.json and a crash.log line with its path; later captures skip the folder. Off by default: 0/day. On: at most 5 per launch, 60 s apart, at any threshold (5% is the most aggressive): <= 35 write calls (5 captures plus the armed and capped crash.log lines) and ~8.5 MB per launch, which in the tray usually spans a day or more",
+      note: "the first capture of a launch (a 75 s joined profile of 1 ms samples, ~1.6 MB): the session folder, the .cpuprofile, samples.ndjson, events.ndjson, session.json and a crash.log line with its path; later captures skip the folder. Off by default: 0/day. On: at most 5 per launch, 60 s apart, at any threshold (5% is the most aggressive): <= 28 write calls (5 captures plus the armed and capped crash.log lines, which are buffered appends) and ~8.5 MB per launch, which in the tray usually spans a day or more",
       io,
     });
     const profile = JSON.parse(await FSP.readFile(session.artifactPath("main-hot-0001.cpuprofile"), "utf8"));
@@ -115,15 +128,17 @@ describe("hot-CPU profiler disk writes", () => {
   });
 
   it("writes nothing once the per-launch cap is reached, however hot the main thread runs", async () => {
-    const { cpu, written, profiler } = await launch({ maxProfiles: 1 });
+    const { cpu, written, profiler, measure } = await launch({ maxProfiles: 1 });
     await vi.advanceTimersByTimeAsync(60_000);
     cpu.percent = 100;
     const done = written.next.promise;
     await vi.advanceTimersByTimeAsync(20_000);
     await done;
+    // The capped line follows the capture; it's setup too.
+    await vi.advanceTimersByTimeAsync(10);
     expect(profiler.status().state).toBe("capped");
 
-    const { io } = await measureFsIo(() => vi.advanceTimersByTimeAsync(HOUR));
+    const { io } = await measure(() => vi.advanceTimersByTimeAsync(HOUR));
 
     expectIoBudget({
       scenario: "hot-cpu-capped-hour",

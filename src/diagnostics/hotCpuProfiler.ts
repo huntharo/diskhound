@@ -3,7 +3,7 @@ import type { Profiler } from "node:inspector";
 
 import { joinCpuProfiles } from "./cpuProfileJoin";
 import type { HotCpuConfig } from "./diagnosticsConfig";
-import type { DiagnosticsArtifactRecord, DiagnosticsSession } from "./diagnosticsSession";
+import type { DiagnosticsArtifactRecord, DiagnosticsLog, DiagnosticsSession } from "./diagnosticsSession";
 import type { InspectorTarget } from "./mainInspector";
 
 export interface CpuReading {
@@ -89,7 +89,7 @@ export class HotCpuProfiler {
   private readonly readHeapUsed: () => number;
   private readonly now: () => number;
   private readonly monotonicNow: () => number;
-  private readonly log: (tag: string, message: string) => void;
+  private readonly log: DiagnosticsLog;
   private readonly onProfileWritten?: (written: HotCpuProfileWritten) => void | Promise<void>;
   private readonly onSampleCaptured?: () => void;
 
@@ -134,7 +134,7 @@ export class HotCpuProfiler {
     /** For rotation and CPU deltas; unaffected by clock changes. */
     monotonicNow?: () => number;
     /** writeCrashLog in main. */
-    log?: (tag: string, message: string) => void;
+    log?: DiagnosticsLog;
     onProfileWritten?: (written: HotCpuProfileWritten) => void | Promise<void>;
     /**
      * Fires once per completed sampling iteration, after rescheduling.

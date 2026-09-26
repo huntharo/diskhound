@@ -5,7 +5,7 @@ import { getHeapStatistics, writeHeapSnapshot } from "node:v8";
 
 import type { WorkerHeapReading } from "../shared/workerHeapRegistry";
 import type { HeapGateConfig } from "./diagnosticsConfig";
-import type { DiagnosticsArtifactRecord, DiagnosticsSession } from "./diagnosticsSession";
+import type { DiagnosticsArtifactRecord, DiagnosticsLog, DiagnosticsSession } from "./diagnosticsSession";
 import type { InspectorTarget } from "./mainInspector";
 
 const MB = 1024 * 1024;
@@ -203,7 +203,7 @@ export class HeapMonitor {
   private readonly observeMajorGc: (onMajorGc: () => void) => () => void;
   private readonly now: () => number;
   private readonly monotonicNow: () => number;
-  private readonly log: (tag: string, message: string) => void;
+  private readonly log: DiagnosticsLog;
   private readonly onCapture?: (capture: HeapCapture) => void | Promise<void>;
   private readonly afterBlockingCapture?: () => void;
 
@@ -224,6 +224,8 @@ export class HeapMonitor {
   private cappedNoted = false;
   private nearLimitLogged = false;
   private busy: Promise<unknown> | null = null;
+  /** A tick reading heap-gate-state.json; it may fire the gate next. */
+  private dayStateLoad: Promise<void> | null = null;
   private dayState: GateDayState | null = null;
   private lastEvent: string | null = null;
 
@@ -242,7 +244,7 @@ export class HeapMonitor {
     observeMajorGc?: (onMajorGc: () => void) => () => void;
     now?: () => number;
     monotonicNow?: () => number;
-    log?: (tag: string, message: string) => void;
+    log?: DiagnosticsLog;
     onCapture?: (capture: HeapCapture) => void | Promise<void>;
     /** Right after a snapshot, so the CPU profiler doesn't count that pause as hot. */
     afterBlockingCapture?: () => void;
@@ -293,7 +295,10 @@ export class HeapMonitor {
 
   /** Resolves once the running capture has finished. Snapshot B waits on its own timer. */
   async whenIdle(): Promise<void> {
-    while (this.busy) await this.busy;
+    while (this.busy || this.dayStateLoad) {
+      await this.dayStateLoad;
+      await this.busy;
+    }
   }
 
   /** True while snapshot B is scheduled. */
@@ -312,7 +317,15 @@ export class HeapMonitor {
     this.updateGcHook(reading);
     if (!this.config.enabled) return;
 
-    await this.loadDayState();
+    const load = this.loadDayState();
+    this.dayStateLoad = load;
+    try {
+      await load;
+    } finally {
+      if (this.dayStateLoad === load) this.dayStateLoad = null;
+    }
+    // stop() ran while the state file was read.
+    if (this.stopped) return;
     const { usedBytes } = reading;
     if (this.gateFired && usedBytes < this.config.gateBytes * REARM_FRACTION) this.gateFired = false;
     // Sampling continues on a capped day too, for the near-limit dump.
@@ -448,6 +461,7 @@ export class HeapMonitor {
       "heap-near-limit",
       `main ${mb(reading.usedBytes)}${workers ? ` + workers (${workers})` : ""} = ${Math.round(fraction * 100)}% of the ${mb(reading.limitBytes)} heap limit. `
         + "If DiskHound exits now, V8 ran out of heap; its abort skips every crash handler.",
+      { sync: true },
     );
     if (!this.sampling || !this.inspector) return;
     // Synchronously: the process may not get another turn.
@@ -462,9 +476,9 @@ export class HeapMonitor {
         artifacts: [{ filename, kind: "heapprofile", bytes: Buffer.byteLength(text), capturedAt: new Date(this.now()).toISOString(), summary }],
         samples: this.takeUnflushedSamples(),
       });
-      this.note("heap-near-limit", `saved ${this.session.artifactPath(filename)}`);
+      this.note("heap-near-limit", `saved ${this.session.artifactPath(filename)}`, { sync: true });
     } catch (error) {
-      this.note("heap-near-limit", `allocation profile failed: ${serializeError(error)}`);
+      this.note("heap-near-limit", `allocation profile failed: ${serializeError(error)}`, { sync: true });
     }
   }
 
@@ -613,6 +627,13 @@ export class HeapMonitor {
     await this.session.prepare();
     const filename = `${basename}.heapsnapshot`;
     const filePath = this.session.artifactPath(filename);
+    // On disk first: V8 blocks the main thread while it writes, and a
+    // snapshot has killed Electron 40 outright.
+    this.log(
+      "heap-snapshot",
+      `writing ${filePath} at ${mb(reading.usedBytes)} heap; if DiskHound exits before the next line, the snapshot killed it`,
+      { sync: true },
+    );
     const startedAt = this.monotonicNow();
     this.writeHeapSnapshot(filePath);
     const pauseMs = Math.round(this.monotonicNow() - startedAt);
@@ -687,8 +708,8 @@ export class HeapMonitor {
   }
 
   /** crash.log line, also shown as the status's last event. */
-  private note(tag: string, message: string): void {
+  private note(tag: string, message: string, options?: { sync?: boolean }): void {
     this.lastEvent = message;
-    this.log(tag, message);
+    this.log(tag, message, options);
   }
 }
