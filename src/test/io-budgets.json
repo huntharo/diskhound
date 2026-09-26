@@ -284,6 +284,44 @@
     "open": 0,
     "observedBytesWritten": 485
   },
+  "full-diff-retry-after-failure": {
+    "note": "asking again for a pair whose diff failed in the worker and inline: both spill again, 2 × 10.6 MB here and ~7.4 GB at 7M files per retry",
+    "writeFile": 16,
+    "appendFile": 0,
+    "rename": 0,
+    "copyFile": 0,
+    "mkdir": 18,
+    "createWriteStream": 0,
+    "unlink": 0,
+    "readFile": 3,
+    "readdir": 0,
+    "stat": 4,
+    "lstat": 0,
+    "access": 0,
+    "existsSync": 20,
+    "createReadStream": 20,
+    "open": 0,
+    "observedBytesWritten": 21295066
+  },
+  "full-diff-warm": {
+    "note": "the latest pair's full diff, warmed after every scan whose totals moved: both indexes sorted into runs spilled to OS.tmpdir() as uncompressed JSONL, ~265 B per file per side (the path twice). 8 runs and 10.6 MB here; 59 runs per side and ~3.7 GB per scan at 7M files, ~15 GB/day at the 6 h default. Plus a ~150 KB full-diff-cache entry",
+    "writeFile": 9,
+    "appendFile": 0,
+    "rename": 1,
+    "copyFile": 0,
+    "mkdir": 10,
+    "createWriteStream": 0,
+    "unlink": 0,
+    "readFile": 3,
+    "readdir": 0,
+    "stat": 2,
+    "lstat": 0,
+    "access": 0,
+    "existsSync": 10,
+    "createReadStream": 10,
+    "open": 0,
+    "observedBytesWritten": 10797513
+  },
   "io-budget-harness-one-write": {
     "note": "one known write",
     "writeFile": 1,
@@ -320,7 +358,7 @@
     "existsSync": 0,
     "createReadStream": 0,
     "open": 0,
-    "observedBytesWritten": 324
+    "observedBytesWritten": 11268
   },
   "linux-integration-icon-changed": {
     "note": "a launch after an update changed one icon: 1 icon copied, then gtk-update-icon-cache",
@@ -339,7 +377,7 @@
     "existsSync": 0,
     "createReadStream": 0,
     "open": 0,
-    "observedBytesWritten": 0
+    "observedBytesWritten": 999
   },
   "linux-integration-relaunch": {
     "note": "every later launch with the same icons and exec path: reads to compare, 0 writes, no cache refresh",
@@ -531,6 +569,25 @@
     "open": 0,
     "observedBytesWritten": 216
   },
+  "scheduled-full-scan": {
+    "note": "a scheduled full scan's commit at the 7-scan cap: the history snapshot (~2.7 MB) and index, 3 renames of the scanner's pending files, last-scan.json (the same ~2.7 MB again), disk-baselines.json, settings.json, and the pruned scan's files. ~5.6 MB here; the Rust scanner also writes the index (~330 MB at 7M files) and folder-tree sidecar (~50 MB), so ~390 MB per scan: 4/day and ~1.5 GB/day at the 6 h default, up to 1,440/day and ~560 GB/day at the 1-minute minimum. The full-diff warm is its own scenario",
+    "writeFile": 5,
+    "appendFile": 0,
+    "rename": 3,
+    "copyFile": 0,
+    "mkdir": 3,
+    "createWriteStream": 0,
+    "unlink": 6,
+    "readFile": 0,
+    "readdir": 1,
+    "stat": 0,
+    "lstat": 0,
+    "access": 1,
+    "existsSync": 0,
+    "createReadStream": 0,
+    "open": 0,
+    "observedBytesWritten": 5587837
+  },
   "settings-set-changed": {
     "note": "one settings change: 1 pretty-printed rewrite of settings.json (~1 KB), per user action",
     "writeFile": 1,
@@ -625,6 +682,44 @@
     "createReadStream": 0,
     "open": 0,
     "observedBytesWritten": 172
+  },
+  "usn-tick-no-changes": {
+    "note": "a USN tick with no changes under the root: rewrites the whole index (~330 MB at 7M files), saves a new history snapshot and last-scan.json (~2.3 MB each), copies both sidecars (~50 MB at 7M) and prunes a real scan out of the 7-scan history. ~390 MB per no-op tick: ~1.6 GB/day at the 6 h default, ~560 GB/day at the 1-minute minimum",
+    "writeFile": 5,
+    "appendFile": 0,
+    "rename": 1,
+    "copyFile": 2,
+    "mkdir": 4,
+    "createWriteStream": 1,
+    "unlink": 6,
+    "readFile": 0,
+    "readdir": 1,
+    "stat": 0,
+    "lstat": 0,
+    "access": 0,
+    "existsSync": 7,
+    "createReadStream": 2,
+    "open": 0,
+    "observedBytesWritten": 5825419
+  },
+  "usn-tick-small-change": {
+    "note": "a USN tick with 4 changed files: the same ~390 MB as a no-op tick (whole-index rewrite, snapshot twice, both sidecars copied, a real scan pruned)",
+    "writeFile": 5,
+    "appendFile": 0,
+    "rename": 1,
+    "copyFile": 2,
+    "mkdir": 4,
+    "createWriteStream": 1,
+    "unlink": 6,
+    "readFile": 0,
+    "readdir": 1,
+    "stat": 0,
+    "lstat": 0,
+    "access": 0,
+    "existsSync": 7,
+    "createReadStream": 2,
+    "open": 0,
+    "observedBytesWritten": 5825345
   },
   "window-state-drag": {
     "note": "100 move/resize events 16 ms apart, then the 400 ms debounce: 1 write of window-state.json",

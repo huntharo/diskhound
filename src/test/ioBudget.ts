@@ -35,7 +35,8 @@ import { expect } from "vitest";
  * Every call, sync, callback or promise, counts once under the name of
  * its async form: `writeFileSync` and `fs.promises.writeFile` both count
  * as `writeFile`. `bytesWritten` adds the data passed to writeFile and
- * appendFile and the bytes a write stream flushed.
+ * appendFile, the size of each file copyFile copies, and the bytes a
+ * write stream flushed.
  *
  * ## Settling
  *
@@ -64,7 +65,9 @@ import { expect } from "vitest";
  *
  * To record or change a budget, run
  * `UPDATE_IO_BUDGETS=1 bun run test <file>` and commit the diff, so the
- * write cost change shows up as a reviewable line in the PR. Parallel
+ * write cost change shows up as a reviewable line in the PR. Add
+ * `IO_BUDGET_TRACE=1` to print each counted call, its path and its
+ * bytes, for the note's per-file breakdown. Parallel
  * test workers take turns on the JSON file through a lock file next to
  * it, so re-recording the whole suite at once is safe.
  */
@@ -178,10 +181,18 @@ function windowsFor(target: string): Window[] {
 }
 
 function record(counter: IoCounter, bytes: number, target: string): void {
-  for (const { io } of windowsFor(target)) {
+  const windows = windowsFor(target);
+  for (const { io } of windows) {
     io[counter] += 1;
     io.bytesWritten += bytes;
   }
+  if (windows.length > 0) trace(counter, target, bytes);
+}
+
+/** `IO_BUDGET_TRACE=1` prints every counted call, for writing a budget's note. */
+function trace(counter: string, target: string, bytes: number): void {
+  if (!process.env.IO_BUDGET_TRACE) return;
+  process.stderr.write(`[io] ${counter} ${target}${bytes ? ` ${bytes} B` : ""}\n`);
 }
 
 function track(work: Promise<unknown>, label: string): void {
@@ -206,6 +217,15 @@ function dataBytes(data: unknown, options: unknown): number {
   return 0;
 }
 
+/** A copy writes the whole source file. Read before the copy starts. */
+function copiedBytes(source: unknown): number {
+  try {
+    return realFs.statSync(source as string).size;
+  } catch {
+    return 0;
+  }
+}
+
 function describeTarget(args: unknown[]): string {
   const target = args[0];
   return typeof target === "string" ? target : String(target);
@@ -218,7 +238,10 @@ function countedFunction(
 ): (...args: unknown[]) => unknown {
   return function counted(this: unknown, ...args: unknown[]) {
     const target = describeTarget(args);
-    record(counter, BYTE_COUNTED.has(counter) ? dataBytes(args[1], args[2]) : 0, target);
+    const bytes = BYTE_COUNTED.has(counter)
+      ? dataBytes(args[1], args[2])
+      : counter === "copyFile" ? copiedBytes(args[0]) : 0;
+    record(counter, bytes, target);
     const last = args.length - 1;
     let finish: (() => void) | undefined;
     if (last >= 0 && typeof args[last] === "function") {
@@ -266,6 +289,7 @@ function countedStream(original: StreamFactory, counter: IoCounter, label: strin
           settled = true;
           if (counter === "createWriteStream") {
             for (const { io } of windows) io.bytesWritten += stream.bytesWritten ?? 0;
+            if (windows.length > 0) trace("createWriteStream (closed)", target, stream.bytesWritten ?? 0);
           }
           resolve();
         };
