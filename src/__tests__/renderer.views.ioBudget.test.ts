@@ -45,6 +45,10 @@ vi.mock("electron", async () =>
 // a real view on the real main process, lets the mount's own IPC
 // finish, then budgets a burst of the clicks a user makes.
 
+// Re-rendering 1,000 file rows 21 times takes ~1.6 s here and 5-6 s on
+// CI runners, past vitest's 5 s default.
+vi.setConfig({ testTimeout: 30_000 });
+
 const ROOT = hostRoot("/Volumes/Data");
 
 let main: MainProcess;
