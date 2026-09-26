@@ -70,6 +70,24 @@ export interface FolderTreeLoadPlan {
   reason: string;
 }
 
+/**
+ * Most heap the in-memory trees may take: one tree when planning a
+ * load, and every cached tree together when main decides which to keep.
+ */
+export function treeHeapBudgetBytes(heapLimitBytes: number, maxTreeHeapBytes?: number): number {
+  return Math.min(maxTreeHeapBytes ?? MAX_TREE_HEAP_BYTES, heapLimitBytes * MAX_TREE_HEAP_FRACTION);
+}
+
+/**
+ * Heap a loaded tree holds: its parent entries and the file rows under
+ * them. One pass over the parents, once per tree load.
+ */
+export function estimateTreeHeapBytes(tree: ReadonlyMap<string, { readonly files: ArrayLike<unknown> }>): number {
+  let files = 0;
+  for (const node of tree.values()) files += node.files.length;
+  return tree.size * HEAP_BYTES_PER_DIRECTORY + files * HEAP_BYTES_PER_FILE;
+}
+
 const mb = (bytes: number): string => `${Math.round(bytes / (1024 * 1024)).toLocaleString("en-US")} MB`;
 
 /**
@@ -81,10 +99,7 @@ const mb = (bytes: number): string => `${Math.round(bytes / (1024 * 1024)).toLoc
  *   or there's nothing on disk at all.
  */
 export function planFolderTreeLoad(inputs: FolderTreeLoadInputs): FolderTreeLoadPlan {
-  const budget = Math.min(
-    inputs.maxTreeHeapBytes ?? MAX_TREE_HEAP_BYTES,
-    inputs.heapLimitBytes * MAX_TREE_HEAP_FRACTION,
-  );
+  const budget = treeHeapBudgetBytes(inputs.heapLimitBytes, inputs.maxTreeHeapBytes);
   const headroom = inputs.heapLimitBytes * MAX_HEAP_FRACTION_AFTER_LOAD - inputs.heapUsedBytes;
   const allowed = Math.max(0, Math.min(budget, headroom));
   const limitedBy = headroom < budget

@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  estimateTreeHeapBytes,
+  HEAP_BYTES_PER_DIRECTORY,
+  HEAP_BYTES_PER_FILE,
   HEAP_BYTES_PER_SIDECAR_BYTE,
   MAX_TREE_HEAP_BYTES,
   planFolderTreeLoad,
+  treeHeapBudgetBytes,
   type FolderTreeLoadInputs,
 } from "../folderTreeLoadPlan";
 
@@ -97,5 +101,53 @@ describe("planFolderTreeLoad", () => {
       directoriesVisited: 9_000_000,
     });
     expect(plan.mode).toBe("memory");
+  });
+});
+
+describe("treeHeapBudgetBytes", () => {
+  it("allows 1 GB of trees in Electron's 4 GB heap", () => {
+    expect(treeHeapBudgetBytes(ELECTRON_HEAP_LIMIT)).toBe(MAX_TREE_HEAP_BYTES);
+  });
+
+  it("allows a quarter of a smaller heap", () => {
+    expect(treeHeapBudgetBytes(2048 * MB)).toBe(512 * MB);
+  });
+
+  it("takes an override below both", () => {
+    expect(treeHeapBudgetBytes(ELECTRON_HEAP_LIMIT, 1.6 * MB)).toBe(1.6 * MB);
+  });
+});
+
+describe("estimateTreeHeapBytes", () => {
+  it("charges each parent entry and each file row under it", () => {
+    const tree = new Map([
+      ["/a", { files: [1, 2, 3] }],
+      ["/a/b", { files: [] }],
+    ]);
+    expect(estimateTreeHeapBytes(tree)).toBe(2 * HEAP_BYTES_PER_DIRECTORY + 3 * HEAP_BYTES_PER_FILE);
+  });
+
+  // Main runs it on every tree it caches, and trees reach millions of
+  // parents. It reads each parent's file count, never the files.
+  it("reads once per parent, however many files each holds", () => {
+    const reads = (parents: number, filesPerParent: number): number => {
+      let count = 0;
+      const counted = <T extends object>(target: T): T => new Proxy(target, {
+        get(obj, prop, receiver) {
+          count++;
+          return Reflect.get(obj, prop, receiver);
+        },
+      });
+      const tree = new Map(Array.from({ length: parents }, (_, i) =>
+        [`/p${i}`, counted({ files: counted(new Array<number>(filesPerParent).fill(0)) })] as const));
+      estimateTreeHeapBytes(tree);
+      return count;
+    };
+    const n = 1_000;
+    const small = reads(n, 20);
+    const large = reads(8 * n, 8 * 20);
+    expect(small).toBeGreaterThan(0);
+    expect(large).toBeLessThanOrEqual(small * 16);
+    expect(large).toBeLessThanOrEqual(8 * n * 2);
   });
 });
