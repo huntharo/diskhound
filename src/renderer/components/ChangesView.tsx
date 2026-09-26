@@ -55,7 +55,17 @@ const TIME_RANGES: TimeRange[] = [
   { id: "3M",  label: "3M",  ms: 90 * 24 * 60 * 60 * 1000 },
 ];
 
-const FULL_DIFF_AUTOLOAD_MAX_BYTES = 64 * 1024 * 1024;
+/**
+ * An uncached pair whose two indexes total more than this shows the
+ * fast summary and a Load button instead of loading the full diff on
+ * open. The diff reads ~38 MB of index a second on an M5 Max: a
+ * 20M-file pair, 0.7 GB of indexes, took 19 s. So this limit is a wait
+ * of up to ~30 s there, longer on slower machines. Cached pairs load at
+ * any size, and the warm after each scan caches the latest pair.
+ */
+const FULL_DIFF_AUTOLOAD_MAX_BYTES = 1024 * 1024 * 1024;
+/** Below this the diff takes a few seconds, and the loading hint says nothing about time. */
+const FULL_DIFF_QUICK_BYTES = 64 * 1024 * 1024;
 
 interface ResolvedRange {
   range: TimeRange;
@@ -836,7 +846,9 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
               <div className="changes-empty-detail">
                 <div className="changes-empty-detail-title">Loading changes…</div>
                 <div className="changes-empty-detail-hint">
-                  Reading the persisted index for this diff.
+                  {fullDiffCombinedBytes !== null && fullDiffCombinedBytes > FULL_DIFF_QUICK_BYTES
+                    ? `Comparing ${formatBytes(fullDiffCombinedBytes)} of file indexes. On a drive this size that can take half a minute or more.`
+                    : "Reading the persisted index for this diff."}
                 </div>
               </div>
             )}
