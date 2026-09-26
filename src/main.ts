@@ -129,8 +129,10 @@ import {
   runFolderTreeWorker,
 } from "./shared/folderTreeWorkerRuntime";
 import {
+  estimateTreeHeapBytes,
   MAX_HEAP_FRACTION_DURING_LOAD,
   planFolderTreeLoad,
+  treeHeapBudgetBytes,
   type FolderTreeLoadPlan,
 } from "./shared/folderTreeLoadPlan";
 import { loadFolderTreeSidecar } from "./shared/folderTreeSidecarLoad";
@@ -2539,17 +2541,22 @@ void (async () => {
    * In-memory cache of built folder trees, keyed by scan ID.
    *
    * Eviction policy: bounded both by scan count (at most N trees) AND
-   * by total parent-path entries across ALL trees. The entry cap is
-   * what actually protects the heap — a C:\ drive can produce a tree
-   * with 1M+ parent paths, and keeping two or three of those in
-   * memory runs the main process to a gigabyte+.
+   * by the heap all trees hold together, estimated as folderTreeLoadPlan
+   * does. The heap cap is what actually protects the process — a C:\
+   * drive can produce a tree with 1M+ parent paths — and it is the same
+   * budget one tree may use, so two or three drives stay loaded as long
+   * as together they fit in what one big drive may take. (A fixed
+   * 600k-entry cap used to evict down to one tree, so switching between
+   * two large drives re-read a ~50 MB sidecar on every switch.)
    *
    * LRU within the Map's insertion-order semantics (delete + set moves
    * the entry to the tail on access).
    */
   const FOLDER_TREE_MAX_SCANS = 3;
-  const FOLDER_TREE_MAX_TOTAL_ENTRIES = 600_000;
   const folderTreeCache: Map<string, FolderTree> = new Map();
+  /** Estimated heap per cached tree, and their sum. */
+  const folderTreeHeapBytes: Map<string, number> = new Map();
+  let folderTreeTotalHeapBytes = 0;
   const folderTreeInflight: Map<string, Promise<FolderTree>> = new Map();
   // Track which root each cached/inflight tree belongs to so we can
   // evict the PRIOR tree for root R the moment R gets a new scan.
@@ -2559,24 +2566,37 @@ void (async () => {
   const folderTreeRootByScanId: Map<string, string> = new Map();
   let folderTreeTotalEntries = 0;
 
+  /** Drops a cached tree and its share of the entry and heap totals. */
+  const dropCachedFolderTree = (id: string) => {
+    const tree = folderTreeCache.get(id);
+    if (!tree) return;
+    folderTreeCache.delete(id);
+    folderTreeTotalEntries = Math.max(0, folderTreeTotalEntries - tree.size);
+    folderTreeTotalHeapBytes = Math.max(0, folderTreeTotalHeapBytes - (folderTreeHeapBytes.get(id) ?? 0));
+    folderTreeHeapBytes.delete(id);
+  };
+
   const evictOldestFolderTree = (): boolean => {
     const oldest = folderTreeCache.keys().next().value;
     if (oldest === undefined) return false;
-    const tree = folderTreeCache.get(oldest);
-    folderTreeCache.delete(oldest);
-    folderTreeTotalEntries -= tree?.size ?? 0;
-    if (folderTreeTotalEntries < 0) folderTreeTotalEntries = 0;
+    dropCachedFolderTree(oldest);
     return true;
   };
 
   const insertFolderTree = (id: string, tree: FolderTree) => {
-    // Honour BOTH caps — scan count first, then total-entry pressure.
+    const heapBytes = estimateTreeHeapBytes(tree);
+    dropCachedFolderTree(id);
     folderTreeCache.set(id, tree);
+    folderTreeHeapBytes.set(id, heapBytes);
     folderTreeTotalEntries += tree.size;
+    folderTreeTotalHeapBytes += heapBytes;
+    // Honour BOTH caps — scan count first, then heap pressure. The
+    // tree just inserted always stays: the plan already let it in.
     while (folderTreeCache.size > FOLDER_TREE_MAX_SCANS) {
       if (!evictOldestFolderTree()) break;
     }
-    while (folderTreeTotalEntries > FOLDER_TREE_MAX_TOTAL_ENTRIES && folderTreeCache.size > 1) {
+    const heapBudget = treeHeapBudgetBytes(getHeapStatistics().heap_size_limit, folderTreeMaxHeapOverride);
+    while (folderTreeTotalHeapBytes > heapBudget && folderTreeCache.size > 1) {
       if (!evictOldestFolderTree()) break;
     }
   };
@@ -2731,6 +2751,19 @@ void (async () => {
   }
   /** Scans whose in-memory load hit the heap ceiling. Paged from then on. */
   const folderTreePagedScanIds = new Set<string>();
+  /**
+   * Scans whose tree build failed (a worker OOM, an unreadable index),
+   * and why. Folders shows the reason instead of starting another
+   * whole-index build on every click, and tries again after a while.
+   */
+  const folderTreeFailedAt = new Map<string, { at: number; message: string }>();
+  const FOLDER_TREE_RETRY_AFTER_MS = 10 * 60_000;
+  const recentFolderTreeFailure = (id: string) => {
+    const failed = folderTreeFailedAt.get(id);
+    return failed && Date.now() - failed.at < FOLDER_TREE_RETRY_AFTER_MS ? failed : null;
+  };
+  const folderTreeFailureMessage = (failed: { message: string }) =>
+    `DiskHound couldn't load this scan's folders (${failed.message}). It will try again in a few minutes, or rescan this drive to rebuild them.`;
   const ensureFolderTree = async (
     id: string,
     rootPath?: string,
@@ -2797,7 +2830,12 @@ void (async () => {
       // scanId hits the fast disk path. Errors logged, don't block.
       void writeFolderTreeSidecar(id, tree);
       return tree;
-    })().finally(() => {
+    })().catch((err: unknown) => {
+      if (!(err instanceof FolderTreeTooLargeError)) {
+        folderTreeFailedAt.set(id, { at: Date.now(), message: err instanceof Error ? err.message : String(err) });
+      }
+      throw err;
+    }).finally(() => {
       folderTreeInflight.delete(id);
     });
     folderTreeInflight.set(id, pending);
@@ -2805,12 +2843,8 @@ void (async () => {
   };
 
   const invalidateFolderTree = (id: string) => {
-    const tree = folderTreeCache.get(id);
-    if (tree) {
-      folderTreeCache.delete(id);
-      folderTreeTotalEntries -= tree.size;
-      if (folderTreeTotalEntries < 0) folderTreeTotalEntries = 0;
-    }
+    dropCachedFolderTree(id);
+    folderTreeFailedAt.delete(id);
     folderTreeInflight.delete(id);
     folderTreeRootByScanId.delete(id);
     folderTreePages.invalidateScan(id);
@@ -2957,6 +2991,8 @@ void (async () => {
 
   const lookupFolderNode = async (id: string, rootPath: string, key: string): Promise<FolderNodeLookup> => {
     folderTreeRootByScanId.set(id, normPath(rootPath));
+    const failed = recentFolderTreeFailure(id);
+    if (failed) return { unavailableMessage: folderTreeFailureMessage(failed) };
     try {
       if (folderTreeCache.has(id) || folderTreeInflight.has(id)) {
         const tree = await ensureFolderTree(id, rootPath);
@@ -2997,7 +3033,7 @@ void (async () => {
       caches: [folderTreeCache.size, folderTreeTotalEntries, pages.pages, treemapStats.entries, fullDiffEntries].join("/"),
       text: [
         describeMemoryUsage(mem),
-        `folderTree: ${folderTreeCache.size} trees, ${folderTreeTotalEntries.toLocaleString()} entries`,
+        `folderTree: ${folderTreeCache.size} trees, ${folderTreeTotalEntries.toLocaleString()} entries, ~${Math.round(folderTreeTotalHeapBytes / 1024 / 1024)} MB`,
         `folderTreePages: ${pages.pages} pages, ${pages.nodes.toLocaleString()} nodes, ~${Math.round(pages.heapBytes / 1024 / 1024)} MB`,
         `treemapCache: ${treemapStats.entries} entries, ${treemapStats.inflight} inflight`,
         `fullDiffMem: ${fullDiffEntries} entries`,
@@ -3148,7 +3184,8 @@ void (async () => {
           "folder-tree",
           err instanceof Error ? (err.stack ?? err.message) : String(err),
         );
-        return empty;
+        const failed = recentFolderTreeFailure(currentId);
+        return failed ? { ...empty, unavailableMessage: folderTreeFailureMessage(failed) } : empty;
       }
     },
   );
