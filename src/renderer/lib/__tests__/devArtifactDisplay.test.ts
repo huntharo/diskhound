@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { DevArtifact } from "../../../shared/contracts";
 import {
+  artifactDeltaLabel,
   artifactHeadline,
   artifactTail,
   identifyingParent,
@@ -25,6 +26,16 @@ function artifact(partial: Partial<DevArtifact> & Pick<DevArtifact, "path">): De
 }
 
 describe("artifact display", () => {
+  it.each([
+    [-312 * 1024 ** 2, "−312 MB since last scan"],
+    [312 * 1024 ** 2, "+312 MB since last scan"],
+    [-1536, "−1.5 KB since last scan"],
+    [-1, "−1 B since last scan"],
+    [0, "0 B since last scan"],
+  ])("formats a size delta of %i bytes", (deltaBytes, expected) => {
+    expect(artifactDeltaLabel(deltaBytes)).toBe(expected);
+  });
+
   it("uses the project name and relative tree tail", () => {
     const row = artifact({
       path: "C:\\Users\\thoma\\local-experimentation\\crosslink_monolith\\zebra-crosslink\\target\\release",
