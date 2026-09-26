@@ -16,10 +16,27 @@ import {
   startDiskMonitoring,
 } from "../diskMonitor";
 
+/** Start and end of each async writeFile and rename, to show that saves take turns. */
+const fsLog = vi.hoisted(() => [] as string[]);
+
 vi.mock("node:fs", async (importOriginal) =>
   (await import("../../test/ioBudget")).instrumentFs(await importOriginal()));
-vi.mock("node:fs/promises", async (importOriginal) =>
-  (await import("../../test/ioBudget")).instrumentFsPromises(await importOriginal()));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const fsp = (await import("../../test/ioBudget")).instrumentFsPromises(
+    await importOriginal<typeof import("node:fs/promises")>());
+  const logged = <T extends (...args: never[]) => Promise<unknown>>(name: string, fn: T) =>
+    (async (...args: Parameters<T>) => {
+      const file = String(args[0]).split(/[\\/]/).pop();
+      fsLog.push(`${name} ${file}`);
+      try {
+        return await fn(...args);
+      } finally {
+        fsLog.push(`${name} ${file} done`);
+      }
+    }) as T;
+  const out = { ...fsp, writeFile: logged("writeFile", fsp.writeFile), rename: logged("rename", fsp.rename) };
+  return { ...out, default: out };
+});
 
 const TB = 1_000_000_000_000;
 const HOUR = 3_600_000;
@@ -132,7 +149,7 @@ describe("disk monitor", () => {
 
     expectIoBudget({
       scenario: "disk-monitor-check-with-delta",
-      note: "one check that records a 5 GB drop: 1 rewrite of disk-baselines.json (~113 KB with its 500-entry history)",
+      note: "one check that records a 5 GB drop: 1 atomic rewrite of disk-baselines.json (~113 KB with its 500-entry history; temp file + rename); only checks that see > 1 MB move write, so at most 24/day (~2.7 MB) at the 60-minute default and 1,440/day (~166 MB) at the 1-minute minimum",
       io,
     });
   });
@@ -170,7 +187,7 @@ describe("disk monitor", () => {
 
     expectIoBudget({
       scenario: "disk-monitor-quit-after-idle",
-      note: "before-quit flush after idle checks moved the baseline: 1 rewrite (~113 KB) per session",
+      note: "before-quit flush after idle checks moved the baseline: 1 sync atomic rewrite (~113 KB; temp file + rename) per session",
       io,
     });
     const saved = JSON.parse(FS.readFileSync(Path.join(dataDir, "disk-baselines.json"), "utf8"));
@@ -192,6 +209,47 @@ describe("disk monitor", () => {
     });
   });
 
+  it("runs overlapping saves one at a time and writes only the newest of those waiting", async () => {
+    await startApp(60);
+    const filePath = Path.join(dataDir, "disk-baselines.json");
+    let lastScanAt = 0;
+
+    const { io } = await measureFsIo(async () => {
+      fsLog.length = 0;
+      // A scan finishes and its save starts.
+      markFullScan();
+      // A monitoring check finds a 5 GB drop while that save runs.
+      vi.setSystemTime(Date.now() + 1_000);
+      free["/"] -= 5_000_000_000;
+      await checkDiskDeltas(readDrives);
+      // A second scan finishes before either has landed.
+      vi.setSystemTime(Date.now() + 1_000);
+      markFullScan();
+      lastScanAt = Date.now();
+    });
+
+    expectIoBudget({
+      scenario: "disk-monitor-overlap",
+      note: "markFullScan, a check with a delta and markFullScan again, each requested before the last landed: 2 atomic rewrites (~113 KB each), not 3 overlapping in-place ones; the check's save is replaced in the queue by the newer state",
+      io,
+    });
+    // The second save starts only after the first has renamed.
+    expect(fsLog).toEqual([
+      "writeFile disk-baselines.json.tmp",
+      "writeFile disk-baselines.json.tmp done",
+      "rename disk-baselines.json.tmp",
+      "rename disk-baselines.json.tmp done",
+      "writeFile disk-baselines.json.tmp",
+      "writeFile disk-baselines.json.tmp done",
+      "rename disk-baselines.json.tmp",
+      "rename disk-baselines.json.tmp done",
+    ]);
+    const saved = JSON.parse(FS.readFileSync(filePath, "utf8"));
+    expect(saved.lastFullScanAt).toBe(lastScanAt);
+    expect(saved.deltaHistory[0].deltaBytes).toBe(-5_000_000_000);
+    expect(FS.readdirSync(dataDir)).toEqual(["disk-baselines.json"]);
+  });
+
   it("writes the baselines once when a full scan finishes", async () => {
     await startApp(60);
 
@@ -199,7 +257,7 @@ describe("disk monitor", () => {
 
     expectIoBudget({
       scenario: "disk-monitor-full-scan",
-      note: "markFullScan after each completed scan: 1 rewrite of disk-baselines.json (~113 KB); 4/day at the 6 h scheduled-rescan default",
+      note: "markFullScan after each completed scan: 1 atomic rewrite of disk-baselines.json (~113 KB; temp file + rename); 4/day (~0.45 MB) at the 6 h scheduled-rescan default",
       io,
     });
   });

@@ -4,6 +4,7 @@ import * as FS from "node:fs/promises";
 import * as Path from "node:path";
 import { promisify } from "node:util";
 
+import { hasPendingAtomicWrite, writeFileAtomic, writeFileAtomicSync } from "./atomicWrite";
 import type { DiskDelta, DiskSpaceInfo, MonitoringSettings, MonitoringSnapshot } from "./contracts";
 
 const execFileAsync = promisify(execFile);
@@ -84,12 +85,18 @@ function serializeState(): string {
   return JSON.stringify(state, null, 2);
 }
 
+/**
+ * checkDiskDeltas and markFullScan both call this without awaiting, so
+ * a scan finishing during a check used to run two in-place writes of
+ * the same file at once. The atomic write runs them one after the
+ * other, and writes only the newest of any that queue up behind a
+ * running one.
+ */
 async function persistState(): Promise<void> {
   if (!persistDir) return;
   baselineDirty = false;
   try {
-    await FS.mkdir(persistDir, { recursive: true });
-    await FS.writeFile(Path.join(persistDir, BASELINE_FILE), serializeState(), "utf8");
+    await writeFileAtomic(Path.join(persistDir, BASELINE_FILE), serializeState());
   } catch {
     // Non-fatal — the quit flush tries again.
     baselineDirty = true;
@@ -219,18 +226,21 @@ export function markFullScan(options?: { deferWrite?: boolean }): void {
 }
 
 /**
- * Writes the baseline if a check moved it since the last write. Call
- * at quit, so the next launch measures its first delta from the last
- * check rather than from the last change. Synchronous because
- * before-quit cannot wait, and an async write cut off at exit would
- * leave the file, history and all, truncated.
+ * Writes the baseline if a check moved it since the last write, or if
+ * a write is still in flight. Call at quit, so the next launch
+ * measures its first delta from the last check rather than from the
+ * last change. Synchronous because before-quit cannot wait for an
+ * async write, which exit may cut off; the sync write supersedes one
+ * still queued.
  */
 export function flushDiskMonitor(): void {
-  if (!baselineDirty || !persistDir) return;
+  if (!persistDir) return;
+  const filePath = Path.join(persistDir, BASELINE_FILE);
+  if (!baselineDirty && !hasPendingAtomicWrite(filePath)) return;
   baselineDirty = false;
   try {
     FS_SYNC.mkdirSync(persistDir, { recursive: true });
-    FS_SYNC.writeFileSync(Path.join(persistDir, BASELINE_FILE), serializeState(), "utf8");
+    writeFileAtomicSync(filePath, serializeState());
   } catch {
     // Non-fatal — the next launch measures from the last write.
     baselineDirty = true;

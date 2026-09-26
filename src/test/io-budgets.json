@@ -152,10 +152,10 @@
     "observedBytesWritten": 3910
   },
   "disk-monitor-check-with-delta": {
-    "note": "one check that records a 5 GB drop: 1 rewrite of disk-baselines.json (~113 KB with its 500-entry history)",
+    "note": "one check that records a 5 GB drop: 1 atomic rewrite of disk-baselines.json (~113 KB with its 500-entry history; temp file + rename); only checks that see > 1 MB move write, so at most 24/day (~2.7 MB) at the 60-minute default and 1,440/day (~166 MB) at the 1-minute minimum",
     "writeFile": 1,
     "appendFile": 0,
-    "rename": 0,
+    "rename": 1,
     "copyFile": 0,
     "mkdir": 1,
     "createWriteStream": 0,
@@ -171,10 +171,10 @@
     "observedBytesWritten": 115691
   },
   "disk-monitor-full-scan": {
-    "note": "markFullScan after each completed scan: 1 rewrite of disk-baselines.json (~113 KB); 4/day at the 6 h scheduled-rescan default",
+    "note": "markFullScan after each completed scan: 1 atomic rewrite of disk-baselines.json (~113 KB; temp file + rename); 4/day (~0.45 MB) at the 6 h scheduled-rescan default",
     "writeFile": 1,
     "appendFile": 0,
-    "rename": 0,
+    "rename": 1,
     "copyFile": 0,
     "mkdir": 1,
     "createWriteStream": 0,
@@ -246,11 +246,30 @@
     "open": 0,
     "observedBytesWritten": 0
   },
+  "disk-monitor-overlap": {
+    "note": "markFullScan, a check with a delta and markFullScan again, each requested before the last landed: 2 atomic rewrites (~113 KB each), not 3 overlapping in-place ones; the check's save is replaced in the queue by the newer state",
+    "writeFile": 2,
+    "appendFile": 0,
+    "rename": 2,
+    "copyFile": 0,
+    "mkdir": 2,
+    "createWriteStream": 0,
+    "unlink": 0,
+    "readFile": 0,
+    "readdir": 0,
+    "stat": 0,
+    "lstat": 0,
+    "access": 0,
+    "existsSync": 0,
+    "createReadStream": 0,
+    "open": 0,
+    "observedBytesWritten": 231198
+  },
   "disk-monitor-quit-after-idle": {
-    "note": "before-quit flush after idle checks moved the baseline: 1 rewrite (~113 KB) per session",
+    "note": "before-quit flush after idle checks moved the baseline: 1 sync atomic rewrite (~113 KB; temp file + rename) per session",
     "writeFile": 1,
     "appendFile": 0,
-    "rename": 0,
+    "rename": 1,
     "copyFile": 0,
     "mkdir": 1,
     "createWriteStream": 0,
@@ -342,10 +361,10 @@
     "observedBytesWritten": 0
   },
   "easy-move-file": {
-    "note": "one same-volume Easy Move of a file: the user's own rename plus 1 sync, pretty-printed rewrite of easy-moves.json",
+    "note": "one same-volume Easy Move of a file: the user's own rename plus 1 sync, pretty-printed, atomic rewrite of easy-moves.json (temp file + a second rename); per move or undo",
     "writeFile": 1,
     "appendFile": 0,
-    "rename": 1,
+    "rename": 2,
     "copyFile": 0,
     "mkdir": 1,
     "createWriteStream": 0,
@@ -477,10 +496,10 @@
     "observedBytesWritten": 0
   },
   "scan-completed-json-files": {
-    "note": "one completed scan's JSON: the history snapshot and last-scan.json hold the same ~2.8 MB, 5.6 MB per scan and ~22 MB/day at the 6 h default, half of it the duplicate; the NDJSON index and sidecar renames are not in this scenario",
+    "note": "one completed scan's JSON: the history snapshot and last-scan.json hold the same ~2.8 MB, 5.6 MB per scan and ~22 MB/day at the 6 h default, half of it the duplicate; the history index and last-scan.json are atomic (2 renames); the NDJSON index and sidecar renames are not in this scenario",
     "writeFile": 3,
     "appendFile": 0,
-    "rename": 0,
+    "rename": 2,
     "copyFile": 0,
     "mkdir": 1,
     "createWriteStream": 0,
@@ -496,10 +515,10 @@
     "observedBytesWritten": 5592285
   },
   "scan-history-save": {
-    "note": "one completed scan: scan-<id>.json (~2.8 MB) plus a sync, pretty-printed scan-history-index.json; ~11 MB/day at the 6 h scheduled-rescan default",
+    "note": "one completed scan: scan-<id>.json (~2.8 MB) plus a sync, pretty-printed, atomic scan-history-index.json (temp file + rename); ~11 MB/day at the 6 h scheduled-rescan default",
     "writeFile": 2,
     "appendFile": 0,
-    "rename": 0,
+    "rename": 1,
     "copyFile": 0,
     "mkdir": 0,
     "createWriteStream": 0,
@@ -515,10 +534,10 @@
     "observedBytesWritten": 2796297
   },
   "scan-history-save-with-prune": {
-    "note": "the 8th scan of a root with the default 7-scan cap: the two writes of a save plus one unlink of the pruned snapshot",
+    "note": "the 8th scan of a root with the default 7-scan cap: the two writes and the index rename of a save, plus one unlink of the pruned snapshot",
     "writeFile": 2,
     "appendFile": 0,
-    "rename": 0,
+    "rename": 1,
     "copyFile": 0,
     "mkdir": 0,
     "createWriteStream": 0,
@@ -553,10 +572,10 @@
     "observedBytesWritten": 2795988
   },
   "scan-store-progress-then-done": {
-    "note": "450 progress snapshots (90 s at the 200 ms tick) then done, at the 5,000-file/10,000-dir caps: 1 write of last-scan.json (~2.8 MB) per completed scan; 4 scheduled scans/day at the 6 h default is ~11 MB/day",
+    "note": "450 progress snapshots (90 s at the 200 ms tick) then done, at the 5,000-file/10,000-dir caps: 1 atomic write of last-scan.json (~2.8 MB; temp file + rename) per completed scan; 4 scheduled scans/day at the 6 h default is ~11 MB/day",
     "writeFile": 1,
     "appendFile": 0,
-    "rename": 0,
+    "rename": 1,
     "copyFile": 0,
     "mkdir": 1,
     "createWriteStream": 0,
@@ -687,10 +706,10 @@
     "observedBytesWritten": 5587837
   },
   "settings-set-changed": {
-    "note": "one settings change: 1 pretty-printed rewrite of settings.json (~1 KB), per user action",
+    "note": "one settings change: 1 pretty-printed rewrite of settings.json (~1 KB), written to a flushed temp file and renamed over it so a crash cannot truncate it; per user action, a handful a day",
     "writeFile": 1,
     "appendFile": 0,
-    "rename": 0,
+    "rename": 1,
     "copyFile": 0,
     "mkdir": 1,
     "createWriteStream": 0,
@@ -862,10 +881,10 @@
     "observedBytesWritten": 2848603
   },
   "window-state-drag": {
-    "note": "100 move/resize events 16 ms apart, then the 400 ms debounce: 1 write of window-state.json",
+    "note": "100 move/resize events 16 ms apart, then the 400 ms debounce: 1 atomic write of window-state.json (temp file + rename); per drag, maximize or fullscreen change",
     "writeFile": 1,
     "appendFile": 0,
-    "rename": 0,
+    "rename": 1,
     "copyFile": 0,
     "mkdir": 1,
     "createWriteStream": 0,
@@ -881,10 +900,10 @@
     "observedBytesWritten": 135
   },
   "window-state-drag-then-quit": {
-    "note": "a drag, its debounced save, then the before-quit flush: 1 write in total; was 2",
+    "note": "a drag, its debounced save, then the before-quit flush, which waits for that save: 1 atomic write (temp file + rename) in total; was 2",
     "writeFile": 1,
     "appendFile": 0,
-    "rename": 0,
+    "rename": 1,
     "copyFile": 0,
     "mkdir": 1,
     "createWriteStream": 0,

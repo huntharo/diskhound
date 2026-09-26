@@ -37,7 +37,7 @@ describe.skipIf(process.platform === "win32")("Easy Move store", () => {
     expect(result.ok).toBe(true);
     expectIoBudget({
       scenario: "easy-move-file",
-      note: "one same-volume Easy Move of a file: the user's own rename plus 1 sync, pretty-printed rewrite of easy-moves.json",
+      note: "one same-volume Easy Move of a file: the user's own rename plus 1 sync, pretty-printed, atomic rewrite of easy-moves.json (temp file + a second rename); per move or undo",
       io,
     });
     expect(JSON.parse(FS.readFileSync(Path.join(tempDir, "easy-moves.json"), "utf8"))).toHaveLength(1);

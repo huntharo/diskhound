@@ -3,6 +3,7 @@ import * as FSP from "node:fs/promises";
 import * as Path from "node:path";
 import { randomUUID } from "node:crypto";
 
+import { writeFileAtomicSync } from "./atomicWrite";
 import type { ScanHistoryEntry, ScanSnapshot } from "./contracts";
 import { normPath } from "./pathUtils";
 
@@ -47,10 +48,11 @@ export function initScanHistory(dataDir: string): void {
   }
 }
 
+/** Atomic: a truncated index loads as empty and orphans every snapshot. */
 function persistIndex(): void {
   if (!historyDir) return;
   try {
-    FS.writeFileSync(
+    writeFileAtomicSync(
       Path.join(historyDir, INDEX_FILENAME),
       JSON.stringify(index, null, 2),
     );

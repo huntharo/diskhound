@@ -2,6 +2,7 @@ import * as FS from "node:fs";
 import * as FSP from "node:fs/promises";
 import * as Path from "node:path";
 
+import { writeFileAtomic } from "./atomicWrite";
 import { createIdleScanSnapshot, type ScanSnapshot } from "./contracts";
 
 const STORE_FILENAME = "last-scan.json";
@@ -75,8 +76,9 @@ export async function createScanSnapshotStore(dataDir: string): Promise<ScanSnap
     if (snapshot.status !== "done") return;
     deferred = null;
     try {
-      await FSP.mkdir(dataDir, { recursive: true });
-      await FSP.writeFile(filePath, JSON.stringify(floorDirectoriesVisited(snapshot)), "utf-8");
+      // Atomic, and one save at a time: the file runs to megabytes, and
+      // two scans that finish together both save it.
+      await writeFileAtomic(filePath, JSON.stringify(floorDirectoriesVisited(snapshot)));
     } catch {
       // Best effort — don't block the scan pipeline
     }

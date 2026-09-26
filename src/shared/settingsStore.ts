@@ -3,6 +3,7 @@ import * as Path from "node:path";
 
 import { app } from "electron";
 
+import { writeFileAtomic } from "./atomicWrite";
 import { normalizeAppSettings, defaultSettings, type AppSettings } from "./contracts";
 
 const SETTINGS_FILE_NAME = "settings.json";
@@ -29,8 +30,7 @@ export interface SettingsStore {
 }
 
 export async function createSettingsStore(): Promise<SettingsStore> {
-  const settingsDir = app.getPath("userData");
-  const settingsPath = Path.join(settingsDir, SETTINGS_FILE_NAME);
+  const settingsPath = Path.join(app.getPath("userData"), SETTINGS_FILE_NAME);
 
   let current = defaultSettings();
   /**
@@ -55,8 +55,9 @@ export async function createSettingsStore(): Promise<SettingsStore> {
     // Claimed before the write so a concurrent identical save skips.
     persistedText = text;
     try {
-      await FS.mkdir(settingsDir, { recursive: true });
-      await FS.writeFile(settingsPath, text, "utf8");
+      // Atomic: a crash mid-write used to leave a truncated file, and
+      // the next launch fell back to defaults.
+      await writeFileAtomic(settingsPath, text);
     } catch (error) {
       persistedText = null;
       throw error;
