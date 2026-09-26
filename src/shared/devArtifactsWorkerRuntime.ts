@@ -15,6 +15,20 @@ export function resolveBundledDevArtifactsWorkerPath(baseDir: string): string {
   return resolveBundledWorkerScript(baseDir, "devArtifactsWorker.cjs");
 }
 
+/**
+ * Electron builds V8 with pointer compression, so the main isolate and
+ * every worker_thread share one 4 GB heap cage. A bigger resourceLimit is
+ * silently capped at 4 GB, and a worker that fills the cage aborts the
+ * whole app ("young object promotion failed", exit 134), not just itself.
+ * A worker that reaches its own, lower limit fails with
+ * ERR_WORKER_OUT_OF_MEMORY instead, which main survives. Neither job
+ * needs much: classify streams the folder tree and holds only artifact
+ * roots and projects; rescan holds DEV_SIDECAR_ROOT_CAP roots and one
+ * walk's folder stack.
+ */
+const DEV_ARTIFACTS_WORKER_HEAP_MB = 1024;
+const DEV_ARTIFACTS_WORKER_YOUNG_HEAP_MB = 64;
+
 export interface RunDevArtifactsWorkerOptions {
   workerPath: string;
   signal?: AbortSignal;
@@ -27,8 +41,8 @@ function runDevArtifactsRequest(
 ): Promise<DevArtifactReport> {
   const worker = new Worker(options.workerPath, {
     resourceLimits: {
-      maxOldGenerationSizeMb: 4096,
-      maxYoungGenerationSizeMb: 256,
+      maxOldGenerationSizeMb: DEV_ARTIFACTS_WORKER_HEAP_MB,
+      maxYoungGenerationSizeMb: DEV_ARTIFACTS_WORKER_YOUNG_HEAP_MB,
     },
   });
 
@@ -75,7 +89,10 @@ function runDevArtifactsRequest(
     // throw and terminate() exit with 1 too.
     const onError = (error: Error) => {
       if ((error as NodeJS.ErrnoException)?.code === "ERR_WORKER_OUT_OF_MEMORY") {
-        settle(() => reject(new Error("Dev artifacts worker out of memory.", { cause: error })));
+        settle(() => reject(new Error(
+          `Dev artifacts worker out of memory (its heap is capped at ${DEV_ARTIFACTS_WORKER_HEAP_MB} MB).`,
+          { cause: error },
+        )));
         return;
       }
       settle(() => reject(error));
