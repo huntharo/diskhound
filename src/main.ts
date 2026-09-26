@@ -184,6 +184,8 @@ import { analyzeCleanupFromIndex } from "./shared/suggestions";
 import { createNativeScannerSession, type NativeScannerSession } from "./nativeScanner";
 import * as elevationModule from "./elevation";
 import { createAgentHost, type AgentHost } from "./mcp/electronHost";
+import { DiagnosticsManager } from "./diagnostics/diagnosticsManager";
+import { trackWorker } from "./shared/workerHeapRegistry";
 
 const SCAN_SNAPSHOT_CHANNEL = "diskhound:scan-snapshot";
 const DISK_DELTA_CHANNEL = "diskhound:disk-delta";
@@ -260,6 +262,8 @@ const scanKey = (rootPath: string): string => normPath(rootPath);
 const activeDuplicateScans: Map<string, DuplicateScanHandle> = new Map();
 let monitoringInterval: ReturnType<typeof setInterval> | null = null;
 let settingsStore: SettingsStore | null = null;
+/** Settings → Diagnostics: hot-CPU profiler, heap gate, retention. */
+let diagnostics: DiagnosticsManager | null = null;
 let windowStateStore: WindowStateStore | null = null;
 let widgetWindowStateStore: WindowStateStore | null = null;
 // Track whether the user explicitly quit (vs. close-to-tray)
@@ -906,6 +910,7 @@ void (async () => {
     // intentional: a settings change shouldn't surprise-delete data.
     setMaxHistoryPerRoot(settings.storage.maxHistoryPerRoot);
     setDuplicateVerbose(settings.storage.verboseDuplicateLog);
+    diagnostics?.applySettings(settings.diagnostics);
     for (const win of BrowserWindow.getAllWindows()) {
       if (win.isDestroyed()) continue;
       try {
@@ -918,6 +923,23 @@ void (async () => {
   // Apply the current settings once at startup before any scan runs.
   setMaxHistoryPerRoot(settingsStore.get().storage.maxHistoryPerRoot);
   setDuplicateVerbose(settingsStore.get().storage.verboseDuplicateLog);
+
+  // Off by default. The heap monitor still samples in memory so a heap
+  // nearing the cage limit leaves one crash.log line before V8 aborts.
+  diagnostics = new DiagnosticsManager({
+    userDataPath: app.getPath("userData"),
+    settings: settingsStore.get().diagnostics,
+    versions: {
+      appVersion: app.getVersion(),
+      electronVersion: process.versions.electron,
+      chromeVersion: process.versions.chrome,
+      nodeVersion: process.versions.node,
+      platform: process.platform,
+      arch: process.arch,
+    },
+    log: writeCrashLog,
+  });
+  diagnostics.start();
 
   // Startup-state diagnostic. User reported drive picker showing
   // up unexpectedly (didn't run "Clear all" themselves). Log the
@@ -1309,7 +1331,7 @@ void (async () => {
     scanOptions: ScanOptions,
     trigger: "manual" | "scheduled",
   ): { session: WorkerScanSession; startingSnapshot: ScanSnapshot } => {
-    const worker = new Worker(scanWorkerEntry);
+    const worker = trackWorker(new Worker(scanWorkerEntry), "scan");
     const startingSnapshot = buildRunningSnapshot(rootPath, scanOptions, "js-worker");
     const pendingId = `pending-${randomUUID()}`;
     const tempIndexPath = indexFilePath(pendingId);
@@ -2240,6 +2262,21 @@ void (async () => {
     shell.showItemInFolder(crashLogPath());
   });
 
+  // ── IPC: Diagnostics ──────────────────────────────────────
+
+  ipcMain.handle("diskhound:get-diagnostics-status", () => diagnostics!.status());
+  ipcMain.handle("diskhound:reveal-diagnostics", async (_event, sessionName?: unknown): Promise<PathActionResult> => {
+    // Only the diagnostics root or a session directory name, never a
+    // path from the renderer.
+    const target = diagnostics!.resolveRevealPath(sessionName);
+    if (!target) return { ok: false, message: "Not a diagnostics session." };
+    if (target === diagnostics!.rootPath) await FS.mkdir(target, { recursive: true });
+    const error = await shell.openPath(target);
+    return error ? { ok: false, message: error } : { ok: true, message: target };
+  });
+  ipcMain.handle("diskhound:capture-heap-snapshot", () => diagnostics!.captureHeapSnapshot());
+  ipcMain.handle("diskhound:clear-diagnostics", () => diagnostics!.clear());
+
   // Renderer errors get forwarded here via window.onerror / onunhandled-
   // rejection and from failed polls, so rendering bugs also land in the
   // same file. crashLog counts identical repeats instead of writing
@@ -3147,6 +3184,7 @@ void (async () => {
         `folderTreePages: ${pages.pages} pages, ${pages.nodes.toLocaleString()} nodes, ~${Math.round(pages.heapBytes / 1024 / 1024)} MB`,
         `treemapCache: ${treemapStats.entries} entries, ${treemapStats.inflight} inflight`,
         `fullDiffMem: ${fullDiffEntries} entries`,
+        diagnostics?.describeMemory() ?? "cage: n/a",
       ].join(" | "),
     };
   };
@@ -5007,6 +5045,8 @@ void (async () => {
     scanStore.flush();
     flushUsnCursorStore();
     void agentHost?.dispose();
+    // Discards an untriggered CPU recording; finishes one in progress.
+    void diagnostics?.stop("app-quit");
   });
 })().catch((err: unknown) => {
   const error = err as { stack?: string; message?: string };
