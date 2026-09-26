@@ -20,6 +20,12 @@ export const SESSION_BOOKKEEPING_FILES: ReadonlySet<string> = new Set([
 /** Events held between captures. Older ones are dropped and counted. */
 const MAX_PENDING_EVENTS = 200;
 
+/**
+ * main.ts's writeCrashLog. crash.log is buffered; `sync` appends before
+ * returning, for a line that has to survive the process dying next.
+ */
+export type DiagnosticsLog = (tag: string, message: string, options?: { sync?: boolean }) => void;
+
 export interface DiagnosticsVersions {
   appVersion: string;
   electronVersion: string;

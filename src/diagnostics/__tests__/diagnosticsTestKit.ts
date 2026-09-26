@@ -1,4 +1,3 @@
-import * as FS_SYNC from "node:fs";
 import * as FS from "node:fs/promises";
 import type { Profiler } from "node:inspector";
 import * as OS from "node:os";
@@ -6,8 +5,9 @@ import * as Path from "node:path";
 
 import { vi } from "vitest";
 
+import { CRASH_LOG_FILENAME, createCrashLog } from "../../shared/crashLog";
 import { HEAP_DEFAULTS, HOT_CPU_DEFAULTS, type HeapGateConfig, type HotCpuConfig } from "../diagnosticsConfig";
-import { DiagnosticsSession, type DiagnosticsVersions } from "../diagnosticsSession";
+import { DiagnosticsSession, type DiagnosticsLog, type DiagnosticsVersions } from "../diagnosticsSession";
 import type { HeapReading } from "../heapMonitor";
 import type { InspectorTarget } from "../mainInspector";
 
@@ -29,18 +29,13 @@ export async function tempDir(prefix = "diskhound-diagnostics-"): Promise<{ path
 }
 
 /**
- * main.ts's writeCrashLog, call for call: a sync mkdir and append, then
- * an async stat for the size-based rotation. Budget tests log through
- * this so each capture's crash.log line is counted.
+ * main.ts's writeCrashLog: the real buffered crash.log in `dir`. Budget
+ * tests call `flush()` where the 2 s flush timer would have run.
  */
-export function crashLogLike(dir: string): (tag: string, message: string) => void {
-  const logPath = Path.join(dir, "crash.log");
-  return (tag, message) => {
-    const line = `[${new Date().toISOString()}] [${tag}] ${message}\n`;
-    try { FS_SYNC.mkdirSync(dir, { recursive: true }); } catch { /* ok */ }
-    FS_SYNC.appendFileSync(logPath, line);
-    void FS.stat(logPath).catch(() => {});
-  };
+export function crashLogLike(dir: string): DiagnosticsLog & { flush: () => void } {
+  const crashLog = createCrashLog({ path: () => Path.join(dir, CRASH_LOG_FILENAME) });
+  const log: DiagnosticsLog = (tag, message, options) => crashLog.write(tag, message, options);
+  return Object.assign(log, { flush: () => crashLog.flush() });
 }
 
 export function hotCpuConfig(overrides: Partial<HotCpuConfig> = {}): HotCpuConfig {
