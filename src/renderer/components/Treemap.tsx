@@ -10,7 +10,7 @@ import {
   type DeletedPathAction,
 } from "../lib/deletedPaths";
 import { formatBytes, humanAge } from "../lib/format";
-import { captureFreeBytes, checkFreedSpace, freedSpaceCheckEnabled } from "../lib/freedSpaceCheck";
+import { checkFreedSpace, freeBytesBeforeDelete } from "../lib/freedSpaceCheck";
 import { useConfirmPermanentDelete, useExcludedFolderProtection } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
 import { toast } from "./Toasts";
@@ -410,7 +410,7 @@ function TreemapContextMenu({ x, y, file, onClose }: {
   const doAction = async (action: () => Promise<PathActionResult | unknown>, label: string, deletedAction?: DeletedPathAction) => {
     onClose();
     const expectedBytes = deletedAction === "delete" ? file.size : 0;
-    const freeBefore = freedSpaceCheckEnabled(expectedBytes) ? await captureFreeBytes(file.path) : null;
+    const freeBefore = await freeBytesBeforeDelete(file.path, expectedBytes);
     try {
       const result = await action();
       if (freeBefore !== null && result && typeof result === "object" && (result as PathActionResult).ok) {

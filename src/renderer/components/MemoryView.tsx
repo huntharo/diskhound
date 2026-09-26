@@ -4,6 +4,7 @@ import type { AffinityRule, ProcessInfo, SystemMemorySnapshot } from "../../shar
 import { findMatchingRule } from "../lib/affinityMatch";
 import { formatBytes, formatCount } from "../lib/format";
 import { saveLocalPreference } from "../lib/localPreference";
+import { reportPollFailure } from "../lib/pollFailure";
 import { processMetadataParts, processSearchText } from "../lib/processMetadata";
 import { squarify } from "../lib/treemap";
 import { nativeApi } from "../nativeApi";
@@ -101,7 +102,9 @@ export function MemoryView() {
   const [affinityRules, setAffinityRules] = useState<AffinityRule[]>([]);
   useEffect(() => {
     const refresh = () => {
-      void nativeApi.getAffinityRules().then((rules) => setAffinityRules(rules));
+      nativeApi.getAffinityRules()
+        .then((rules) => setAffinityRules(rules))
+        .catch((error: unknown) => reportPollFailure("MemoryView affinity rules", error));
     };
     refresh();
     const id = window.setInterval(refresh, 5000);
@@ -221,10 +224,15 @@ export function MemoryView() {
 
   const refresh = useCallback(async () => {
     setLoadingPhase((prev) => (prev === "initial" ? "initial" : "refreshing"));
-    const snap = await nativeApi.getMemorySnapshot();
-    setSnapshot(snap);
-    setLoadingPhase("idle");
-    setLastSampleMs(snap.sampleElapsedMs ?? null);
+    try {
+      const snap = await nativeApi.getMemorySnapshot();
+      setSnapshot(snap);
+      setLoadingPhase("idle");
+      setLastSampleMs(snap.sampleElapsedMs ?? null);
+    } catch (error) {
+      setLoadingPhase((prev) => (prev === "initial" ? "initial" : "idle"));
+      reportPollFailure("MemoryView memory", error);
+    }
   }, []);
 
   useEffect(() => {
@@ -2180,8 +2188,11 @@ function AffinityRulesView({ cpuCount }: { cpuCount: number }) {
   const [editingRule, setEditingRule] = useState<AffinityRule | null>(null);
 
   const reload = async () => {
-    const next = await nativeApi.getAffinityRules();
-    setRules(next);
+    try {
+      setRules(await nativeApi.getAffinityRules());
+    } catch (error) {
+      reportPollFailure("AffinityRulesView", error);
+    }
   };
 
   useEffect(() => {

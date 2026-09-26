@@ -15,6 +15,7 @@ export const DEV_KIND_LABEL: Record<DevArtifactKind, string> = {
   dotnet: "NuGet / .NET",
   "compiler-cache": "Compiler caches",
   "cmake-build": "CMake build trees",
+  terraform: "Terraform providers",
   "diag-logs": "RDP / diag traces",
 };
 
@@ -32,6 +33,7 @@ export const DEV_KIND_SHORT: Record<DevArtifactKind, string> = {
   dotnet: ".NET",
   "compiler-cache": "ccache",
   "cmake-build": "CMake",
+  terraform: "Terraform",
   "diag-logs": "RDP / diag",
 };
 
@@ -84,6 +86,8 @@ export const ARTIFACT_SEGMENT_NAMES: ReadonlySet<string> = new Set([
   "pkg",
   "pnpm",
   ".cache",
+  ".terraform",
+  ".terraform.d",
   "dist",
   "build",
   "out",
@@ -154,6 +158,22 @@ export function classifyArtifactPath(filePath: string): { root: string; kind: De
         const kind: DevArtifactKind = next === "yarn" || next === "pnpm" ? "package-cache" : "compiler-cache";
         return { root: joinSegments(filePath, i + 2), kind };
       }
+    }
+
+    // Only the provider downloads, which `terraform init` puts back from
+    // the lock file. The rest of .terraform records the selected
+    // workspace and the last backend config, so it stays.
+    if (lower === ".terraform" && i + 1 < parts.length) {
+      const next = parts[i + 1]!.toLowerCase();
+      if (next === "providers" || next === "plugins") {
+        return { root: joinSegments(filePath, i + 2), kind: "terraform" };
+      }
+    }
+
+    // The documented plugin_cache_dir. `.terraform.d/plugins` holds
+    // providers installed by hand, so it stays.
+    if (lower === ".terraform.d" && i + 1 < parts.length && parts[i + 1]!.toLowerCase() === "plugin-cache") {
+      return { root: joinSegments(filePath, i + 2), kind: "terraform" };
     }
 
     const mapped = SEGMENT_KIND[lower];

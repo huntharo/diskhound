@@ -149,7 +149,7 @@ pub fn assert_each_inode_owned_once(index: &[IndexLineRec]) {
 #[serde(rename_all = "camelCase")]
 pub struct IoBudget {
     pub note: String,
-    /// Directory listings: jwalk `read_dir`, `FindFirstFileExW`.
+    /// Directory listings: dua-core's reads, `FindFirstFileExW`.
     pub readdir: u64,
     /// Per-path metadata reads: `symlink_metadata`, `metadata`,
     /// `GetCompressedFileSizeW`.

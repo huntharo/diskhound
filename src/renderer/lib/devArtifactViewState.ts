@@ -1,5 +1,6 @@
 import type { DevArtifact, DevArtifactKind, DevArtifactReport, ScanSnapshot } from "../../shared/contracts";
 import { DEV_KIND_LABEL } from "../../shared/devArtifacts";
+import { summarizeDevSharing } from "../../shared/storageSharing";
 
 export type DevGroupBy = "all" | "kind" | "project";
 export type DevSortBy = "size" | "increase";
@@ -7,9 +8,25 @@ export type DevSortBy = "size" | "increase";
 export type DevArtifactGroup = {
   key: string;
   label: string;
+  /** Sum of the trees' sizes. */
   size: number;
+  /** What deleting every tree in the group frees, low and high end (see summarizeDevSharing). */
+  frees: number;
+  freesAtMost: number;
   artifacts: DevArtifact[];
 };
+
+function groupOf(key: string, label: string, artifacts: DevArtifact[]): DevArtifactGroup {
+  const sharing = summarizeDevSharing(artifacts);
+  return {
+    key,
+    label,
+    size: sharing.totalBytes,
+    frees: sharing.freesBytes,
+    freesAtMost: sharing.freesAtMostBytes,
+    artifacts,
+  };
+}
 
 function bySize(a: DevArtifact, b: DevArtifact): number {
   return b.size - a.size || a.path.localeCompare(b.path);
@@ -38,22 +55,22 @@ export function effectiveDevSort(sortBy: DevSortBy, filterHasIncrease: boolean):
   return sortBy === "increase" && filterHasIncrease ? "increase" : "size";
 }
 
-/** Flat All, or buckets by kind / project. Lists are size-first, or increase-first. */
+/**
+ * Flat All, or buckets by kind / project. Lists are size-first, or increase-first.
+ * With `reclaim`, groups rank by the middle of what deleting them frees, as the
+ * kind rail does once clones make the listed sizes overstate it.
+ */
 export function groupDevArtifacts(
   rows: DevArtifact[],
   groupBy: DevGroupBy,
   sortBy: DevSortBy = "size",
+  reclaim = false,
 ): DevArtifactGroup[] {
   const compare = compareArtifacts(sortBy);
   if (groupBy === "all") {
     const artifacts = [...rows].sort(compare);
     if (artifacts.length === 0) return [];
-    return [{
-      key: "all",
-      label: "All trees",
-      size: artifacts.reduce((sum, a) => sum + a.size, 0),
-      artifacts,
-    }];
+    return [groupOf("all", "All trees", artifacts)];
   }
 
   const map = new Map<string, DevArtifact[]>();
@@ -63,14 +80,14 @@ export function groupDevArtifacts(
     list.push(artifact);
     map.set(key, list);
   }
-  return [...map.entries()].map(([key, artifacts]) => ({
+  const amount = (g: DevArtifactGroup) => (reclaim ? (g.frees + g.freesAtMost) / 2 : g.size);
+  return [...map.entries()].map(([key, artifacts]) => groupOf(
     key,
-    label: groupBy === "kind"
+    groupBy === "kind"
       ? DEV_KIND_LABEL[key as DevArtifactKind]
       : (artifacts[0]?.projectName ?? "Unscoped"),
-    size: artifacts.reduce((sum, a) => sum + a.size, 0),
-    artifacts: [...artifacts].sort(compare),
-  })).sort((a, b) => b.size - a.size || a.label.localeCompare(b.label));
+    [...artifacts].sort(compare),
+  )).sort((a, b) => amount(b) - amount(a) || a.label.localeCompare(b.label));
 }
 
 /** Rows whose path is one of `paths`, in row order. */

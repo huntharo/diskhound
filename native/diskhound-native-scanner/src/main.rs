@@ -15,14 +15,14 @@ use flate2::write::GzEncoder;
 /// Global cancellation flag — set by signal handlers.
 static CANCELLED: AtomicBool = AtomicBool::new(false);
 
-#[cfg(not(windows))]
-use jwalk::WalkDirGeneric;
-#[cfg(unix)]
+// dua-core hands out std's Metadata on Linux and its own on macOS.
+#[cfg(all(unix, not(target_os = "macos")))]
 use std::os::unix::fs::MetadataExt;
 use serde::Serialize;
 
 #[cfg(windows)]
 mod usn_journal;
+mod usn_aggregate;
 
 #[cfg(windows)]
 mod mft;
@@ -64,6 +64,12 @@ const SNAPSHOT_INTERVAL_MS: u128 = 200;
 /// overflows the soft 2x bound.
 const FOLDER_TREE_FILES_PER_PARENT: usize = 200;
 const WINDOWS_TO_UNIX_EPOCH_TICKS: u64 = 116_444_736_000_000_000;
+
+/// Folder-tree file rows: biggest first, ties by name, so the rows kept
+/// under the cap are the same whatever order the walk found them in.
+fn folder_tree_file_order(a: &(String, u64, u64), b: &(String, u64, u64)) -> std::cmp::Ordering {
+    b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0))
+}
 
 /// Step counter for the scaling tests: one step per comparison or per
 /// entry a loop examines. Compiles to nothing outside `cargo test`.
@@ -116,14 +122,14 @@ struct ScanInput {
 /// Disk touches one scan makes. The visit-once tests check these against
 /// `io-budgets.json`, and `run()` logs them after the walk.
 ///
-/// - `readdir_calls`: directory listings (jwalk's `read_dir`, `FindFirstFileExW`).
+/// - `readdir_calls`: directory listings (dua-core's reads, `FindFirstFileExW`).
 /// - `stat_calls`: per-path metadata reads (`symlink_metadata`, `metadata`,
-///   `GetCompressedFileSizeW`).
+///   `GetCompressedFileSizeW`). The Unix walker's happen inside dua-core;
+///   `count_walker_stat` says how they are counted.
 /// - `baseline_bytes_read`: compressed bytes read from `--baseline-index`.
 ///   Divided by the file's size, it is the number of passes over it.
 ///
-/// Not counted: `canonicalize` of the root, jwalk's own `symlink_metadata`
-/// of the root, and the MFT read.
+/// Not counted: `canonicalize` of the root and the MFT read.
 #[derive(Default)]
 struct IoStats {
     readdir_calls: AtomicU64,
@@ -267,6 +273,7 @@ impl IndexWriter {
                 // for every record. Grown-once-reused keeps allocator
                 // churn near zero in the hot path.
                 let mut line = Vec::with_capacity(512);
+                let mut run = SortedRun::new(SORTED_RUN_BYTES);
                 while let Ok(msg) = rx.recv() {
                     match msg {
                         IndexWriteMsg::File {
@@ -313,22 +320,27 @@ impl IndexWriter {
                             // APFS clones: `v` = private bytes (what
                             // deleting this file alone frees; the rest
                             // of `s` is shared with another clone),
-                            // `k` = shares blocks with a clone. Only
-                            // clone files carry them. Field order is
-                            // fixed (h, v, k) so the TS / Rust
-                            // fast-path parsers stay regex-cheap.
+                            // `k` = shares blocks with a clone. `k`
+                            // without `v` means the private size is
+                            // unknown (PRIVATESIZE unavailable); readers
+                            // count it as 0, like CloneAttrs does. A
+                            // clone that no longer shares any block gets
+                            // neither. Field order is fixed (h, v, k) so
+                            // the TS / Rust fast-path parsers stay
+                            // regex-cheap.
                             if let Some(attrs) = clone.as_ref().filter(|a| a.may_share()) {
-                                if let Some(private) = attrs.private_size {
-                                    let private = private.min(size);
-                                    if private < size {
+                                match attrs.private_size.map(|private| private.min(size)) {
+                                    Some(private) if private >= size => {}
+                                    Some(private) => {
                                         line.extend_from_slice(br#","v":"#);
                                         append_u64_decimal(&mut line, private);
+                                        line.extend_from_slice(br#","k":1"#);
                                     }
+                                    None => line.extend_from_slice(br#","k":1"#),
                                 }
-                                line.extend_from_slice(br#","k":1"#);
                             }
                             line.extend_from_slice(b"}\n");
-                            encoder.write_all(&line)?;
+                            run.write(&mut encoder, &line)?;
                             let dev_root = match &dev_acc_thread {
                                 Some(acc) => acc
                                     .lock()
@@ -347,11 +359,12 @@ impl IndexWriter {
                             line.extend_from_slice(br#"","t":"d","m":"#);
                             append_u64_decimal(&mut line, mtime);
                             line.extend_from_slice(b"}\n");
-                            encoder.write_all(&line)?;
+                            run.write(&mut encoder, &line)?;
                         }
                         IndexWriteMsg::Finish => break,
                     }
                 }
+                run.flush(&mut encoder)?;
                 let mut buffered = encoder.finish()?;
                 buffered.flush()?;
                 Ok(())
@@ -413,7 +426,8 @@ impl IndexWriter {
     /// Signal the writer thread to finish pending messages, close the
     /// gzip stream cleanly, and flush to disk. Blocks on the join so
     /// the caller knows the file is complete before returning. Also
-    /// returns the clone-group summary when any APFS clones were seen.
+    /// returns the clone-group summary, None when the writer thread
+    /// panicked and its groups are lost.
     fn finish(mut self) -> (io::Result<()>, Option<CloneGroupSummary>) {
         if let Some(tx) = self.tx.take() {
             let _ = tx.send(IndexWriteMsg::Finish);
@@ -427,10 +441,7 @@ impl IndexWriter {
         } else {
             (None, None)
         };
-        let clone_summary = clone_groups
-            .as_ref()
-            .map(CloneGroups::summary)
-            .filter(|summary| summary.groups > 0);
+        let clone_summary = clone_groups.as_ref().map(CloneGroups::summary);
         // Write the Dev sidecar even if gzip finish failed — classify
         // already ran on every file the writer accepted.
         if let (Some(out), Some(acc)) = (self.dev_output.take(), self.dev_acc.take()) {
@@ -451,6 +462,56 @@ impl IndexWriter {
             None => Ok(()),
         };
         (result, clone_summary)
+    }
+}
+
+/// The Unix walker yields entries in the order its parallel reads finish,
+/// and APFS lists a folder's names in hash order. gzip finds repeats only
+/// within 32 KB, so the index writer sorts its lines in runs of this many
+/// bytes before compressing them. On a warm ~/github (625k files, 112 MB
+/// of lines) the index took 24.5 MB in arrival order, 14.6 MB in 16 MB
+/// sorted runs, and 13.6 MB from jwalk, which walked in sorted order.
+/// Windows walkers keep their order.
+const SORTED_RUN_BYTES: usize = if cfg!(windows) { 0 } else { 16 << 20 };
+
+/// Index lines held for sorting, up to `cap` bytes (0 writes them
+/// through). See `SORTED_RUN_BYTES`.
+struct SortedRun {
+    cap: usize,
+    bytes: Vec<u8>,
+    lines: Vec<std::ops::Range<usize>>,
+}
+
+impl SortedRun {
+    fn new(cap: usize) -> Self {
+        SortedRun { cap, bytes: Vec::new(), lines: Vec::new() }
+    }
+
+    fn write(&mut self, out: &mut impl Write, line: &[u8]) -> io::Result<()> {
+        if self.cap == 0 {
+            return out.write_all(line);
+        }
+        let start = self.bytes.len();
+        self.bytes.extend_from_slice(line);
+        self.lines.push(start..self.bytes.len());
+        if self.bytes.len() >= self.cap {
+            self.flush(out)?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self, out: &mut impl Write) -> io::Result<()> {
+        let bytes = &self.bytes;
+        self.lines.sort_unstable_by(|a, b| {
+            work::step();
+            bytes[a.clone()].cmp(&bytes[b.clone()])
+        });
+        for range in self.lines.drain(..) {
+            work::step();
+            out.write_all(&bytes[range])?;
+        }
+        self.bytes.clear();
+        Ok(())
     }
 }
 
@@ -1015,7 +1076,7 @@ fn stream_inherited_files_into(
                 .or_insert_with(Vec::new);
             list.push((name, size, mtime));
             if list.len() > FOLDER_TREE_FILES_PER_PARENT * 2 {
-                list.sort_by(|a, b| b.1.cmp(&a.1));
+                list.sort_by(folder_tree_file_order);
                 list.truncate(FOLDER_TREE_FILES_PER_PARENT);
             }
         }
@@ -1368,7 +1429,7 @@ fn run() -> Result<(), String> {
         if let Err(err) = result {
             eprintln!("[diskhound-native-scanner] index writer finish failed ({err})");
         }
-        if let Some(summary) = clone_summary {
+        if let Some(summary) = clone_summary.filter(|summary| summary.groups > 0) {
             eprintln!(
                 "[diskhound-native-scanner] clone groups: {} groups, {} duplicate bytes{}",
                 summary.groups,
@@ -1465,15 +1526,15 @@ fn scan_generic_with_plan(
     state.scan_phase = ScanPhase::Indexing;
     state.expected_total_files = state.input.expected_total_files;
 
-    // Parallelism: jwalk's default is serial. We explicitly enable
-    // parallelism via rayon's thread pool (default 4-16 threads,
-    // overridable via env var). The biggest wins
-    // are on ext4/btrfs on NVMe — directory enumeration is
-    // embarrassingly parallel at the I/O layer since readdir on
-    // separate directories hits different inode blocks.
+    // Parallelism: dua-core reads directories on a work-stealing pool.
+    // Directory enumeration is embarrassingly parallel at the I/O layer,
+    // since reads of separate directories hit different inode blocks.
     //
-    // DISKHOUND_PARALLEL_THREADS env var lets users override,
-    // matching the Windows walker for consistency.
+    // At most 8 threads, like the Windows walker. On an 18-core M5 Max a
+    // full `/` scan (21.4M files) took 2m 51s at 16 threads and 3m 22s at
+    // 8, but 16 used 31% more CPU time (995 s vs 759 s) and peaked near
+    // 1,000% CPU instead of 650%. Past 8, extra threads mostly add kernel
+    // time. DISKHOUND_PARALLEL_THREADS overrides it.
     let thread_override = std::env::var("DISKHOUND_PARALLEL_THREADS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
@@ -1483,7 +1544,7 @@ fn scan_generic_with_plan(
         if logical <= 2 {
             logical
         } else {
-            logical.clamp(4, 16)
+            logical.clamp(4, 8)
         }
     });
 
@@ -1507,13 +1568,14 @@ fn scan_generic_with_plan(
         );
     }
     let plan = Arc::new(plan);
+    let plan_for_walk = Arc::clone(&plan);
     let pruned = Arc::new(walk_prune::PruneLog::default());
     let pruned_for_walk = Arc::clone(&pruned);
     let io_for_walk = Arc::clone(&state.io);
 
-    // macOS: read APFS clone attributes once per directory inside
-    // jwalk's (parallel) read-dir callback and park them on each child's
-    // client state; the serial loop below hands them to record_file.
+    // macOS: dua-core's bulk folder reads also return each file's APFS
+    // clone id (set only for files that may share blocks). The loop below
+    // reads the rest (copy count, private size) for those files alone.
     #[cfg(target_os = "macos")]
     let clone_attrs_enabled = clone_attrs::enable_for_root(root_path);
     #[cfg(target_os = "macos")]
@@ -1521,84 +1583,52 @@ fn scan_generic_with_plan(
         "[diskhound-native-scanner] macos: APFS clone attributes {}",
         if clone_attrs_enabled { "on" } else { "off" }
     );
+    #[cfg(target_os = "macos")]
+    let walk_options = dua_core::Options {
+        apfs_clone_metadata: clone_attrs_enabled,
+        ..dua_core::Options::default()
+    };
+    #[cfg(not(target_os = "macos"))]
+    let walk_options = dua_core::Options::default();
 
-    let walker = WalkDirGeneric::<((), Option<CloneAttrs>)>::new(root_path)
-        .sort(false)
-        .skip_hidden(false)
-        .parallelism(jwalk::Parallelism::RayonNewPool(thread_count))
-        // Prune BEFORE descending: /proc and /dev hold kernel-generated
-        // entries (a scan of `/` used to hang on /proc/kcore), another
-        // disk has its own drive pill, and a bind mount's source or a
-        // firmlink twin would count the same files twice.
-        .process_read_dir(move |depth, _path, _state, children| {
-            // jwalk calls this once per read_dir, with the depth of the
-            // directory read, and once more up front for the root entry
-            // itself, with no depth and no read.
-            if depth.is_some() {
-                io_for_walk.count_readdir();
-            }
-            #[cfg(target_os = "macos")]
-            if clone_attrs_enabled && clone_attrs::enabled() {
-                let has_files = children
-                    .iter()
-                    .any(|c| c.as_ref().is_ok_and(|c| c.file_type().is_file()));
-                if has_files {
-                    if let Some(attrs) = clone_attrs::read_dir_clone_attrs(_path) {
-                        for child in children.iter_mut().flatten() {
-                            if child.file_type().is_file() {
-                                child.client_state = attrs.get(child.file_name()).copied();
-                            }
-                        }
-                    }
-                }
-            }
-            children.retain(|child_result| {
-                let Ok(child) = child_result else {
-                    return true; // Let the outer loop handle read errors.
-                };
-                let path = child.path();
+    // dua-core asks once about every directory it could read, the root
+    // included, and reads exactly the ones it gets `true` for. Prune there,
+    // BEFORE descending: /proc and /dev hold kernel-generated entries (a
+    // scan of `/` used to hang on /proc/kcore), another disk has its own
+    // drive pill, and a bind mount's source or a firmlink twin would count
+    // the same files twice. The pruned directory itself is still yielded;
+    // the loop below leaves it out.
+    let mut walker = dua_core::walk(
+        root_path,
+        thread_count,
+        dua_core::Order::Completion,
+        walk_options,
+        move |entry| {
+            if entry.depth > 0 {
+                let path = entry.path();
                 let path = path.to_string_lossy();
-                match plan.skip_reason(&path, child.file_type().is_dir()) {
-                    None => true,
-                    Some(reason) => {
-                        pruned_for_walk.note(reason, &path);
-                        false
-                    }
+                if let Some(reason) = plan_for_walk.skip_reason(&path, true) {
+                    pruned_for_walk.note(reason, &path);
+                    return false;
                 }
-            });
-            // Fixed order so the first link of a hardlinked file, which
-            // owns its bytes, is the same link on every scan. jwalk
-            // streams entries depth-first in this order even when the
-            // reads run in parallel.
-            children.sort_by(|a, b| match (a, b) {
-                (Ok(a), Ok(b)) => hardlinks::walk_order(
-                    a.file_type.is_dir(),
-                    &a.file_name,
-                    b.file_type.is_dir(),
-                    &b.file_name,
-                ),
-                (Ok(_), Err(_)) => std::cmp::Ordering::Less,
-                (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
-                (Err(_), Err(_)) => std::cmp::Ordering::Equal,
-            });
-        });
+            }
+            io_for_walk.count_readdir();
+            true
+        },
+    );
 
     eprintln!(
-        "[diskhound-native-scanner] linux: walking with jwalk, {} rayon threads",
+        "[diskhound-native-scanner] unix: walking with dua-core, {} threads",
         thread_count
     );
     let walk_started = Instant::now();
     let mut hardlinks = hardlinks::HardlinkTracker::default();
-    let mut hardlink_bytes_deduped: u64 = 0;
 
-    for entry in walker {
-        if is_cancelled() {
-            finalize_hottest_directories(state);
-            return Ok(());
-        }
-
+    while let Some(entry) = walker.next_cancellable(&CANCELLED) {
         let entry = match entry {
             Ok(entry) => entry,
+            // A directory that could not be listed, or an entry in one
+            // that could not be read.
             Err(_) => {
                 state.skipped_entries += 1;
                 maybe_emit_progress(state)?;
@@ -1606,75 +1636,91 @@ fn scan_generic_with_plan(
             }
         };
 
-        if entry.read_children_error.is_some() {
-            // jwalk skips process_read_dir for a failed read_dir, but it
-            // was still a listing attempt, as a failed FindFirstFileExW is.
-            state.io.count_readdir();
-            state.skipped_entries += 1;
+        let is_dir = entry.file_type.is_dir();
+        count_walker_stat(&state.io, &entry);
+        if !is_dir && !entry.file_type.is_file() {
+            maybe_emit_progress(state)?;
+            continue;
         }
+        let path = entry.path();
+        // Only a folder, or a child of the root, can be pruned: anything
+        // deeper sits in a folder the walk entered, so not a pruned one.
+        let may_be_pruned = if is_dir { entry.depth > 0 } else { entry.depth == 1 };
+        if may_be_pruned && plan.skip_reason(&path.to_string_lossy(), is_dir).is_some() {
+            continue;
+        }
+        let metadata = entry.metadata.and_then(Result::ok);
 
-        if entry.file_type().is_dir() {
+        if is_dir {
             state.directories_visited += 1;
             // Emit dir mtime entry so this scan is a valid baseline for the
             // next one. The Phase-1 inherit optimization isn't wired into
-            // jwalk's iterator model here — the non-Windows scanner still
-            // always walks — but we at least keep the output format
-            // consistent so the JS worker (which does implement Phase 1)
-            // can read it back.
-            if let Some(writer) = state.index_writer.as_mut() {
+            // the Unix walker — it always walks — but we at least keep the
+            // output format consistent so the JS worker (which does
+            // implement Phase 1) can read it back.
+            if let (Some(writer), Some(Ok(modified))) = (
+                state.index_writer.as_mut(),
+                metadata.as_ref().map(|meta| meta.modified()),
+            ) {
+                let _ = writer.write_dir_entry(&normalize_path(&path), unix_timestamp_ms(modified));
+            }
+            maybe_emit_progress(state)?;
+            continue;
+        }
+
+        let Some(metadata) = metadata else {
+            state.skipped_entries += 1;
+            maybe_emit_progress(state)?;
+            continue;
+        };
+
+        // One `getattrlist` per clone file for its copy count and private
+        // size; other files come back from the bulk read alone.
+        #[cfg(target_os = "macos")]
+        let clone = clone_attrs_enabled.then(|| {
+            if metadata.clone_id().is_some() {
                 state.io.count_stat();
-                if let Ok(Ok(modified)) = entry.metadata().map(|meta| meta.modified()) {
-                    let dir_path = normalize_path(entry.path().as_path());
-                    let _ = writer.write_dir_entry(&dir_path, unix_timestamp_ms(modified));
-                }
             }
-            maybe_emit_progress(state)?;
-            continue;
-        }
-
-        if !entry.file_type().is_file() {
-            maybe_emit_progress(state)?;
-            continue;
-        }
-
-        state.io.count_stat();
-        let metadata = match entry.metadata() {
-            Ok(metadata) => metadata,
-            Err(_) => {
-                state.skipped_entries += 1;
-                maybe_emit_progress(state)?;
-                continue;
-            }
-        };
-
-        let file_path = entry.path();
-        let parent_path = file_path
-            .parent()
-            .map(normalize_path)
-            .unwrap_or_else(|| state.root_path_string.clone());
-        let file_name = entry.file_name().to_string_lossy().into_owned();
-        let size = allocated_size(&metadata);
-        let extra_hardlink =
-            hardlinks.is_extra_link(metadata.dev(), metadata.ino(), metadata.nlink());
-        if extra_hardlink {
-            hardlink_bytes_deduped = hardlink_bytes_deduped.saturating_add(size);
-        }
-        let file_record = ScanFileRecord {
-            path: normalize_path(&file_path),
-            name: file_name.clone(),
-            parent_path,
-            extension: file_extension(&file_name),
-            size,
+            clone_attrs::file_clone_attrs(&path, metadata.clone_id())
+        });
+        #[cfg(not(target_os = "macos"))]
+        let clone = None;
+        let nlink = metadata.nlink();
+        let link = hardlinks::Link {
+            path,
+            size: allocated_size(&metadata),
             modified_at: metadata_modified_at_ms(&metadata),
+            // Every name of a multi-link file carries its id, owner included.
+            link_id: (nlink > 1).then(|| (metadata.dev(), metadata.ino())),
+            clone,
         };
-
-        let link_id = (metadata.nlink() > 1).then(|| (metadata.dev(), metadata.ino()));
-        record_file_with_link_flag(state, file_record, extra_hardlink, link_id, entry.client_state)?;
+        if nlink <= 1 {
+            record_file_with_link_flag(state, unix_file_record(&link), false, None, clone)?;
+            continue;
+        }
+        // Held until every name of the inode is in, so the owner is the
+        // same name on every scan whatever order the reads finish in.
+        let mut result = Ok(());
+        hardlinks.add(metadata.dev(), metadata.ino(), metadata.nlink(), link, |link, extra| {
+            record_released(state, &mut result, link, extra)
+        });
+        result?;
+        // A folder of held names releases nothing until their twins turn up.
+        maybe_emit_progress(state)?;
     }
+
+    if is_cancelled() {
+        finalize_hottest_directories(state);
+        return Ok(());
+    }
+
+    let mut result = Ok(());
+    hardlinks.finish(|link, extra| record_released(state, &mut result, link, extra));
+    result?;
 
     state.skipped_mounts = pruned.other_mounts();
     eprintln!(
-        "[diskhound-native-scanner] linux: walk done in {} ms (files={}, dirs={}, skipped={}, foreign_mounts_pruned={}, duplicate_mounts_pruned={}, firmlink_twins_pruned={}, readdir_calls={}, stat_calls={})",
+        "[diskhound-native-scanner] unix: walk done in {} ms (files={}, dirs={}, skipped={}, foreign_mounts_pruned={}, duplicate_mounts_pruned={}, firmlink_twins_pruned={}, readdir_calls={}, stat_calls={})",
         walk_started.elapsed().as_millis(),
         state.files_visited,
         state.directories_visited,
@@ -1686,13 +1732,68 @@ fn scan_generic_with_plan(
         state.io.stat_calls(),
     );
     eprintln!(
-        "[diskhound-native-scanner] hardlinks: {} extra links counted once ({} bytes), {} inodes with links outside the scan",
+        "[diskhound-native-scanner] hardlinks: {} extra links counted once ({} bytes), {} inodes with links outside the scan, at most {} names held",
         hardlinks.extra_links(),
-        hardlink_bytes_deduped,
+        hardlinks.extra_link_bytes(),
         hardlinks.inodes_with_unseen_links(),
+        hardlinks.peak_held(),
     );
     finalize_hottest_directories(state);
     Ok(())
+}
+
+/// A file record from the path and metadata the walker read. Held
+/// hardlinks keep only these three, so a held name costs one path.
+#[cfg(not(windows))]
+fn unix_file_record(link: &hardlinks::Link) -> ScanFileRecord {
+    let name = link
+        .path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let parent_path = link.path.parent().map(normalize_path).unwrap_or_default();
+    ScanFileRecord {
+        extension: file_extension(&name),
+        name,
+        parent_path,
+        size: link.size,
+        modified_at: link.modified_at,
+        path: normalize_path(&link.path),
+    }
+}
+
+/// Records a hardlink name the tracker released. After an error (stdout
+/// closed), later names are dropped and the error is returned.
+#[cfg(not(windows))]
+fn record_released(
+    state: &mut ScanState,
+    result: &mut Result<(), String>,
+    link: hardlinks::Link,
+    extra: bool,
+) {
+    if result.is_ok() {
+        *result = record_file_with_link_flag(state, unix_file_record(&link), extra, link.link_id, link.clone);
+    }
+}
+
+/// Counts the metadata reads dua-core made for `entry` into `stat_calls`.
+/// They happen inside the library, so this follows where it gets metadata:
+/// on Linux an `fstatat` for every entry, and the root's `lstat`; on macOS
+/// `getattrlistbulk` covers files and symlinks, and each directory (the
+/// root too) takes an `lstat`, because the bulk attributes do not fill a
+/// directory's `stat` fields. The walk loop counts its own per-clone
+/// `getattrlist`. Not counted: when a folder's bulk
+/// reads spend more time waiting than executing, dua-core lists it again
+/// and stats each entry; that decision is made on timing.
+#[cfg(not(windows))]
+fn count_walker_stat(io: &IoStats, entry: &dua_core::Entry) {
+    if entry.metadata.is_none() {
+        return;
+    }
+    if cfg!(target_os = "macos") && !entry.file_type.is_dir() {
+        return;
+    }
+    io.count_stat();
 }
 
 #[cfg(windows)]
@@ -2174,7 +2275,7 @@ fn emit_mft_records_into_state(
     if want_folder_tree {
         for list in state.folder_tree_files.values_mut() {
             if list.len() > FOLDER_TREE_FILES_PER_PARENT {
-                list.sort_by(|a, b| b.1.cmp(&a.1));
+                list.sort_by(folder_tree_file_order);
                 list.truncate(FOLDER_TREE_FILES_PER_PARENT);
             }
         }
@@ -2353,7 +2454,7 @@ fn emit_shard(
                     .or_insert_with(Vec::new);
                 list.push((file_name, rec.size, rec.mtime_ms));
                 if list.len() > FOLDER_TREE_FILES_PER_PARENT * 2 {
-                    list.sort_by(|a, b| b.1.cmp(&a.1));
+                    list.sort_by(folder_tree_file_order);
                     list.truncate(FOLDER_TREE_FILES_PER_PARENT);
                 }
             }
@@ -3676,7 +3777,7 @@ fn record_file_with_link_flag(
         // inserts so the common "folder with 50 files" case pays no
         // extra per-file overhead.
         if list.len() > FOLDER_TREE_FILES_PER_PARENT * 2 {
-            list.sort_by(|a, b| b.1.cmp(&a.1));
+            list.sort_by(folder_tree_file_order);
             list.truncate(FOLDER_TREE_FILES_PER_PARENT);
         }
     }
@@ -3795,13 +3896,10 @@ impl ScanState {
         if totals.measured_files == 0 {
             return None;
         }
-        // Groups are only tracked when an index writer ran; zero groups
-        // with clone files present still means "no duplicates seen".
-        let duplicate_bytes = match (&self.clone_group_summary, self.scan_phase) {
-            (Some(summary), _) => Some(summary.duplicate_bytes),
-            (None, ScanPhase::Complete) if self.input.index_output.is_some() => Some(0),
-            _ => None,
-        };
+        // Groups are tracked on the index writer thread and arrive when it
+        // finishes. Until then, or when it failed or was dropped after a
+        // write error, the double count is unknown rather than zero.
+        let duplicate_bytes = self.clone_group_summary.map(|summary| summary.duplicate_bytes);
         Some(StorageAccountingOut {
             measured_files: totals.measured_files,
             measured_bytes: totals.measured_bytes,
@@ -3964,13 +4062,15 @@ fn file_extension(file_name: &str) -> String {
         .unwrap_or_else(|| String::from("(no ext)"))
 }
 
+/// `st_blocks` × 512. On macOS dua-core reads it from the bulk attributes,
+/// rounded to 512-byte blocks as `stat` rounds it.
 #[cfg(not(windows))]
-fn allocated_size(metadata: &std::fs::Metadata) -> u64 {
+fn allocated_size(metadata: &dua_core::Metadata) -> u64 {
     metadata.blocks().saturating_mul(512)
 }
 
 #[cfg(not(windows))]
-fn metadata_modified_at_ms(metadata: &std::fs::Metadata) -> u64 {
+fn metadata_modified_at_ms(metadata: &dua_core::Metadata) -> u64 {
     metadata
         .modified()
         .map(unix_timestamp_ms)
@@ -4202,6 +4302,15 @@ fn sidecar_path_next_to(index_path: &Path) -> PathBuf {
     PathBuf::from(out)
 }
 
+/// Gives `dest` the bytes of `source` without writing them again: a
+/// hard link, or a copy on a volume without hard links (FAT32, exFAT).
+fn link_or_copy(source: &Path, dest: &Path) -> io::Result<&'static str> {
+    match std::fs::hard_link(source, dest) {
+        Ok(()) => Ok("linked"),
+        Err(_) => std::fs::copy(source, dest).map(|_| "copied"),
+    }
+}
+
 fn write_folder_tree_sidecar(state: &mut ScanState) -> io::Result<()> {
     let output_path = match state.input.folder_tree_output.as_ref() {
         Some(p) => p.clone(),
@@ -4220,11 +4329,13 @@ fn write_folder_tree_sidecar(state: &mut ScanState) -> io::Result<()> {
     // every drill-in shows "This folder appears empty in the scan
     // index."
     //
-    // Instead: if we have a baseline index (rescan), copy its sidecar
-    // to the new scan's sidecar path. The tree contents are still
-    // accurate since nothing changed. This preserves the Folders-tab
-    // fast path across rescans without needing to rebuild from
-    // scratch.
+    // Instead: if we have a baseline index (rescan), give the new
+    // scan's sidecar path the baseline sidecar's bytes. The tree
+    // contents are still accurate since nothing changed. This
+    // preserves the Folders-tab fast path across rescans without
+    // needing to rebuild from scratch. A hard link, so the ~50 MB a
+    // 7M-file drive's sidecar holds are not written again; Node
+    // replaces sidecars by rename, which leaves the other name alone.
     if state.folder_tree_files.is_empty() {
         // Guard against the "empty sidecar copy-chain" pathology: if a
         // prior scan wrote an empty/near-empty sidecar (e.g. because
@@ -4240,12 +4351,12 @@ fn write_folder_tree_sidecar(state: &mut ScanState) -> io::Result<()> {
                 .map(|m| m.len())
                 .unwrap_or(0);
             if baseline_size >= MIN_BASELINE_SIDECAR_BYTES {
-                match std::fs::copy(&baseline_sidecar, &output_path) {
-                    Ok(bytes) => {
+                match link_or_copy(&baseline_sidecar, &output_path) {
+                    Ok(how) => {
                         eprintln!(
-                            "[diskhound-native-scanner] folder-tree sidecar: reused baseline sidecar ({:?}) — {} bytes copied to {:?} in {} ms (no tree work done on inheritance-only scan)",
+                            "[diskhound-native-scanner] folder-tree sidecar: reused baseline sidecar ({:?}) — {} bytes {how} to {:?} in {} ms (no tree work done on inheritance-only scan)",
                             baseline_sidecar,
-                            bytes,
+                            baseline_size,
                             output_path,
                             sidecar_started.elapsed().as_millis()
                         );
@@ -4285,10 +4396,10 @@ fn write_folder_tree_sidecar(state: &mut ScanState) -> io::Result<()> {
     // Done in-place on state.folder_tree_files.
     for list in state.folder_tree_files.values_mut() {
         if list.len() > FOLDER_TREE_FILES_PER_PARENT {
-            list.sort_by(|a, b| b.1.cmp(&a.1));
+            list.sort_by(folder_tree_file_order);
             list.truncate(FOLDER_TREE_FILES_PER_PARENT);
         } else {
-            list.sort_by(|a, b| b.1.cmp(&a.1));
+            list.sort_by(folder_tree_file_order);
         }
     }
 
@@ -4886,7 +4997,7 @@ mod scaling_tests {
         assert!(large <= cap, "{label} took {large} steps at 8N, over {cap}");
     }
 
-    /// The per-file path every walker shares (FindFirstFile, jwalk,
+    /// The per-file path every walker shares (FindFirstFile, dua-core,
     /// inherited streams), with a progress snapshot after every file.
     fn walk(files: usize, limit: usize) -> (u64, ScanState) {
         let mut state = state(limit);
@@ -5103,6 +5214,90 @@ mod scaling_tests {
         assert_scales("inherited stream", small, large, 8_000 * 30);
     }
 
+    #[cfg(not(windows))]
+    fn held(path: String) -> hardlinks::Link {
+        hardlinks::Link { path: path.into(), size: 4096, modified_at: 0, link_id: None, clone: None }
+    }
+
+    /// `inodes` files with two names each, in two folders the walk reads
+    /// in parallel (cargo's target/debug/deps and incremental): every name
+    /// is held until its twin arrives. Then one inode with `names` names,
+    /// most of them outside the scan, released at the end.
+    #[cfg(not(windows))]
+    fn hold_links(inodes: usize, names: usize) -> u64 {
+        let mut tracker = hardlinks::HardlinkTracker::default();
+        let mut owners = 0;
+        let mut extras = 0;
+        let mut count = |extra: bool| if extra { extras += 1 } else { owners += 1 };
+        work::take();
+        for folder in ["deps", "incremental"] {
+            for i in 0..inodes {
+                let path = format!("{}{SEP}{folder}{SEP}f{i}", root());
+                tracker.add(1, i as u64, 2, held(path), |_, extra| count(extra));
+            }
+        }
+        for i in 0..names {
+            let path = format!("{}{SEP}shared{SEP}n{}", root(), names - i);
+            tracker.add(2, 0, names as u64 * 4, held(path), |_, extra| count(extra));
+        }
+        tracker.finish(|_, extra| count(extra));
+        let steps = work::take();
+        assert_eq!((owners, extras), (inodes + 1, inodes + names - 1));
+        steps
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn held_hardlinks_are_released_in_n_log_links() {
+        let small = hold_links(1_000, 1_000);
+        let large = hold_links(8_000, 8_000);
+        // Per two-name inode: one comparison and two releases. The big
+        // inode sorts its names once.
+        assert_scales("held hardlinks", small, large, 8_000 * 30);
+    }
+
+    /// `lines` index lines written scrambled (7919 is prime, so `i * 7919`
+    /// visits every index once) through one sorted run.
+    #[cfg(not(windows))]
+    fn sorted_run(lines: usize) -> u64 {
+        let mut run = SortedRun::new(SORTED_RUN_BYTES);
+        let mut out = Vec::new();
+        work::take();
+        for i in (0..lines).map(|i| i * 7919 % lines) {
+            run.write(&mut out, format!("{{\"p\":\"{}{SEP}f{i:06}\"}}\n", root()).as_bytes())
+                .unwrap();
+        }
+        run.flush(&mut out).unwrap();
+        let steps = work::take();
+        let written: Vec<&[u8]> = out.split_inclusive(|&b| b == b'\n').collect();
+        assert_eq!(written.len(), lines);
+        assert!(written.is_sorted(), "a run goes out sorted");
+        steps
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn index_runs_sort_in_n_log_n() {
+        let small = sorted_run(1_000);
+        let large = sorted_run(8_000);
+        assert_scales("sorted index run", small, large, 8_000 * 20);
+    }
+
+    #[test]
+    fn a_full_run_goes_out_sorted_and_the_next_starts_empty() {
+        let mut run = SortedRun::new(8);
+        let mut out = Vec::new();
+        for line in ["c\n", "a\n", "d\n", "b\n", "f\n", "e\n"] {
+            run.write(&mut out, line.as_bytes()).unwrap();
+        }
+        assert_eq!(out, b"a\nb\nc\nd\n", "the run filled at 8 bytes");
+        run.flush(&mut out).unwrap();
+        assert_eq!(out, b"a\nb\nc\nd\ne\nf\n");
+        let mut through = Vec::new();
+        SortedRun::new(0).write(&mut through, b"z\n").unwrap();
+        assert_eq!(through, b"z\n", "cap 0 writes through");
+    }
+
     #[test]
     fn inherited_prefixes_match_whole_folder_names() {
         let a = format!("{}{SEP}a", root());
@@ -5123,6 +5318,36 @@ mod scaling_tests {
         let everything = InheritedPrefixes::new(&[SEP.to_string()]);
         assert!(everything.covers(&format!("{a}{SEP}f.txt")));
         assert!(!InheritedPrefixes::new(&[]).covers(&a));
+    }
+}
+
+#[cfg(test)]
+mod folder_tree_sidecar_reuse_tests {
+    use super::*;
+    use crate::test_support::{test_state, TempTree};
+    use std::fs;
+
+    /// A rescan that inherited every folder has no tree of its own and
+    /// reuses the baseline's sidecar, without writing its bytes again.
+    #[test]
+    fn inheritance_only_scan_links_the_baseline_sidecar() {
+        let tree = TempTree::new("sidecar-reuse");
+        tree.write("root/a.txt", 1);
+        let baseline_index = tree.write("scan-indexes/base.ndjson.gz", 64);
+        let baseline_sidecar = tree.write("scan-indexes/base.folder-tree.ndjson.gz", 4096);
+        let output = tree.path("scan-indexes/pending.folder-tree.ndjson.gz");
+        let mut state = test_state(&tree.path("root"), &tree.path("scan-indexes/pending.ndjson.gz"));
+        state.input.baseline_index = Some(baseline_index);
+        state.input.folder_tree_output = Some(output.clone());
+
+        write_folder_tree_sidecar(&mut state).unwrap();
+
+        assert_eq!(fs::read(&output).unwrap(), fs::read(&baseline_sidecar).unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(fs::metadata(&output).unwrap().nlink(), 2, "the sidecar was copied, not linked");
+        }
     }
 }
 
@@ -5272,10 +5497,19 @@ mod unix_visit_once_tests {
 
     const DIRS: u64 = 4;
     const FILES: u64 = 4;
+    const SYMLINKS: u64 = 2;
+
+    /// dua-core's metadata reads (see `count_walker_stat`): on macOS an
+    /// lstat per directory, because getattrlistbulk covers files and
+    /// symlinks; on Linux an fstatat per entry, symlinks included.
+    const STATS: u64 = if cfg!(target_os = "macos") { DIRS } else { DIRS + FILES + SYMLINKS };
+
+    /// The walker's stat counts differ by OS, so each has its own budgets.
+    const OS: &str = if cfg!(target_os = "macos") { "native-macos" } else { "native-linux" };
 
     /// Directories root, b, b/d and g (empty). Files a.txt, b/c.txt,
     /// b/d/e.txt, and b/d/f.txt, a second link to a.txt. Two symlinks the
-    /// walker must neither follow nor stat.
+    /// walker must not follow.
     fn fixture(tree: &TempTree) -> PathBuf {
         let a = tree.write("root/a.txt", 1024);
         tree.write("root/b/c.txt", 2048);
@@ -5291,11 +5525,7 @@ mod unix_visit_once_tests {
         assert_eq!(state.directories_visited, DIRS);
         assert_eq!(state.files_visited, FILES);
         assert_eq!(state.io.readdir_calls(), DIRS, "one read_dir per directory");
-        assert_eq!(
-            state.io.stat_calls(),
-            FILES + DIRS,
-            "one lstat per file, and one per directory for its index mtime"
-        );
+        assert_eq!(state.io.stat_calls(), STATS);
         let (dirs, files) = assert_listed_once(index);
         assert_eq!(dirs.len() as u64, DIRS);
         assert_eq!(files.len() as u64, FILES);
@@ -5313,15 +5543,15 @@ mod unix_visit_once_tests {
         let index = finish_index(&mut state, &index_path);
 
         assert_walked_once(&state, &index);
-        expect_io_budget(
-            "native-unix/walk",
-            measured(
-                "4 dirs, 4 files (one a second hardlink), 2 symlinks: 1 read_dir per dir, \
-                 1 lstat per dir (its index mtime) and per file, nothing for symlinks",
-                &state.io,
-                None,
-            ),
-        );
+        let note = if cfg!(target_os = "macos") {
+            "4 dirs, 4 files (one a second hardlink), 2 symlinks: 1 listing per dir, 1 lstat \
+             per dir (its index mtime); getattrlistbulk gives files and symlinks theirs. \
+             jwalk took 8 stats: it also lstat'ed every file"
+        } else {
+            "4 dirs, 4 files (one a second hardlink), 2 symlinks: 1 listing per dir, 1 fstatat \
+             per entry, symlinks included (jwalk took 8: no stat for symlinks)"
+        };
+        expect_io_budget(&format!("{OS}/walk"), measured(note, &state.io, None));
     }
 
     #[test]
@@ -5349,7 +5579,7 @@ mod unix_visit_once_tests {
         assert_eq!(state.expected_total_files, Some(FILES));
         assert_walked_once(&state, &index);
         expect_io_budget(
-            "native-unix/rescan-with-baseline",
+            &format!("{OS}/rescan-with-baseline"),
             measured(
                 "same tree, --baseline-index and --expected-files given: the walk's cost and \
                  0 baseline passes (was 1 full decompress and parse, only to read the root's \
@@ -5509,6 +5739,7 @@ mod unix_prune_scan_tests {
     use super::*;
     use crate::test_support::*;
     use crate::walk_prune::PrunePlan;
+    use std::os::unix::fs::MetadataExt;
 
     fn occupancy(path: &Path) -> u64 {
         std::fs::metadata(path).unwrap().blocks() * 512
@@ -5566,5 +5797,51 @@ mod unix_prune_scan_tests {
         scan_generic_with_plan(&root, &mut state, PrunePlan::default()).unwrap();
         let snapshot = serde_json::to_value(state.snapshot(ScanStatus::Done, None)).unwrap();
         assert!(snapshot.get("skippedMounts").is_none());
+    }
+}
+
+#[cfg(test)]
+mod index_writer_clone_tests {
+    use super::*;
+    use crate::clone_attrs::EF_MAY_SHARE_BLOCKS;
+    use crate::test_support::TempTree;
+
+    #[test]
+    fn writes_private_size_only_when_known_and_drops_clones_that_share_nothing() {
+        let tree = TempTree::new("clone-suffix");
+        let index = tree.path("index.ndjson.gz");
+        let clone = |private_size| CloneAttrs {
+            private_size,
+            clone_id: 0,
+            clone_refcnt: 0,
+            ext_flags: EF_MAY_SHARE_BLOCKS,
+        };
+        let mut writer = IndexWriter::create(&index, None, "/r".into()).unwrap();
+        for (path, attrs) in [
+            ("/r/full", Some(clone(Some(0)))),
+            ("/r/edited", Some(clone(Some(100)))),
+            ("/r/unknown", Some(clone(None))),
+            ("/r/rewritten", Some(clone(Some(4096)))),
+            ("/r/plain", Some(CloneAttrs::default())),
+        ] {
+            writer.write_entry(path, 4096, 1, false, None, attrs).unwrap();
+        }
+        writer.finish().0.unwrap();
+
+        let mut lines: Vec<String> = BufReader::new(GzDecoder::new(File::open(&index).unwrap()))
+            .lines()
+            .map(|line| line.unwrap())
+            .collect();
+        lines.sort();
+        assert_eq!(
+            lines,
+            [
+                r#"{"p":"/r/edited","s":4096,"m":1,"v":100,"k":1}"#,
+                r#"{"p":"/r/full","s":4096,"m":1,"v":0,"k":1}"#,
+                r#"{"p":"/r/plain","s":4096,"m":1}"#,
+                r#"{"p":"/r/rewritten","s":4096,"m":1}"#,
+                r#"{"p":"/r/unknown","s":4096,"m":1,"k":1}"#,
+            ]
+        );
     }
 }

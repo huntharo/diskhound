@@ -1078,7 +1078,9 @@ export async function collectFromIndex(
       mtime: rec.m,
       // Sharing as of the scan that wrote the index (see duplicateReclaim.ts).
       ...(rec.i ? { linkId: rec.i } : {}),
-      ...(typeof rec.v === "number" ? { privateBytes: rec.v } : {}),
+      // `k` without `v`: a clone whose private size the scan couldn't
+      // read. Count it as freeing nothing, as Dev Artifacts does.
+      ...(typeof rec.v === "number" ? { privateBytes: rec.v } : rec.k === 1 ? { privateBytes: 0 } : {}),
     };
     if (bucket) bucket.push(candidate);
     else sizeMap.set(size, [candidate]);
@@ -1783,7 +1785,7 @@ function makeGroup(hash: string, size: number, bucket: FileCandidate[]): Duplica
  * Runs on the candidate map before hashing, so extra names are never
  * hashed. Buckets that fold down to one file drop out as non-candidates.
  */
-function foldHardlinks<T extends { linkId?: string }>(sizeMap: Map<number, T[]>): number {
+export function foldHardlinks<T extends { linkId?: string }>(sizeMap: Map<number, T[]>): number {
   let folded = 0;
   for (const [size, bucket] of sizeMap) {
     if (!bucket.some((file) => file.linkId)) continue;

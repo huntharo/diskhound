@@ -187,14 +187,17 @@ describe.skipIf(process.platform === "win32")("duplicates read sharing from the 
     expect(result.totalWastedBytes).toBe(SIZE);
   });
 
-  it("treats k without v as fully private (the writer omits v when nothing is shared)", async () => {
+  it("counts a clone of unknown private size (k without v) as freeing nothing", async () => {
+    // The writer drops `v` only when PRIVATESIZE was unavailable; a clone
+    // that no longer shares any block carries neither field.
     const a = write("root/a.bin");
     const b = write("root/b.bin");
     const indexPath = writeIndex([{ p: a, k: 1 }, { p: b }]);
 
     const result = await findDuplicates("root", { indexPath });
 
-    expect(result.groups[0]!.files.every((file) => file.sharing === undefined)).toBe(true);
+    expect(result.groups[0]!.files.find((file) => file.path === a)).toMatchObject({ sharing: "clone", reclaimableBytes: 0 });
+    // Keep the clone, delete the plain copy.
     expect(result.totalWastedBytes).toBe(SIZE);
   });
 });

@@ -165,6 +165,15 @@ test.describe("APFS clones", () => {
     const summary = page.locator(".dev-summary-net");
     await expect(summary.locator(".changes-delta-big")).toHaveText("0 B – 32.0 MB");
     await expect(summary.locator(".changes-delta-label")).toHaveText("reclaimable on this scan · 96.0 MB listed");
+    // The kind rail tells the same story as the header.
+    const rail = page.locator(".dev-kind-rail");
+    await expect(rail.locator(".dev-kind-cell-all .dev-kind-cell-size")).toHaveText("0 B – 32.0 MB");
+    await expect(rail.locator(".dev-kind-cell:not(.dev-kind-cell-all) .dev-kind-cell-size")).toHaveText(["0 B – 32.0 MB"]);
+    // So do the group headers and the selection tally.
+    await page.getByRole("radio", { name: "By kind" }).click();
+    await expect(page.locator(".dev-group-size")).toHaveText(["frees 0 B – 32.0 MB"]);
+    await page.getByRole("button", { name: "Select visible" }).click();
+    await expect(page.locator(".dev-select-bar-tally")).toHaveText("3 · frees 0 B – 32.0 MB");
     const note = page.locator(".dev-sharing-note");
     await expect(note).toContainText(
       "96.0 MB of these trees is APFS clones sharing blocks with files elsewhere. "

@@ -39,7 +39,7 @@ import {
   type DevSortBy,
 } from "../lib/devArtifactViewState";
 import { formatBytes, formatBytesRange, formatCount, relativeTime } from "../lib/format";
-import { captureFreeBytes, checkFreedSpace, freedSpaceCheckEnabled } from "../lib/freedSpaceCheck";
+import { checkFreedSpace, freeBytesBeforeDelete } from "../lib/freedSpaceCheck";
 import { dispatchDevArtifactsUpdated, STORAGE_ACCOUNTING_STALE_EVENT } from "../lib/uiEvents";
 import { nativeApi } from "../nativeApi";
 import { DEV_FOLDER_TREE_STAGES, DEV_RESCAN_STAGES, DEV_SIDECAR_STAGES, IndexLoadingPanel } from "./IndexLoadingPanel";
@@ -125,6 +125,16 @@ function permanentDeleteConfirm(
     `${formatCount(trees)} trees · ${formatBytes(bytes)}\n${note}\n` +
     `This permanently deletes the trees from disk. It cannot be undone and does not go to the Recycle Bin. Protected folders are skipped.`
   );
+}
+
+/**
+ * A selection's or group's size, or what deleting it frees once the header
+ * leads with that, so every total on the page counts clones the same way.
+ */
+function reclaimTally(listed: number, frees: number, freesAtMost: number, reclaim: boolean): string {
+  const range = formatBytesRange(frees, freesAtMost);
+  if (!reclaim || range === formatBytes(listed)) return formatBytes(listed);
+  return range === formatBytes(frees) ? `frees ≈ ${range}` : `frees ${range}`;
 }
 
 /** Tooltip for a row's "Shared" badge / "frees ≈" line. */
@@ -429,28 +439,37 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
   const showSharedBlocks = sharingSummary.sharedBlocks < sharingSummary.sharedBytes * 0.9;
 
   const kindTotals = useMemo(() => {
-    const map = new Map<DevArtifactKind, { size: number; count: number }>();
+    const byKind = new Map<DevArtifactKind, DevArtifact[]>();
     for (const artifact of remaining) {
-      const entry = map.get(artifact.kind) ?? { size: 0, count: 0 };
-      entry.size += artifact.size;
-      entry.count += 1;
-      map.set(artifact.kind, entry);
+      const list = byKind.get(artifact.kind);
+      if (list) list.push(artifact);
+      else byKind.set(artifact.kind, [artifact]);
     }
-    return [...map.entries()]
-      .map(([kind, stats]) => ({ kind, size: stats.size, count: stats.count }))
-      .sort((a, b) => b.size - a.size);
+    return [...byKind.entries()].map(([kind, artifacts]): KindTotal => {
+      const sharing = summarizeDevSharing(artifacts);
+      return {
+        kind,
+        count: artifacts.length,
+        size: sharing.totalBytes,
+        frees: sharing.freesBytes,
+        freesAtMost: sharing.freesAtMostBytes,
+      };
+    });
   }, [remaining]);
 
   const reportHasChangeData = useMemo(() => hasDevChangeData(remaining), [remaining]);
   const filterHasIncrease = useMemo(() => hasDevChangeData(rows), [rows]);
   const listSort = effectiveDevSort(sortBy, filterHasIncrease);
-  const groups = useMemo(() => groupDevArtifacts(rows, groupBy, listSort), [rows, groupBy, listSort]);
+  const groups = useMemo(
+    () => groupDevArtifacts(rows, groupBy, listSort, cloneAwareTotal),
+    [rows, groupBy, listSort, cloneAwareTotal],
+  );
 
   const selectedVisible = useMemo(
     () => rows.filter((a) => selected.has(a.path)),
     [rows, selected],
   );
-  const selectedBytes = selectedVisible.reduce((sum, a) => sum + a.size, 0);
+  const selectedSharing = useMemo(() => summarizeDevSharing(selectedVisible), [selectedVisible]);
   const allVisibleSelected = rows.length > 0 && rows.every((a) => selected.has(a.path));
 
   const toggleOne = (path: string) => {
@@ -506,7 +525,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     ));
     if (!ok) return;
     // Did free space actually move? (macOS; see freedSpaceCheck.ts)
-    const freeBefore = freedSpaceCheckEnabled(totalBytes) ? await captureFreeBytes(root) : null;
+    const freeBefore = await freeBytesBeforeDelete(root, totalBytes);
     let deletedSharedBytes = 0;
     let deletedMeasured = false;
     setBulkBusy(true);
@@ -869,7 +888,12 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
       {kindTotals.length > 0 && (
         <KindTape
           totals={kindTotals}
-          totalBytes={summary.totalBytes}
+          all={{
+            size: summary.totalBytes,
+            frees: sharingSummary.freesBytes,
+            freesAtMost: sharingSummary.freesAtMostBytes,
+          }}
+          reclaim={cloneAwareTotal}
           kindFilter={kindFilter}
           onFilter={setKindFilter}
         />
@@ -984,8 +1008,16 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
       >
         {selectedVisible.length > 0 ? (
           <>
-            <span className="dev-select-bar-tally">
-              {formatCount(selectedVisible.length)} · {formatBytes(selectedBytes)}
+            <span
+              className="dev-select-bar-tally"
+              title={cloneAwareTotal ? `${formatBytes(selectedSharing.totalBytes)} listed` : undefined}
+            >
+              {formatCount(selectedVisible.length)} · {reclaimTally(
+                selectedSharing.totalBytes,
+                selectedSharing.freesBytes,
+                selectedSharing.freesAtMostBytes,
+                cloneAwareTotal,
+              )}
             </span>
             <button
               type="button"
@@ -1059,7 +1091,12 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                   ) : null}
                   <span className="dev-group-title">{group.label}</span>
                 </label>
-                <span className="dev-group-size">{formatBytes(group.size)}</span>
+                <span
+                  className="dev-group-size"
+                  title={cloneAwareTotal ? `${formatBytes(group.size)} listed` : undefined}
+                >
+                  {reclaimTally(group.size, group.frees, group.freesAtMost, cloneAwareTotal)}
+                </span>
               </header>
               )}
               {group.artifacts.map((artifact) => {
@@ -1139,14 +1176,27 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
   );
 }
 
+interface KindTotal {
+  kind: DevArtifactKind;
+  count: number;
+  /** Sum of the trees' sizes. */
+  size: number;
+  /** What deleting every tree of this kind frees, low and high end. */
+  frees: number;
+  freesAtMost: number;
+}
+
 function KindTape({
   totals,
-  totalBytes,
+  all,
+  reclaim,
   kindFilter,
   onFilter,
 }: {
-  totals: Array<{ kind: DevArtifactKind; size: number; count: number }>;
-  totalBytes: number;
+  totals: KindTotal[];
+  all: Pick<KindTotal, "size" | "frees" | "freesAtMost">;
+  /** Show what deleting frees, as the header does once clones matter. */
+  reclaim: boolean;
   kindFilter: DevArtifactKind | "all";
   onFilter: (kind: DevArtifactKind | "all") => void;
 }) {
@@ -1154,6 +1204,14 @@ function KindTape({
     onFilter(kindFilter === kind ? "all" : kind);
   };
   const filtered = kindFilter !== "all";
+  // Per-tree figures add up, so the kinds' ranges sum to the header's.
+  // Segments and fills take the middle of each range.
+  const amount = (t: Pick<KindTotal, "size" | "frees" | "freesAtMost">) =>
+    reclaim ? (t.frees + t.freesAtMost) / 2 : t.size;
+  const label = (t: Pick<KindTotal, "size" | "frees" | "freesAtMost">) =>
+    reclaim ? formatBytesRange(t.frees, t.freesAtMost) : formatBytes(t.size);
+  const sorted = [...totals].sort((a, b) => amount(b) - amount(a));
+  const allAmount = amount(all);
   return (
     <div className="dev-tape">
       <div
@@ -1161,17 +1219,19 @@ function KindTape({
         role="list"
         aria-label="Reclaimable bytes by kind"
       >
-        {totals.map((entry) => (
+        {sorted.map((entry) => (
           <button
             key={entry.kind}
             type="button"
             role="listitem"
             className={`dev-spectrum-seg ${kindFilter === entry.kind ? "active" : ""}`}
             style={{
-              flexGrow: Math.max(entry.size, 1),
+              flexGrow: Math.max(amount(entry), 1),
               background: devKindCssVar(entry.kind),
             }}
-            title={`${DEV_KIND_LABEL[entry.kind]} · ${formatBytes(entry.size)}`}
+            title={reclaim
+              ? `${DEV_KIND_LABEL[entry.kind]} · ${label(entry)} reclaimable · ${formatBytes(entry.size)} listed`
+              : `${DEV_KIND_LABEL[entry.kind]} · ${formatBytes(entry.size)}`}
             onClick={() => toggle(entry.kind)}
           />
         ))}
@@ -1189,10 +1249,10 @@ function KindTape({
           onClick={() => onFilter("all")}
         >
           <span className="dev-kind-cell-label">All kinds</span>
-          <span className="dev-kind-cell-size">{formatBytes(totalBytes)}</span>
+          <span className="dev-kind-cell-size">{label(all)}</span>
         </button>
-        {totals.map((entry) => {
-          const share = totalBytes > 0 ? entry.size / totalBytes : 0;
+        {sorted.map((entry) => {
+          const share = allAmount > 0 ? amount(entry) / allAmount : 0;
           const selected = kindFilter === entry.kind;
           return (
             <button
@@ -1201,13 +1261,15 @@ function KindTape({
               className={`dev-kind-cell ${selected ? "active" : ""}`}
               aria-pressed={selected}
               onClick={() => toggle(entry.kind)}
-              title={DEV_KIND_LABEL[entry.kind]}
+              title={reclaim
+                ? `${DEV_KIND_LABEL[entry.kind]} · ${formatBytes(entry.size)} listed`
+                : DEV_KIND_LABEL[entry.kind]}
               style={{ "--cell-kind": devKindCssVar(entry.kind) }}
             >
               <span className="dev-kind-cell-top">
                 <span className="dev-kind-swatch" aria-hidden="true" />
                 <span className="dev-kind-cell-label">{DEV_KIND_SHORT[entry.kind]}</span>
-                <span className="dev-kind-cell-size">{formatBytes(entry.size)}</span>
+                <span className="dev-kind-cell-size">{label(entry)}</span>
               </span>
               <span className="dev-kind-cell-bar" aria-hidden="true">
                 <span className="dev-kind-cell-fill" style={{ width: `${Math.max(share * 100, 3)}%` }} />

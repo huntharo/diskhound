@@ -139,6 +139,7 @@ async function* iterateSortedRecords(
   filePath: string,
   caseSensitive: boolean,
   tmpDir: string,
+  sortChunk: number,
 ): AsyncGenerator<SortedRec> {
   const chunks: string[] = [];
   let buffer: SortedRec[] = [];
@@ -156,7 +157,7 @@ async function* iterateSortedRecords(
     filePath,
     async (record, key) => {
       buffer.push({ key, p: record.p, s: record.s });
-      if (buffer.length >= SORT_CHUNK) await flush();
+      if (buffer.length >= sortChunk) await flush();
     },
     caseSensitive,
   );
@@ -274,6 +275,7 @@ export async function computeFullDiffFromIndexFiles(
 ): Promise<FullDiffResult | null> {
   const caseSensitive = input.caseSensitive ?? defaultCaseSensitivity();
   const limit = defaultChangeLimit(input.limit);
+  const sortChunk = Math.max(1, Math.floor(input.sortChunkRecords ?? SORT_CHUNK));
 
   const [baselineSize, currentSize] = await Promise.all([
     safeFileSize(input.baselinePath),
@@ -289,8 +291,8 @@ export async function computeFullDiffFromIndexFiles(
   await FSP.mkdir(tmpDir, { recursive: true });
 
   try {
-    const baselineIter = iterateSortedRecords(input.baselinePath, caseSensitive, Path.join(tmpDir, "b"));
-    const currentIter = iterateSortedRecords(input.currentPath, caseSensitive, Path.join(tmpDir, "c"));
+    const baselineIter = iterateSortedRecords(input.baselinePath, caseSensitive, Path.join(tmpDir, "b"), sortChunk);
+    const currentIter = iterateSortedRecords(input.currentPath, caseSensitive, Path.join(tmpDir, "c"), sortChunk);
     let baseline = await baselineIter.next();
     let current = await currentIter.next();
 

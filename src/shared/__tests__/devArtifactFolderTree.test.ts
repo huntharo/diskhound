@@ -215,6 +215,37 @@ describe("sidecarFromFolderTreeFile", () => {
     ].join("\n"), "/");
   });
 
+  it("finds Terraform providers and names them after their lock file's folder", async () => {
+    const after = await expectSameAsLegacy([
+      line("/Users/me/infra/prod", [["/Users/me/infra/prod/.terraform", 800_003_000, 4]], [
+        [".terraform.lock.hcl", 1_000, 1],
+        ["main.tf", 500, 1],
+      ]),
+      line("/Users/me/infra/prod/.terraform", [
+        ["/Users/me/infra/prod/.terraform/providers", 800_000_000, 1],
+        ["/Users/me/infra/prod/.terraform/modules", 1_000, 1],
+      ], [["terraform.tfstate", 2_000, 1]]),
+      line("/Users/me/.terraform.d", [
+        ["/Users/me/.terraform.d/plugin-cache", 600_000_000, 1],
+        ["/Users/me/.terraform.d/plugins", 50_000_000, 1],
+      ]),
+    ].join("\n"), "/");
+    expect(reportFromSidecar(after).artifacts).toEqual([
+      expect.objectContaining({
+        path: "/Users/me/infra/prod/.terraform/providers",
+        kind: "terraform",
+        projectName: "prod",
+        size: 800_000_000,
+      }),
+      expect.objectContaining({
+        path: "/Users/me/.terraform.d/plugin-cache",
+        kind: "terraform",
+        projectName: "Unscoped",
+        size: 600_000_000,
+      }),
+    ]);
+  });
+
   it("matches the old reader on random paths built from artifact names", async () => {
     // Guards the reader's shortcut: only rows whose last two segments
     // name an artifact are decoded. Any classifyArtifactPath rule whose
@@ -228,6 +259,7 @@ describe("sidecarFromFolderTreeFile", () => {
     // Names that only matter after an artifact name, and plain ones.
     const otherNames = [
       "debug", "release", "doc", "incremental", "registry", "mod", "ccache", "sccache", "yarn", "pnpm", "store",
+      "providers", "plugins", "plugin-cache",
       "src", "lib", "feat", "a", "b",
     ];
     const pickName = () => {

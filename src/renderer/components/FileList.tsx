@@ -12,9 +12,8 @@ import {
 } from "../lib/deletedPaths";
 import { formatBytes, formatCount, humanAge, relativePath } from "../lib/format";
 import {
-  captureFreeBytes,
   checkFreedSpace,
-  freedSpaceCheckEnabled,
+  freeBytesBeforeDelete,
   permanentDeleteFreesNote,
 } from "../lib/freedSpaceCheck";
 import { useConfirmPermanentDelete, useExcludedFolderProtection, usePathActions } from "../lib/hooks";
@@ -305,7 +304,7 @@ export function FileList({ snapshot, initialFilter }: Props) {
   ) => {
     markBusy(path);
     const expectedBytes = opts?.deletedAction === "delete" ? opts.expectedBytes ?? 0 : 0;
-    const freeBefore = freedSpaceCheckEnabled(expectedBytes) ? await captureFreeBytes(path) : null;
+    const freeBefore = await freeBytesBeforeDelete(path, expectedBytes);
     const result = await action();
     clearBusy(path);
     if (result.ok) {
@@ -346,7 +345,7 @@ export function FileList({ snapshot, initialFilter }: Props) {
     }
     const expectedBytes = label === "delete" ? targets.reduce((sum, f) => sum + f.size, 0) : 0;
     const checkPath = targets[0]!.path;
-    const freeBefore = freedSpaceCheckEnabled(expectedBytes) ? await captureFreeBytes(checkPath) : null;
+    const freeBefore = await freeBytesBeforeDelete(checkPath, expectedBytes);
 
     const ok: string[] = [];
     for (const f of targets) {

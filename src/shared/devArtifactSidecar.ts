@@ -42,6 +42,7 @@ export const PROJECT_MARKERS: ReadonlySet<string> = new Set([
   "gemfile",
   "mix.exs",
   "package.swift",
+  ".terraform.lock.hcl",
 ]);
 
 /** Names the full scanner looks for under a project. Rescan does not

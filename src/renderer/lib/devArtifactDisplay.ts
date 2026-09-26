@@ -47,6 +47,11 @@ const GENERIC_LEAVES = new Set([
   "cmakefiles",
   "cmake-build-debug",
   "cmake-build-release",
+  ".terraform",
+  ".terraform.d",
+  "providers",
+  "plugins",
+  "plugin-cache",
 ]);
 
 function stripDrive(parts: string[]): string[] {

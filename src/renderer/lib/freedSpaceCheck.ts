@@ -40,6 +40,15 @@ export function freedSpaceCheckEnabled(expectedBytes: number): boolean {
   return nativeApi.platform === "darwin" && expectedBytes >= FREED_CHECK_MIN_BYTES;
 }
 
+/**
+ * Free bytes before a permanent delete of `expectedBytes` at `path`, or
+ * null when the check is off (not macOS, too small) or free space is
+ * unknown. Pass the result to `checkFreedSpace` after the delete.
+ */
+export async function freeBytesBeforeDelete(path: string, expectedBytes: number): Promise<number | null> {
+  return freedSpaceCheckEnabled(expectedBytes) ? captureFreeBytes(path) : null;
+}
+
 /** Free bytes on the volume holding `path`, or null when unknown. */
 export async function captureFreeBytes(path: string): Promise<number | null> {
   try {
@@ -66,8 +75,16 @@ export async function checkFreedSpace(opts: {
 
   await sleep(SETTLE_MS);
   let freeAfter = await captureFreeBytes(opts.path);
+  // Judge only what the caller expected back (clone copies excluded), so
+  // a delete that behaved skips the second look and its fresh report.
   const firstLook = explainFreedShortfall(
-    { expectedBytes: opts.expectedBytes, freeBefore: opts.freeBefore, freeAfter, report: null },
+    {
+      expectedBytes: opts.expectedBytes,
+      freeBefore: opts.freeBefore,
+      freeAfter,
+      report: null,
+      sharedBytes: opts.sharedBytes,
+    },
     formatBytes,
   );
   if (!firstLook) return;

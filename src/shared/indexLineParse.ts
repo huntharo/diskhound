@@ -11,6 +11,7 @@
  *                          name (Unix); equal ids = one file
  *   ,"v":<private bytes>   APFS clone: what deleting it alone frees (< s)
  *   ,"k":1                 APFS clone: shares blocks with another file
+ *                          (without `v`: private size unknown, count 0)
  *
  * Fast path matches the folder-tree worker's FILE_LINE_RE spirit.
  * Odd field order falls back to JSON.parse. Does not change the
@@ -23,7 +24,12 @@ export type ParsedIndexLine =
   | { t: "d"; p: string }
   | { t: "f"; p: string; s: number; m: number; h?: 1; i?: string; v?: number; k?: 1 };
 
-const INDEX_FILE_LINE_RE =
+/**
+ * Canonical file line. Groups: 1 escaped path, 2 size, 3 mtime, 4 `h`,
+ * 5 link id, 6 private bytes, 7 `k`. The folder-tree worker matches with
+ * it too, so a new suffix is added here once.
+ */
+export const INDEX_FILE_LINE_RE =
   /^\{"p":"((?:\\.|[^"\\])*)","s":(\d+),"m":(\d+)(,"h":1)?(?:,"i":"(\d+:\d+)")?(?:,"v":(\d+))?(,"k":1)?\}$/;
 const INDEX_DIR_LINE_RE = /^\{"p":"((?:\\.|[^"\\])*)","t":"d","m":(\d+)\}$/;
 

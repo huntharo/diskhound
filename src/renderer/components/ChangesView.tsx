@@ -21,6 +21,7 @@ import {
 import { basename, formatBytes, relativeTime } from "../lib/format";
 import { useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { saveLocalPreference } from "../lib/localPreference";
+import { reportPollFailure } from "../lib/pollFailure";
 import { nativeApi } from "../nativeApi";
 import { toast } from "./Toasts";
 import { FileIcon } from "./FileIcon";
@@ -138,7 +139,10 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
   // Schedule info: fetch on mount + refresh every 30s so the "next scan in X"
   // label stays roughly current. Also refresh after scans complete.
   const refreshScheduleInfo = useCallback(async () => {
-    const info = await nativeApi.getScanScheduleInfo();
+    const info = await nativeApi.getScanScheduleInfo().catch((error: unknown) => {
+      reportPollFailure("ChangesView schedule", error);
+      return null;
+    });
     if (info) setScheduleInfo(info);
   }, []);
 
@@ -401,7 +405,8 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
   }, [diffMode]);
 
   const [fullDiffError, setFullDiffError] = useState<string | null>(null);
-  const loadFullDiff = useCallback(async () => {
+  /** `retryFailed`: a button click, so a pair that failed is computed again. */
+  const loadFullDiff = useCallback(async (options?: { retryFailed?: boolean }) => {
     if (!diff) return;
     const seq = ++fullDiffSeqRef.current;
     const baselineId = diff.baselineId;
@@ -409,7 +414,7 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
     setFullDiffLoading(true);
     setFullDiffError(null);
     try {
-      const result = await nativeApi.computeFullScanDiff(baselineId, currentId, 1000);
+      const result = await nativeApi.computeFullScanDiff(baselineId, currentId, 1000, options);
       if (seq !== fullDiffSeqRef.current) return;
       if (result) {
         setFullDiff(result);
@@ -843,7 +848,7 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
                       <div className="changes-full-diff-title">Full diff didn't complete</div>
                       <div className="changes-full-diff-hint">{fullDiffError}</div>
                     </div>
-                    <button className="action-btn" onClick={() => void loadFullDiff()}>
+                    <button className="action-btn" onClick={() => void loadFullDiff({ retryFailed: true })}>
                       Retry
                     </button>
                   </div>
@@ -858,7 +863,7 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
                           : "This pair needs the persisted file indexes to build the full-file diff the first time."}
                       </div>
                     </div>
-                    <button className="action-btn" onClick={() => void loadFullDiff()}>
+                    <button className="action-btn" onClick={() => void loadFullDiff({ retryFailed: true })}>
                       Load full file diff
                     </button>
                   </div>

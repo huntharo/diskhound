@@ -19,17 +19,18 @@
 //! a clone gives it a fresh id, refcnt 1, private 16 KB (the rewritten
 //! extent) while the other two drop to refcnt 2.
 //!
-//! Cost, measured warm-cache on ~/github (623k files, 235 GB incl. a
-//! 190 GB Rust target/): one extra `open` + `getattrlistbulk` per
-//! directory for CLONEID + CLONE_REFCNT + EXT_FLAGS is free within noise
-//! (walk 16.0–16.7 s off vs 15.1–16.0 s on) — it runs inside jwalk's
-//! parallel `process_read_dir` callback. PRIVATESIZE is not: APFS walks
-//! each file's extents to compute it, ~10 µs per large file, and asking
-//! for it on every file made the same walk 20–25 % slower. So private
-//! size is fetched per file (`getattrlistat`) only for files the flags
-//! mark as clones — the files where it differs from what `st_blocks`
-//! already says, snapshots aside. Snapshot-held space is reported per
-//! volume instead (src/shared/macStorageAccounting.ts).
+//! How the walker gets them: dua-core already reads every folder with
+//! `getattrlistbulk`, and with `apfs_clone_metadata` that read also
+//! returns CLONEID for files flagged EF_MAY_SHARE_BLOCKS. Only those
+//! files take one more `getattrlist`, for PRIVATESIZE and CLONE_REFCNT,
+//! so no folder is read twice. (Reading each folder a second time for
+//! these attributes cost about +5 s user and +5.5 s system on a 623k-file
+//! walk.) PRIVATESIZE is the dear one: APFS walks each file's extents to
+//! compute it, ~10 µs per large file, and asking for it on every file
+//! made the walk 20–25 % slower. Clones are the files where it differs
+//! from what `st_blocks` already says, snapshots aside. Snapshot-held
+//! space is reported per volume instead
+//! (src/shared/macStorageAccounting.ts).
 //!
 //! DISKHOUND_NO_CLONE_ATTRS=1 turns the whole pass off.
 
@@ -158,6 +159,7 @@ impl CloneGroups {
 
     /// Record one file. `root` is its Dev root id or OUTSIDE_ROOTS.
     pub fn add(&mut self, attrs: &CloneAttrs, allocated: u64, root: u32) {
+        crate::work::step();
         let Some((clone_id, refcnt)) = attrs.full_clone_group() else {
             return;
         };
@@ -216,6 +218,7 @@ impl CloneGroups {
         let mut out = vec![RootCloneShare::default(); root_count];
         let mut edges: HashMap<(u32, u32), u64> = HashMap::new();
         for rec in self.groups.values() {
+            crate::work::step();
             let dev_roots: Vec<u32> = rec
                 .roots
                 .iter()
@@ -235,6 +238,7 @@ impl CloneGroups {
             }
             for (i, a) in dev_roots.iter().enumerate() {
                 for b in &dev_roots[i + 1..] {
+                    crate::work::step();
                     let key = if a < b { (*a, *b) } else { (*b, *a) };
                     if let Some(bytes) = edges.get_mut(&key) {
                         *bytes = bytes.saturating_add(rec.alloc);
@@ -249,7 +253,10 @@ impl CloneGroups {
             out[b as usize].neighbors.push((a, bytes));
         }
         for share in &mut out {
-            share.neighbors.sort_by(|x, y| y.1.cmp(&x.1).then(x.0.cmp(&y.0)));
+            share.neighbors.sort_by(|x, y| {
+                crate::work::step();
+                y.1.cmp(&x.1).then(x.0.cmp(&y.0))
+            });
         }
         out
     }
@@ -259,53 +266,43 @@ impl CloneGroups {
 
 #[cfg(target_os = "macos")]
 mod reader {
-    use super::CloneAttrs;
-    use std::collections::HashMap;
-    use std::ffi::{OsStr, OsString};
+    use super::{CloneAttrs, EF_MAY_SHARE_BLOCKS};
+    use std::num::NonZeroU64;
     use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
-    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+    use std::sync::atomic::{AtomicU32, Ordering};
 
-    // <sys/attr.h> / <sys/vnode.h>. ABI-stable; declared here because
-    // libc 0.2.185 lacks ATTR_CMN_ERROR and ATTR_CMNEXT_CLONE_REFCNT.
+    // <sys/attr.h>. ABI-stable; declared here because libc 0.2.185 lacks
+    // ATTR_CMNEXT_CLONE_REFCNT.
     const ATTR_BIT_MAP_COUNT: u16 = 5;
-    const ATTR_CMN_NAME: u32 = 0x0000_0001;
-    const ATTR_CMN_OBJTYPE: u32 = 0x0000_0008;
-    const ATTR_CMN_ERROR: u32 = 0x2000_0000;
     const ATTR_CMN_RETURNED_ATTRS: u32 = 0x8000_0000;
     const ATTR_CMNEXT_PRIVATESIZE: u32 = 0x0000_0008;
-    const ATTR_CMNEXT_CLONEID: u32 = 0x0000_0100;
-    const ATTR_CMNEXT_EXT_FLAGS: u32 = 0x0000_0200;
     const ATTR_CMNEXT_CLONE_REFCNT: u32 = 0x0000_1000;
+    const FSOPT_NOFOLLOW: u64 = 0x0000_0001;
     const FSOPT_PACK_INVAL_ATTRS: u64 = 0x0000_0008;
     const FSOPT_ATTR_CMN_EXTENDED: u64 = 0x0000_0020;
-    const VREG: u32 = 1;
 
-    const FSOPT_NOFOLLOW: u64 = 0x0000_0001;
-
-    /// Bulk attributes: cheap, read for every file in the directory.
-    const FULL_MASK: u32 = ATTR_CMNEXT_CLONEID | ATTR_CMNEXT_EXT_FLAGS | ATTR_CMNEXT_CLONE_REFCNT;
-    /// Fallback for kernels that reject CLONE_REFCNT / CLONEID with
-    /// EINVAL: the flags alone still say which files are clones.
-    const BASIC_MASK: u32 = ATTR_CMNEXT_EXT_FLAGS;
-
-    /// Current fork-attr mask; 0 once the kernel rejected both masks.
+    const FULL_MASK: u32 = ATTR_CMNEXT_PRIVATESIZE | ATTR_CMNEXT_CLONE_REFCNT;
+    /// Current per-file fork-attr mask. A kernel that rejects an
+    /// attribute with EINVAL steps it down once: CLONE_REFCNT goes first
+    /// (the private size alone still says what a clone frees), then 0.
     static FORK_MASK: AtomicU32 = AtomicU32::new(FULL_MASK);
-    /// Cleared if the per-file PRIVATESIZE lookup is ever rejected.
-    static PRIVATE_SIZE_OK: AtomicBool = AtomicBool::new(true);
-    /// 0 = unknown, 1 = enabled, 2 = disabled (env / non-APFS root).
-    static STATE: AtomicU8 = AtomicU8::new(0);
 
-    /// Decide once per scan whether to pay for the extra syscall.
-    pub fn enable_for_root(root: &Path) -> bool {
-        let enabled = std::env::var("DISKHOUND_NO_CLONE_ATTRS").as_deref() != Ok("1")
-            && is_apfs(root);
-        STATE.store(if enabled { 1 } else { 2 }, Ordering::Relaxed);
-        enabled
+    #[repr(C)]
+    struct AttrList {
+        bitmapcount: u16,
+        reserved: u16,
+        commonattr: u32,
+        volattr: u32,
+        dirattr: u32,
+        fileattr: u32,
+        forkattr: u32,
     }
 
-    pub fn enabled() -> bool {
-        STATE.load(Ordering::Relaxed) == 1 && FORK_MASK.load(Ordering::Relaxed) != 0
+    /// Decide once per scan whether to read clone attributes: on unless
+    /// DISKHOUND_NO_CLONE_ATTRS=1, and only on an APFS root.
+    pub fn enable_for_root(root: &Path) -> bool {
+        std::env::var("DISKHOUND_NO_CLONE_ATTRS").as_deref() != Ok("1") && is_apfs(root)
     }
 
     fn is_apfs(path: &Path) -> bool {
@@ -325,15 +322,74 @@ mod reader {
         name == b"apfs"
     }
 
-    #[repr(C)]
-    struct AttrList {
-        bitmapcount: u16,
-        reserved: u16,
-        commonattr: u32,
-        volattr: u32,
-        dirattr: u32,
-        fileattr: u32,
-        forkattr: u32,
+    /// Clone attributes of one regular file, given the clone id the
+    /// walker's bulk folder read returned (Some only for files that may
+    /// share blocks). Other files cost nothing and report no sharing.
+    pub fn file_clone_attrs(path: &Path, clone_id: Option<NonZeroU64>) -> CloneAttrs {
+        let Some(clone_id) = clone_id else {
+            return CloneAttrs::default();
+        };
+        let (private_size, clone_refcnt) = private_size_and_refcnt(path);
+        CloneAttrs {
+            private_size,
+            clone_id: clone_id.get(),
+            clone_refcnt,
+            ext_flags: EF_MAY_SHARE_BLOCKS,
+        }
+    }
+
+    fn private_size_and_refcnt(path: &Path) -> (Option<u64>, u32) {
+        let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+            return (None, 0);
+        };
+        loop {
+            let mask = FORK_MASK.load(Ordering::Relaxed);
+            if mask == 0 {
+                return (None, 0);
+            }
+            let mut attrs = AttrList {
+                bitmapcount: ATTR_BIT_MAP_COUNT,
+                reserved: 0,
+                commonattr: ATTR_CMN_RETURNED_ATTRS,
+                volattr: 0,
+                dirattr: 0,
+                fileattr: 0,
+                forkattr: mask,
+            };
+            // With FSOPT_PACK_INVAL_ATTRS every requested attribute keeps
+            // its slot, in bit order: u32 length | attribute_set_t
+            // returned (20) | off_t private size | u32 clone refcnt.
+            let mut buf = [0u8; 40];
+            let rc = unsafe {
+                libc::getattrlist(
+                    c_path.as_ptr(),
+                    &mut attrs as *mut AttrList as *mut libc::c_void,
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    buf.len(),
+                    (FSOPT_NOFOLLOW | FSOPT_ATTR_CMN_EXTENDED | FSOPT_PACK_INVAL_ATTRS) as libc::c_uint,
+                )
+            };
+            if rc != 0 {
+                if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL) {
+                    let next = if mask == FULL_MASK { ATTR_CMNEXT_PRIVATESIZE } else { 0 };
+                    if FORK_MASK.compare_exchange(mask, next, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+                        eprintln!(
+                            "[diskhound-native-scanner] clone attrs: kernel rejected mask {mask:#x}, falling back to {next:#x}"
+                        );
+                    }
+                    continue;
+                }
+                return (None, 0);
+            }
+            let returned = read_u32(&buf, 4 + 16).unwrap_or(0);
+            let private = (returned & ATTR_CMNEXT_PRIVATESIZE != 0).then(|| read_u64(&buf, 24)).flatten();
+            let refcnt = if mask & ATTR_CMNEXT_CLONE_REFCNT != 0 && returned & ATTR_CMNEXT_CLONE_REFCNT != 0 {
+                read_u32(&buf, 32).unwrap_or(0)
+            } else {
+                0
+            };
+            return (private, refcnt);
+        }
     }
 
     fn read_u32(buf: &[u8], at: usize) -> Option<u32> {
@@ -343,213 +399,10 @@ mod reader {
     fn read_u64(buf: &[u8], at: usize) -> Option<u64> {
         buf.get(at..at + 8).map(|b| u64::from_ne_bytes(b.try_into().unwrap()))
     }
-
-    fn read_i32(buf: &[u8], at: usize) -> Option<i32> {
-        buf.get(at..at + 4).map(|b| i32::from_ne_bytes(b.try_into().unwrap()))
-    }
-
-    /// Clone attributes for every regular file directly inside `dir`,
-    /// keyed by file name. None when the directory cannot be read or the
-    /// volume returned nothing useful (non-APFS, old kernel).
-    pub fn read_dir_clone_attrs(dir: &Path) -> Option<HashMap<OsString, CloneAttrs>> {
-        loop {
-            let mask = FORK_MASK.load(Ordering::Relaxed);
-            if mask == 0 {
-                return None;
-            }
-            match read_with_mask(dir, mask) {
-                Ok(map) => return map,
-                Err(libc::EINVAL) => {
-                    // A nested non-APFS mount (exFAT stick, HFS+ DMG
-                    // under /Volumes) rejects the extended attrs too.
-                    // That says nothing about APFS, so skip just this
-                    // directory instead of lowering the global mask.
-                    if !is_apfs(dir) {
-                        return None;
-                    }
-                    // Kernel rejected an attribute bit; step down once.
-                    let next = if mask == FULL_MASK { BASIC_MASK } else { 0 };
-                    let _ = FORK_MASK.compare_exchange(mask, next, Ordering::Relaxed, Ordering::Relaxed);
-                    eprintln!(
-                        "[diskhound-native-scanner] clone attrs: kernel rejected mask {mask:#x}, falling back to {next:#x}"
-                    );
-                }
-                Err(_) => return None,
-            }
-        }
-    }
-
-    fn read_with_mask(dir: &Path, fork_mask: u32) -> Result<Option<HashMap<OsString, CloneAttrs>>, i32> {
-        let c_dir = std::ffi::CString::new(dir.as_os_str().as_bytes()).map_err(|_| libc::ENOENT)?;
-        let fd = unsafe { libc::open(c_dir.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO));
-        }
-        let result = read_fd(fd, fork_mask);
-        unsafe { libc::close(fd) };
-        result
-    }
-
-    fn read_fd(fd: i32, fork_mask: u32) -> Result<Option<HashMap<OsString, CloneAttrs>>, i32> {
-        let mut attrs = AttrList {
-            bitmapcount: ATTR_BIT_MAP_COUNT,
-            reserved: 0,
-            commonattr: ATTR_CMN_RETURNED_ATTRS | ATTR_CMN_NAME | ATTR_CMN_ERROR | ATTR_CMN_OBJTYPE,
-            volattr: 0,
-            dirattr: 0,
-            fileattr: 0,
-            forkattr: fork_mask,
-        };
-        // With FSOPT_PACK_INVAL_ATTRS every requested attribute occupies
-        // its slot (zero-filled when invalid), so offsets are fixed:
-        //   u32 length | attribute_set_t returned (20) | u32 error |
-        //   attrreference_t name (8) | u32 objtype | fork attrs in bit
-        //   order: clone id u64, ext flags u64, refcnt u32
-        const RETURNED_AT: usize = 4;
-        const ERROR_AT: usize = 24;
-        const NAME_AT: usize = 28;
-        const OBJTYPE_AT: usize = 36;
-        let mut fork_offsets = [None::<usize>; 3];
-        let mut at = 40usize;
-        for (i, (bit, width)) in [
-            (ATTR_CMNEXT_CLONEID, 8usize),
-            (ATTR_CMNEXT_EXT_FLAGS, 8),
-            (ATTR_CMNEXT_CLONE_REFCNT, 4),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            if fork_mask & bit != 0 {
-                fork_offsets[i] = Some(at);
-                at += width;
-            }
-        }
-
-        let mut buf = vec![0u8; 128 * 1024];
-        let mut out: HashMap<OsString, CloneAttrs> = HashMap::new();
-        loop {
-            let count = unsafe {
-                libc::getattrlistbulk(
-                    fd,
-                    &mut attrs as *mut AttrList as *mut libc::c_void,
-                    buf.as_mut_ptr() as *mut libc::c_void,
-                    buf.len(),
-                    FSOPT_PACK_INVAL_ATTRS | FSOPT_ATTR_CMN_EXTENDED,
-                )
-            };
-            if count < 0 {
-                let err = std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EIO);
-                // A partial map is still useful; only surface errors
-                // (EINVAL in particular) when nothing was read.
-                return if out.is_empty() { Err(err) } else { Ok(Some(out)) };
-            }
-            if count == 0 {
-                break;
-            }
-            let mut entry_at = 0usize;
-            for _ in 0..count {
-                let Some(len) = read_u32(&buf, entry_at).map(|l| l as usize) else {
-                    break;
-                };
-                if len == 0 || entry_at + len > buf.len() {
-                    break;
-                }
-                let entry = &buf[entry_at..entry_at + len];
-                entry_at += len;
-
-                if read_u32(entry, ERROR_AT).unwrap_or(1) != 0 {
-                    continue;
-                }
-                if read_u32(entry, OBJTYPE_AT) != Some(VREG) {
-                    continue;
-                }
-                let returned_fork = read_u32(entry, RETURNED_AT + 16).unwrap_or(0);
-                if returned_fork & ATTR_CMNEXT_EXT_FLAGS == 0 {
-                    continue;
-                }
-                let (Some(name_off), Some(name_len)) =
-                    (read_i32(entry, NAME_AT), read_u32(entry, NAME_AT + 4))
-                else {
-                    continue;
-                };
-                let start = NAME_AT as isize + name_off as isize;
-                if start < 0 || name_len == 0 {
-                    continue;
-                }
-                let start = start as usize;
-                let Some(raw) = entry.get(start..start + name_len as usize) else {
-                    continue;
-                };
-                // attr_length includes the trailing NUL.
-                let name = raw.split(|b| *b == 0).next().unwrap_or(raw);
-                let get64 = |slot: usize, bit: u32| -> u64 {
-                    match fork_offsets[slot] {
-                        Some(off) if returned_fork & bit != 0 => read_u64(entry, off).unwrap_or(0),
-                        _ => 0,
-                    }
-                };
-                let refcnt = match fork_offsets[2] {
-                    Some(off) if returned_fork & ATTR_CMNEXT_CLONE_REFCNT != 0 => read_u32(entry, off).unwrap_or(0),
-                    _ => 0,
-                };
-                let mut attrs = CloneAttrs {
-                    private_size: None,
-                    clone_id: get64(0, ATTR_CMNEXT_CLONEID),
-                    ext_flags: get64(1, ATTR_CMNEXT_EXT_FLAGS),
-                    clone_refcnt: refcnt,
-                };
-                if attrs.may_share() {
-                    attrs.private_size = private_size_at(fd, name);
-                }
-                out.insert(OsStr::from_bytes(name).to_os_string(), attrs);
-            }
-        }
-        Ok(if out.is_empty() { None } else { Some(out) })
-    }
-
-    /// ATTR_CMNEXT_PRIVATESIZE for one entry of an open directory.
-    fn private_size_at(dir_fd: i32, name: &[u8]) -> Option<u64> {
-        if !PRIVATE_SIZE_OK.load(Ordering::Relaxed) {
-            return None;
-        }
-        let c_name = std::ffi::CString::new(name).ok()?;
-        let mut attrs = AttrList {
-            bitmapcount: ATTR_BIT_MAP_COUNT,
-            reserved: 0,
-            commonattr: ATTR_CMN_RETURNED_ATTRS,
-            volattr: 0,
-            dirattr: 0,
-            fileattr: 0,
-            forkattr: ATTR_CMNEXT_PRIVATESIZE,
-        };
-        // u32 length | attribute_set_t returned (20) | off_t private
-        let mut buf = [0u8; 32];
-        let rc = unsafe {
-            libc::getattrlistat(
-                dir_fd,
-                c_name.as_ptr(),
-                &mut attrs as *mut AttrList as *mut libc::c_void,
-                buf.as_mut_ptr() as *mut libc::c_void,
-                buf.len(),
-                (FSOPT_NOFOLLOW | FSOPT_ATTR_CMN_EXTENDED | FSOPT_PACK_INVAL_ATTRS) as libc::c_ulong,
-            )
-        };
-        if rc != 0 {
-            if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL) {
-                PRIVATE_SIZE_OK.store(false, Ordering::Relaxed);
-            }
-            return None;
-        }
-        let returned_fork = read_u32(&buf, 4 + 16)?;
-        if returned_fork & ATTR_CMNEXT_PRIVATESIZE == 0 {
-            return None;
-        }
-        read_u64(&buf, 24)
-    }
 }
 
 #[cfg(target_os = "macos")]
-pub use reader::{enable_for_root, enabled, read_dir_clone_attrs};
+pub use reader::{enable_for_root, file_clone_attrs};
 
 #[cfg(test)]
 mod tests {
@@ -562,6 +415,31 @@ mod tests {
             clone_refcnt: refcnt,
             ext_flags: EF_MAY_SHARE_BLOCKS | EF_SHARES_ALL_BLOCKS,
         }
+    }
+
+    /// AGENTS.md scaling rule: count `work::step()`s at N and 8N, with the
+    /// Dev root count growing 8× too, and allow 16× for log factors.
+    #[test]
+    fn clone_groups_scale_linearly() {
+        fn assert_scales(label: &str, small: u64, large: u64, cap: u64) {
+            let growth = large as f64 / small as f64;
+            eprintln!("{label}: {small} -> {large} steps ({growth:.1}x), cap {cap}");
+            assert!(growth <= 16.0, "{label} grew {growth:.1}x from N to 8N");
+            assert!(large <= cap, "{label} took {large} steps at 8N, over {cap}");
+        }
+        // Five-way clones spread over consecutive roots, so every group
+        // fills its root slots and links roots pairwise.
+        let groups = |files: usize, roots: u32| {
+            crate::work::take();
+            let mut g = CloneGroups::new();
+            for i in 0..files {
+                g.add(&clone_file((i / 5) as u64 + 1, 5), 4096, i as u32 % roots);
+            }
+            assert_eq!(g.attribute(roots as usize).len(), roots as usize);
+            crate::work::take()
+        };
+        let (n, k) = (4_000, 50);
+        assert_scales("clone groups", groups(n, k), groups(8 * n, 8 * k), 20 * 8 * n as u64);
     }
 
     #[test]
@@ -663,7 +541,7 @@ mod tests {
     }
 
     /// End-to-end against the real kernel: clonefile(2) a file in a temp
-    /// dir and read it back through getattrlistbulk.
+    /// dir, walk it with dua-core as the scanner does, and read the rest.
     #[cfg(target_os = "macos")]
     #[test]
     fn reads_clone_attrs_from_apfs() {
@@ -671,7 +549,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("dh-clone-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        if !reader::enable_for_root(&dir) {
+        let dir = dir.canonicalize().unwrap();
+        if !enable_for_root(&dir) {
             eprintln!("temp dir is not APFS; skipping");
             return;
         }
@@ -687,21 +566,26 @@ mod tests {
             fn clonefile(src: *const libc::c_char, dst: *const libc::c_char, flags: u32) -> libc::c_int;
         }
         assert_eq!(unsafe { clonefile(src.as_ptr(), dst.as_ptr(), 0) }, 0);
-        std::fs::create_dir(dir.join("subdir")).unwrap();
+        std::fs::write(dir.join("plain.bin"), vec![1u8; 64 * 1024]).unwrap();
 
-        let map = read_dir_clone_attrs(&dir).expect("clone attrs");
-        assert_eq!(map.len(), 2, "directories are skipped: {map:?}");
-        let a = map[std::ffi::OsStr::new("orig.bin")];
-        let b = map[std::ffi::OsStr::new("clone.bin")];
+        let options = dua_core::Options { apfs_clone_metadata: true, ..dua_core::Options::default() };
+        let mut attrs = HashMap::new();
+        for entry in dua_core::walk(&dir, 1, dua_core::Order::Completion, options, |_| true) {
+            let entry = entry.unwrap();
+            if !entry.file_type.is_file() {
+                continue;
+            }
+            let clone_id = entry.metadata.as_ref().unwrap().as_ref().unwrap().clone_id();
+            let name = entry.file_name.to_string_lossy().into_owned();
+            attrs.insert(name, file_clone_attrs(&entry.path(), clone_id));
+        }
+        let (a, b, plain) = (attrs["orig.bin"], attrs["clone.bin"], attrs["plain.bin"]);
         assert!(a.may_share() && b.may_share());
+        assert!(!plain.may_share());
         assert_eq!(a.private_size, Some(0));
         assert_eq!(b.private_size, Some(0));
-        if a.clone_id != 0 {
-            assert_eq!(a.clone_id, b.clone_id);
-        }
-        if a.clone_refcnt != 0 {
-            assert_eq!(a.full_clone_group().map(|g| g.1), Some(2));
-        }
+        assert_eq!(a.clone_id, b.clone_id);
+        assert_eq!(a.full_clone_group().map(|g| g.1), Some(2));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

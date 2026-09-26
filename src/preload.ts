@@ -160,8 +160,8 @@ const api: DiskhoundNativeApi = {
   hasScanIndexForPath: (rootPath) => ipcRenderer.invoke("diskhound:has-scan-index-for-path", rootPath),
   getFullDiffStatus: (baselineId, currentId, limit) =>
     ipcRenderer.invoke("diskhound:get-full-diff-status", baselineId, currentId, limit),
-  computeFullScanDiff: (baselineId, currentId, limit) =>
-    ipcRenderer.invoke("diskhound:compute-full-scan-diff", baselineId, currentId, limit),
+  computeFullScanDiff: (baselineId, currentId, limit, options) =>
+    ipcRenderer.invoke("diskhound:compute-full-scan-diff", baselineId, currentId, limit, options),
   getTreemapFiles: (rootPath, limit) =>
     ipcRenderer.invoke("diskhound:get-treemap-files", rootPath, limit),
   getFolderChildren: (rootPath, parentPath) =>

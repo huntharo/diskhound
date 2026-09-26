@@ -29,7 +29,6 @@ import {
   type DevBranch,
   type DiskIoSnapshot,
   type FullDiffStatus,
-  type FullDiffResult,
   type MonitoringSnapshot,
   type NavigateViewPayload,
   type PathActionResult,
@@ -64,11 +63,13 @@ import {
 } from "./shared/diskMonitor";
 import { readDevBranch } from "./shared/devBranch";
 import { getStorageAccounting } from "./shared/macStorageAccounting";
-import { createScanSnapshotStore } from "./shared/scanStore";
+import { createScanSnapshotStore, type SnapshotWriteOptions } from "./shared/scanStore";
 import { createAffinityEnforcer, upsertAffinityRule } from "./shared/affinityEnforcer";
 import { createSettingsStore, type SettingsStore } from "./shared/settingsStore";
 import { createUpdaterStateStore } from "./shared/updaterStateStore";
 import { createWindowStateStore, type WindowStateStore } from "./shared/windowStateStore";
+import { CRASH_LOG_FILENAME, createCrashLog, formatRendererError } from "./shared/crashLog";
+import { createMemoryDiagnostics, type MemorySample } from "./shared/memoryDiagnostics";
 import {
   easyMove,
   easyMoveBack,
@@ -85,13 +86,11 @@ import {
 } from "./shared/permanentDeleteWorkerRuntime";
 import {
   clearAllHistory,
-  consumeLastPrunedIds,
   getAllEntries,
   getScanHistory,
   getLatestPair,
   initScanHistory,
   loadHistoricalSnapshot,
-  saveScanToHistory,
   setMaxHistoryPerRoot,
 } from "./shared/scanHistory";
 import { computeDiff } from "./shared/scanDiff";
@@ -153,19 +152,18 @@ import {
   deleteFullDiffCachesForScan,
   hasFullDiffCache,
   initFullDiffCacheStore,
-  readFullDiffCache,
-  writeFullDiffCache,
 } from "./shared/fullDiffCacheStore";
 import { createTreemapCache } from "./shared/treemapCache";
-import { initUsnCursorStore } from "./shared/usnCursorStore";
+import { flushUsnCursorStore, initUsnCursorStore } from "./shared/usnCursorStore";
 import {
   captureCursorAfterScan,
   checkUsnForAnyChanges,
-  getCursorForRoot,
-  runIncrementalScan,
 } from "./usnMonitor";
 import { setCursor, volumeForPath } from "./shared/usnCursorStore";
 import { resolveNativeScannerBinary } from "./nativeScanner";
+import { commitCompletedScan, settingsWithRecentScan } from "./scanCommit";
+import { runIncrementalRescan } from "./incrementalRescan";
+import { createFullDiffLoader, normalizeDiffLimit } from "./shared/fullDiffLoader";
 import { initNativeProcessSample } from "./nativeProcessSample";
 import { searchIndexFile } from "./shared/scanIndex";
 import { analyzeCleanupFromIndex } from "./shared/suggestions";
@@ -451,86 +449,34 @@ function createTrayIconImage(): Electron.NativeImage {
 // worker failures. The Settings UI has a "View crash logs" button so
 // users can zip-and-send the file when asking for help.
 //
-// Bounded by simple size-based rotation — once the file exceeds
-// CRASH_LOG_MAX_BYTES, we rename it to crash.log.old so we always keep
-// at least one archived copy without growing unbounded over months.
+// Crash-class tags append synchronously; everything else is buffered
+// for a couple of seconds and flushed at quit. Rotation, buffering and
+// repeat counting live in shared/crashLog.ts.
 
-const CRASH_LOG_FILENAME = "crash.log";
-const CRASH_LOG_ARCHIVE_FILENAME = "crash.log.old";
-const CRASH_LOG_MAX_BYTES = 1 * 1024 * 1024; // 1 MiB
+const crashLog = createCrashLog({
+  path: () => Path.join(app.getPath("userData"), CRASH_LOG_FILENAME),
+});
 
 function crashLogPath(): string {
-  return Path.join(app.getPath("userData"), CRASH_LOG_FILENAME);
-}
-function crashLogArchivePath(): string {
-  return Path.join(app.getPath("userData"), CRASH_LOG_ARCHIVE_FILENAME);
-}
-
-async function maybeRotateCrashLog(): Promise<void> {
-  try {
-    const stat = await FS.stat(crashLogPath());
-    if (stat.size > CRASH_LOG_MAX_BYTES) {
-      await FS.rename(crashLogPath(), crashLogArchivePath()).catch(() => {});
-    }
-  } catch {
-    // missing file is fine — nothing to rotate
-  }
+  return crashLog.path();
 }
 
 /**
  * Append a timestamped line to crash.log. Categorized by `tag` so it's
  * easy to grep for a specific failure class when triaging.
  */
-function writeCrashLog(tag: string, message: string): void {
-  const line = `[${new Date().toISOString()}] [${tag}] ${message}\n`;
-  try {
-    const logPath = crashLogPath();
-    // Use SYNC append for crash-class events so the breadcrumb is on
-    // disk before the dialog appears / process is killed. The earlier
-    // async appendFile silently lost entries when the process crashed
-    // before the microtask flushed — we'd see the "Unexpected error"
-    // dialog with no corresponding crash.log entry, making remote
-    // diagnosis impossible. Sync write is fine; we're already in an
-    // exceptional path where perf doesn't matter.
-    try { FS_SYNC.mkdirSync(Path.dirname(logPath), { recursive: true }); } catch { /* ok */ }
-    FS_SYNC.appendFileSync(logPath, line);
-  } catch { /* best effort — disk full / readonly userData / etc */ }
-  // Rotate opportunistically — cheap check, runs on a microtask so it
-  // doesn't block the writer.
-  void maybeRotateCrashLog();
+function writeCrashLog(tag: string, message: string, options?: { sync?: boolean }): void {
+  crashLog.write(tag, message, options);
 }
+
+// Buffered lines and repeat counts reach disk on every way out:
+// will-quit covers app.quit(), "exit" covers process.exit().
+app.on("will-quit", () => crashLog.flushAll());
+process.on("exit", () => crashLog.flushAll());
 
 // Back-compat alias — older call sites still use writeStartupLog.
 function writeStartupLog(message: string): void {
   writeCrashLog("startup", message);
-}
-
-/** Native writes the Dev sidecar before Done. Rename pending → history
- *  id before the UI can open Dev. Brief retry covers a flush race. */
-async function adoptTempDevSidecar(tempPath: string, destPath: string): Promise<void> {
-  const deadline = Date.now() + 4_000;
-  while (Date.now() < deadline) {
-    try {
-      await FS.access(tempPath);
-      await FS.rename(tempPath, destPath);
-      writeCrashLog(
-        "dev-artifacts-sidecar",
-        `renamed ${Path.basename(tempPath)} -> ${Path.basename(destPath)}`,
-      );
-      return;
-    } catch {
-      try {
-        await FS.access(destPath);
-        return;
-      } catch {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-    }
-  }
-  writeCrashLog(
-    "dev-artifacts-sidecar",
-    `rename missed ${Path.basename(tempPath)}; Dev open will adopt a matching pending sidecar`,
-  );
 }
 
 // Errors codes that we treat as "routine, not user-actionable":
@@ -571,13 +517,19 @@ process.on("uncaughtException", (err) => {
     ?? (err as { message?: string })?.message
     ?? String(err);
   const code = (err as { code?: string })?.code ?? "";
-  writeCrashLog("main-uncaught", `${code ? `[${code}] ` : ""}${stackOrMsg}`);
-  if (isRoutineFsError(err)) {
+  const routine = isRoutineFsError(err);
+  // A routine error doesn't end in a dialog or a dead process, so its
+  // line can wait for the next buffered flush like any other.
+  writeCrashLog("main-uncaught", `${code ? `[${code}] ` : ""}${stackOrMsg}`, routine ? { sync: false } : undefined);
+  if (routine) {
     // Silent: the user can't do anything about a file that vanished
     // mid-scan. The crash.log entry above is sufficient for us to
     // diagnose if the rate gets out of hand.
     return;
   }
+  // The dialog blocks the main thread, and the user may kill the app
+  // from it. Whatever is buffered goes to disk first.
+  crashLog.flush();
   try {
     dialog.showErrorBox(
       "DiskHound — Unexpected error",
@@ -597,9 +549,8 @@ process.on("unhandledRejection", (reason) => {
  * Called from the periodic diagnostic + on demand (e.g. when a user
  * clicks "Refresh" in the crash-log viewer).
  */
-function describeMemoryUsage(): string {
+function describeMemoryUsage(mem: NodeJS.MemoryUsage = process.memoryUsage()): string {
   const mb = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(0)} MB`;
-  const mem = process.memoryUsage();
   return `rss=${mb(mem.rss)} heapUsed=${mb(mem.heapUsed)} heapTotal=${mb(mem.heapTotal)} external=${mb(mem.external)} arrayBuffers=${mb(mem.arrayBuffers)}`;
 }
 
@@ -1021,9 +972,36 @@ void (async () => {
 
   // ── Scan helpers ──────────────────────────────────────────
 
-  const broadcastSnapshot = async (nextSnapshot: ScanSnapshot) => {
-    await scanStore.set(nextSnapshot);
+  const broadcastSnapshot = async (nextSnapshot: ScanSnapshot, options?: SnapshotWriteOptions) => {
+    await scanStore.set(nextSnapshot, options);
     mainWindow?.webContents.send(SCAN_SNAPSHOT_CHANNEL, nextSnapshot);
+  };
+
+  /** In-memory side of a scan whose index now sits under `historyId`. */
+  const afterScanCommitted = (rootPath: string, historyId: string) => {
+    treemapCache.rememberLatest(rootPath, historyId);
+    // Evict the prior folder tree for this same root BEFORE
+    // kicking off the new build — keeping both in memory
+    // doubles peak heap during every rescan cycle.
+    invalidateFolderTreesForRoot(rootPath, historyId);
+    // Pre-warm the Folders-tab tree, but DEFER it by a few
+    // seconds. Scan-complete leaves the main process with a
+    // large residue of transient allocations (snapshot history
+    // writes, progress-message arrays); kicking off another
+    // 500-800 MB allocation for the new tree immediately can
+    // push heapTotal past V8's ceiling before GC catches up —
+    // observed as a silent hard-abort on a 7.27 M-file C:\
+    // scan. A 3-second gap gives V8 time for a major GC cycle
+    // before we rebuild the tree.
+    setTimeout(() => {
+      prewarmFolderTree(historyId, rootPath, "folder-tree-prewarm");
+    }, 3000);
+  };
+
+  /** In-memory side of a scan that fell out of history retention. */
+  const forgetPrunedScan = (prunedId: string) => {
+    treemapCache.invalidateScan(prunedId);
+    invalidateFolderTree(prunedId);
   };
 
   const buildRunningSnapshot = (
@@ -1076,72 +1054,19 @@ void (async () => {
         message.snapshot.volumeAccounting = MAC_VOLUME_ACCOUNTING;
       }
       if (message.type === "done") {
-        // Persist history before notifying the renderer so immediate diff
-        // lookups can see the just-finished scan.
-        const historyId = await saveScanToHistory(message.snapshot);
-
-        // Rename the temp folder-tree sidecar to match the history ID
-        // so the Folders-tab loader can find it by scanId. Done first
-        // because it's cheap and independent of the NDJSON rename —
-        // if this fails the legacy streaming fallback still works.
-        if (historyId && session.tempFolderTreePath) {
-          try {
-            await FS.rename(
-              session.tempFolderTreePath,
-              folderTreeSidecarPath(historyId),
-            );
-          } catch {
-            // Sidecar didn't land (scanner skipped it, write failed,
-            // etc.). The legacy streaming worker path will handle the
-            // Folders tab — slower but correct.
-          }
-        }
-        if (historyId && session.tempDevArtifactsPath) {
-          await adoptTempDevSidecar(
-            session.tempDevArtifactsPath,
-            devArtifactsSidecarPath(historyId),
-          );
-        }
-
-        // Rename the temp index file to match the history entry ID
-        if (historyId && session.tempIndexPath) {
-          try {
-            await FS.rename(session.tempIndexPath, indexFilePath(historyId));
-            if (message.snapshot.rootPath) {
-              treemapCache.rememberLatest(message.snapshot.rootPath, historyId);
-            }
-            // Evict the prior folder tree for this same root BEFORE
-            // kicking off the new build — keeping both in memory
-            // doubles peak heap during every rescan cycle.
-            if (message.snapshot.rootPath) {
-              invalidateFolderTreesForRoot(message.snapshot.rootPath, historyId);
-            }
-            // Pre-warm the Folders-tab tree, but DEFER it by a few
-            // seconds. Scan-complete leaves the main process with a
-            // large residue of transient allocations (snapshot history
-            // writes, progress-message arrays); kicking off another
-            // 500-800 MB allocation for the new tree immediately can
-            // push heapTotal past V8's ceiling before GC catches up —
-            // observed as a silent hard-abort on a 7.27 M-file C:\
-            // scan. A 3-second gap gives V8 time for a major GC cycle
-            // before we rebuild the tree.
-            const prewarmHistoryId = historyId;
-            const prewarmRootPath = message.snapshot.rootPath ?? undefined;
-            setTimeout(() => {
-              prewarmFolderTree(prewarmHistoryId, prewarmRootPath, "folder-tree-prewarm");
-            }, 3000);
-          } catch {
-            // Scanner may have skipped or failed to write the index — ignore
-          }
-        }
-
-        // Delete index files for any history entries that just got pruned
-        for (const prunedId of consumeLastPrunedIds()) {
-          treemapCache.invalidateScan(prunedId);
-          invalidateFolderTree(prunedId);
-          void deleteFolderTreeSidecar(prunedId);
-          void deleteIndex(prunedId);
-          void deleteFullDiffCachesForScan(prunedId);
+        // History, then the pending index and sidecars renamed to its ID.
+        const rootPath = message.snapshot.rootPath;
+        const committed = await commitCompletedScan(
+          message.snapshot,
+          {
+            indexPath: session.tempIndexPath,
+            folderTreePath: session.tempFolderTreePath,
+            devArtifactsPath: session.tempDevArtifactsPath,
+          },
+          { log: writeCrashLog, onPruned: forgetPrunedScan },
+        );
+        if (committed.historyId && committed.indexCommitted && rootPath) {
+          afterScanCommitted(rootPath, committed.historyId);
         }
       }
 
@@ -1184,29 +1109,7 @@ void (async () => {
         // Record in recent scans, and auto-seed defaultRootPath so monitoring
         // has a target to rescan without the user having to set one manually.
         if (settings && message.snapshot.rootPath) {
-          const MAX_RECENT = 10;
-          const recent = settings.recentScans.filter(
-            (r) => r.path !== message.snapshot.rootPath,
-          );
-          recent.unshift({
-            path: message.snapshot.rootPath,
-            scannedAt: Date.now(),
-            filesFound: message.snapshot.filesVisited,
-            bytesFound: message.snapshot.bytesSeen,
-          });
-          if (recent.length > MAX_RECENT) recent.length = MAX_RECENT;
-
-          const shouldSeedDefaultPath =
-            session.trigger === "manual" && !settings.scanning.defaultRootPath;
-          const nextScanning = shouldSeedDefaultPath
-            ? { ...settings.scanning, defaultRootPath: message.snapshot.rootPath }
-            : settings.scanning;
-
-          void settingsStore!.set({
-            ...settings,
-            scanning: nextScanning,
-            recentScans: recent,
-          });
+          void settingsStore!.set(settingsWithRecentScan(settings, message.snapshot, session.trigger));
         }
 
         if (settings?.notifications.scanComplete) {
@@ -2210,6 +2113,8 @@ void (async () => {
   // itself is written by the writeCrashLog() helper declared up top.
 
   ipcMain.handle("diskhound:get-crash-log", async () => {
+    // The viewer should show the lines still buffered in memory too.
+    crashLog.flushAll();
     const path = crashLogPath();
     try {
       const stat = await FS.stat(path);
@@ -2232,18 +2137,20 @@ void (async () => {
   // file browser, highlighting crash.log alongside its rotated
   // crash.log.old sibling.
   ipcMain.on("diskhound:reveal-crash-log", () => {
+    crashLog.flushAll();
     shell.showItemInFolder(crashLogPath());
   });
 
   // Renderer errors get forwarded here via window.onerror / onunhandled-
-  // rejection, so uncaught rendering bugs also land in the same file.
+  // rejection and from failed polls, so rendering bugs also land in the
+  // same file. crashLog counts identical repeats instead of writing
+  // each one, so a poll that fails every tick costs a few lines a day.
   ipcMain.on("diskhound:report-renderer-error", (_event, payload: {
     message: string;
     stack?: string;
     source?: string;
   }) => {
-    const loc = payload.source ? ` @ ${payload.source}` : "";
-    writeCrashLog("renderer", `${payload.message}${loc}\n${payload.stack ?? ""}`);
+    writeCrashLog("renderer", formatRendererError(payload));
   });
 
   let handleUpdateSettingsChanged:
@@ -2395,27 +2302,6 @@ void (async () => {
   // — older entries get evicted on insert.
   const snapshotCache = new Map<string, ScanSnapshot>();
   const SNAPSHOT_CACHE_LIMIT = 8;
-  const fullDiffCache = new Map<string, FullDiffResult | null>();
-  const fullDiffInflight = new Map<string, Promise<FullDiffResult | null>>();
-  const FULL_DIFF_CACHE_LIMIT = 8;
-  const readFullDiffMemoryCache = (key: string) => {
-    const cached = fullDiffCache.get(key);
-    if (cached !== undefined) {
-      fullDiffCache.delete(key);
-      fullDiffCache.set(key, cached);
-      return cached;
-    }
-    return undefined;
-  };
-  const writeFullDiffMemoryCache = (key: string, value: FullDiffResult | null) => {
-    fullDiffCache.delete(key);
-    fullDiffCache.set(key, value);
-    while (fullDiffCache.size > FULL_DIFF_CACHE_LIMIT) {
-      const oldest = fullDiffCache.keys().next().value;
-      if (oldest) fullDiffCache.delete(oldest);
-      else break;
-    }
-  };
   const loadHistoricalSnapshotCached = async (id: string): Promise<ScanSnapshot | null> => {
     const cached = snapshotCache.get(id);
     if (cached) {
@@ -2434,12 +2320,6 @@ void (async () => {
     }
     return snap;
   };
-  const normalizeDiffLimit = (limit?: number) =>
-    typeof limit === "number" && Number.isFinite(limit)
-      ? Math.max(0, Math.floor(limit))
-      : 500;
-  const buildFullDiffCacheKey = (baselineId: string, currentId: string, limit: number) =>
-    `${baselineId}::${currentId}::${limit}`;
   const getIndexBytes = async (id: string): Promise<number | null> => {
     try {
       const stat = await FS.stat(indexFilePath(id));
@@ -2448,114 +2328,14 @@ void (async () => {
       return null;
     }
   };
-  const loadOrComputeFullDiff = async (
-    baselineId: string,
-    currentId: string,
-    limit?: number,
-  ): Promise<FullDiffResult | null> => {
-    const normalizedLimit = normalizeDiffLimit(limit);
-    const cacheKey = buildFullDiffCacheKey(baselineId, currentId, normalizedLimit);
-    const memoryCached = readFullDiffMemoryCache(cacheKey);
-    if (memoryCached !== undefined) {
-      return memoryCached;
-    }
-
-    const existing = fullDiffInflight.get(cacheKey);
-    if (existing) {
-      return existing;
-    }
-
-    const pending = (async () => {
-      const diskCached = await readFullDiffCache(baselineId, currentId, normalizedLimit);
-      if (diskCached !== null) {
-        writeFullDiffMemoryCache(cacheKey, diskCached);
-        return diskCached;
-      }
-
-      // Fast path: if the snapshot aggregates match exactly (bytes,
-      // files, dirs), the per-file diff is guaranteed empty. Short-
-      // circuit so we don't spawn the 4 GB worker just to prove that
-      // — on a 7.27M-file C:\ scan the worker otherwise OOMs even
-      // when nothing changed (building two full path→size maps to
-      // compare them is what costs the heap, not emitting deltas).
-      const [baseSnap, currSnap] = await Promise.all([
-        loadHistoricalSnapshotCached(baselineId),
-        loadHistoricalSnapshotCached(currentId),
-      ]);
-      if (
-        baseSnap && currSnap &&
-        baseSnap.bytesSeen === currSnap.bytesSeen &&
-        baseSnap.filesVisited === currSnap.filesVisited &&
-        baseSnap.directoriesVisited === currSnap.directoriesVisited
-      ) {
-        const emptyResult: FullDiffResult = {
-          baselineId,
-          currentId,
-          totalChanges: 0,
-          totalAdded: 0,
-          totalRemoved: 0,
-          totalGrew: 0,
-          totalShrank: 0,
-          totalBytesAdded: 0,
-          totalBytesRemoved: 0,
-          changes: [],
-          truncated: false,
-        };
-        writeFullDiffMemoryCache(cacheKey, emptyResult);
-        await writeFullDiffCache(emptyResult, normalizedLimit);
-        return emptyResult;
-      }
-
-      const input = {
-        baselineId,
-        currentId,
-        baselinePath: indexFilePath(baselineId),
-        currentPath: indexFilePath(currentId),
-        limit: normalizedLimit,
-      };
-
-      let result: FullDiffResult | null = null;
-      try {
-        result = await runFullDiffWorker(input, { workerPath: fullDiffWorkerEntry });
-      } catch (err) {
-        writeCrashLog("full-diff-worker", err instanceof Error ? (err.stack ?? err.message) : String(err));
-        // Fallback: run inline on the main thread. Still slow for big
-        // indexes but at least produces a result rather than leaving
-        // the user stuck on "preparing…" forever.
-        try {
-          result = await computeFullDiffFromIndexFiles(input);
-        } catch (fallbackErr) {
-          writeCrashLog(
-            "full-diff-inline",
-            fallbackErr instanceof Error ? (fallbackErr.stack ?? fallbackErr.message) : String(fallbackErr),
-          );
-          result = null;
-        }
-      }
-
-      // Only cache POSITIVE results. A null result typically means one of
-      // the index files is missing or unreadable — caching that as null
-      // would let a transient condition (file still being written, brief
-      // permission hiccup) poison the cache and surface as the permanent
-      // "Load full file diff" CTA loop the user reported.
-      if (result) {
-        writeFullDiffMemoryCache(cacheKey, result);
-        await writeFullDiffCache(result, normalizedLimit);
-      }
-      return result;
-    })().finally(() => {
-      fullDiffInflight.delete(cacheKey);
-    });
-
-    fullDiffInflight.set(cacheKey, pending);
-    return pending;
-  };
+  const fullDiffLoader = createFullDiffLoader({
+    loadSnapshot: loadHistoricalSnapshotCached,
+    runWorker: (input) => runFullDiffWorker(input, { workerPath: fullDiffWorkerEntry }),
+    computeInline: computeFullDiffFromIndexFiles,
+    log: writeCrashLog,
+  });
   const warmLatestFullDiff = (rootPath: string) => {
-    const latestPair = getLatestPair(rootPath);
-    if (!latestPair) return;
-    void loadOrComputeFullDiff(latestPair.baseline.id, latestPair.current.id, 1000).catch(() => {
-      // best effort background warmup
-    });
+    void fullDiffLoader.warmLatest(rootPath);
   };
 
   ipcMain.handle("diskhound:compute-scan-diff", async (_event, baselineId: string, currentId: string) => {
@@ -2589,8 +2369,14 @@ void (async () => {
     };
   });
 
-  ipcMain.handle("diskhound:compute-full-scan-diff", async (_event, baselineId: string, currentId: string, limit?: number) => {
-    return await loadOrComputeFullDiff(baselineId, currentId, limit);
+  ipcMain.handle("diskhound:compute-full-scan-diff", async (
+    _event,
+    baselineId: string,
+    currentId: string,
+    limit?: number,
+    options?: { retryFailed?: boolean },
+  ) => {
+    return await fullDiffLoader.load(baselineId, currentId, limit, options);
   });
 
   // Load a dense file list for the treemap from the persisted full-file index.
@@ -3125,49 +2911,43 @@ void (async () => {
    * (folder-tree parent count, treemap cache entries, full-diff memory
    * cache size). Useful for "why is DiskHound holding 800 MB?" triage.
    */
-  const describeCacheMemory = (): string => {
+  const sampleCacheMemory = (): MemorySample => {
     const treemapStats = treemapCache.getStats();
-    return [
-      describeMemoryUsage(),
-      `folderTree: ${folderTreeCache.size} trees, ${folderTreeTotalEntries.toLocaleString()} entries`,
-      (() => {
-        const pages = folderTreePages.stats();
-        return `folderTreePages: ${pages.pages} pages, ${pages.nodes.toLocaleString()} nodes, ~${Math.round(pages.heapBytes / 1024 / 1024)} MB`;
-      })(),
-      `treemapCache: ${treemapStats.entries} entries, ${treemapStats.inflight} inflight`,
-      `fullDiffMem: ${fullDiffCache.size} entries`,
-    ].join(" | ");
+    const pages = folderTreePages.stats();
+    const mem = process.memoryUsage();
+    const fullDiffEntries = fullDiffLoader.memoryEntries();
+    return {
+      rssBytes: mem.rss,
+      heapUsedBytes: mem.heapUsed,
+      caches: [folderTreeCache.size, folderTreeTotalEntries, pages.pages, treemapStats.entries, fullDiffEntries].join("/"),
+      text: [
+        describeMemoryUsage(mem),
+        `folderTree: ${folderTreeCache.size} trees, ${folderTreeTotalEntries.toLocaleString()} entries`,
+        `folderTreePages: ${pages.pages} pages, ${pages.nodes.toLocaleString()} nodes, ~${Math.round(pages.heapBytes / 1024 / 1024)} MB`,
+        `treemapCache: ${treemapStats.entries} entries, ${treemapStats.inflight} inflight`,
+        `fullDiffMem: ${fullDiffEntries} entries`,
+      ].join(" | "),
+    };
   };
+  const describeCacheMemory = (): string => sampleCacheMemory().text;
 
-  // Log a memory snapshot on a cadence that tracks activity:
-  //   - 1 minute while a scan is live (catches the peak mid-walk)
-  //   - 5 minutes when idle (enough to notice slow leaks without
-  //     spamming the log when nothing's happening)
-  // Unref so it doesn't keep the process alive on quit.
-  let memoryDiagIntervalHandle: ReturnType<typeof setInterval> | null = null;
-  let memoryDiagCadence: "scanning" | "idle" = "idle";
-  const startMemoryDiag = (cadence: "scanning" | "idle") => {
-    if (memoryDiagIntervalHandle) clearInterval(memoryDiagIntervalHandle);
-    const ms = cadence === "scanning" ? 60 * 1000 : 5 * 60 * 1000;
-    memoryDiagIntervalHandle = setInterval(() => {
-      const tag = activeScans.size > 0 ? "memory-scanning" : "memory";
-      writeCrashLog(tag, describeCacheMemory());
-    }, ms);
-    memoryDiagIntervalHandle.unref?.();
-    memoryDiagCadence = cadence;
-  };
+  // Sample memory every minute while a scan is live (catches the peak
+  // mid-walk) and every 5 minutes when idle, logging a sample only when
+  // it moved since the last logged one, plus an hourly heartbeat. See
+  // shared/memoryDiagnostics.ts.
+  const memoryDiagnostics = createMemoryDiagnostics({
+    sample: sampleCacheMemory,
+    isScanning: () => activeScans.size > 0,
+    write: writeCrashLog,
+  });
   /**
    * Bump the cadence to 1 min while a scan is active and drop back to
    * 5 min when everything settles. Called from the running/done scan
    * broadcast paths so we cover both manual and scheduled scans.
    */
-  const retuneMemoryDiagCadence = () => {
-    const desired: "scanning" | "idle" = activeScans.size > 0 ? "scanning" : "idle";
-    if (desired !== memoryDiagCadence) startMemoryDiag(desired);
-  };
-  startMemoryDiag("idle");
-  // One snapshot at boot for the "after restart" baseline.
-  writeCrashLog("memory", `boot: ${describeCacheMemory()}`);
+  const retuneMemoryDiagCadence = () => memoryDiagnostics.retune();
+  // Logs one snapshot at boot for the "after restart" baseline.
+  memoryDiagnostics.start();
 
   // Pre-warm the folder tree for the last rehydrated scan so the
   // Folders tab is instant on app launch. Fire-and-forget — the user
@@ -3821,13 +3601,21 @@ void (async () => {
         entries = await FS.readdir(dir, { withFileTypes: true });
       } catch { return { bytes, count, orphanPending: { bytes: orphanBytes, count: orphanCount } }; }
       const orphanCutoff = Date.now() - 60 * 60 * 1000; // 1 hour
+      // USN rescans hard-link their predecessor's sidecars, so one set
+      // of bytes can have several names here. Count it once.
+      const seenLinks = new Set<string>();
       for (const entry of entries) {
         if (!entry.isFile()) continue;
         const full = Path.join(dir, entry.name);
         try {
           const stat = await FS.stat(full);
-          bytes += stat.size;
           count++;
+          if (stat.nlink > 1) {
+            const inode = `${stat.dev}:${stat.ino}`;
+            if (seenLinks.has(inode)) continue;
+            seenLinks.add(inode);
+          }
+          bytes += stat.size;
           if (entry.name.startsWith("pending-") && stat.mtimeMs < orphanCutoff) {
             orphanBytes += stat.size;
             orphanCount++;
@@ -4082,144 +3870,18 @@ void (async () => {
    * binary, parse error, wrap, etc), in which case caller does full.
    */
   const tryIncrementalScan = async (rootPath: string): Promise<boolean> => {
-    // Explicit diagnostics at every fall-off path so users can run
-    // `electron . --inspect` (or just tail the console) and see WHY
-    // deltas aren't firing instead of silent-fallback to full scan.
-    const binaryPath = resolveNativeScannerBinary(projectRoot);
-    if (!binaryPath) {
-      console.error(`[monitoring] delta skipped — native scanner binary not found for ${rootPath}`);
-      return false;
-    }
-
-    const cursor = getCursorForRoot(rootPath);
-    if (!cursor) {
-      console.error(`[monitoring] delta skipped — no USN cursor captured yet for ${rootPath}. ` +
-        `A cursor is recorded after the first full scan completes.`);
-      return false;
-    }
-
-    // Find the most recent index for this root to serve as the delta base.
-    const history = getScanHistory(rootPath);
-    const mostRecent = history[0];
-    if (!mostRecent) {
-      console.error(`[monitoring] delta skipped — no scan history for ${rootPath}`);
-      return false;
-    }
-    if (!indexUsesAllocatedSize(mostRecent)) {
-      console.error(`[monitoring] delta skipped — previous index still uses logical file size; running a full allocated-size scan for ${rootPath}`);
-      return false;
-    }
-    const previousIndexPath = indexFilePath(mostRecent.id);
-    if (!FS_SYNC.existsSync(previousIndexPath)) {
-      console.error(`[monitoring] delta skipped — previous index missing at ${previousIndexPath}`);
-      return false;
-    }
-
-    const newIndexPath = indexFilePath(`pending-${randomUUID()}`);
-
-    let result;
-    try {
-      result = await runIncrementalScan({
-        rootPath,
-        scannerPath: binaryPath,
-        previousIndexPath,
-        newIndexPath,
-        cursor,
-      });
-    } catch (error) {
-      console.error(`[monitoring] delta spawn/parse failed for ${rootPath}:`, error);
-      try { await FS.unlink(newIndexPath); } catch { /* ignore */ }
-      return false;
-    }
-
-    if (!result) {
-      // Common causes: journal wrap past our cursor, journal ID mismatch
-      // (volume reformatted), volume not NTFS. runIncrementalScan logs
-      // specifics via its Rust-side error line.
-      console.error(`[monitoring] delta returned null for ${rootPath} — likely journal wrap or ID mismatch. Full scan will run.`);
-      try { await FS.unlink(newIndexPath); } catch { /* ignore */ }
-      return false;
-    }
-
-    // Save the incremental result to history and update cursor.
-    const historyId = await saveScanToHistory(result.snapshot);
-    if (!historyId) {
-      try { await FS.unlink(newIndexPath); } catch { /* ignore */ }
-      return false;
-    }
-
-    try {
-      await FS.rename(newIndexPath, indexFilePath(historyId));
-      treemapCache.rememberLatest(rootPath, historyId);
-
-      // Carry the predecessor's folder-tree sidecar forward.
-      //
-      // USN rescans update the NDJSON index with deltas, but the
-      // folder-tree sidecar is only written by the Rust scanner's
-      // full-scan/walker path — NEVER by runIncrementalScan. Without
-      // this copy, history[0] (the USN scan) lands in userData with
-      // NO sidecar, and the next Folders-tab open falls through to
-      // buildFolderTree which streams the 300+ MB gzipped NDJSON
-      // into the worker (slow + OOM-prone on big drives; observed
-      // as "folder tree worker out of memory" + truncated Folders
-      // results).
-      //
-      // The predecessor's sidecar is accurate for 99%+ of a USN
-      // rescan (deltas are a tiny fraction of total entries) and is
-      // refreshed on the next full scan. A slightly stale sidecar
-      // beats a 300 MB rebuild that might OOM.
-      try {
-        const prevSidecar = folderTreeSidecarPath(mostRecent.id);
-        const nextSidecar = folderTreeSidecarPath(historyId);
-        if (FS_SYNC.existsSync(prevSidecar) && !FS_SYNC.existsSync(nextSidecar)) {
-          await FS.copyFile(prevSidecar, nextSidecar);
-          writeCrashLog(
-            "folder-tree-sidecar-carry-forward",
-            `usn scan ${historyId} carried forward sidecar from ${mostRecent.id}`,
-          );
-        }
-        const prevDev = devArtifactsSidecarPath(mostRecent.id);
-        const nextDev = devArtifactsSidecarPath(historyId);
-        if (FS_SYNC.existsSync(prevDev) && !FS_SYNC.existsSync(nextDev)) {
-          await FS.copyFile(prevDev, nextDev);
-        }
-        // Do not JSON.parse the Dev sidecar here. That blocked the
-        // window on large C: sidecars. Dev open adopts a pending
-        // file in the worker.
-      } catch (err) {
-        writeCrashLog(
-          "folder-tree-sidecar-carry-forward",
-          `copy failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-
-      // Evict the prior tree for this root before building the new
-      // one so peak memory doesn't double during the swap.
-      invalidateFolderTreesForRoot(rootPath, historyId);
-      // Same deferred pre-warm as the full-scan path — 3 s gap lets
-      // V8 reclaim scan-time transients before we allocate ~500-800
-      // MB for the new folder tree.
-      const prewarmId = historyId;
-      const prewarmRoot = rootPath;
-      setTimeout(() => {
-        prewarmFolderTree(prewarmId, prewarmRoot, "folder-tree-prewarm");
-      }, 3000);
-    } catch { /* ignore */ }
-
-    for (const prunedId of consumeLastPrunedIds()) {
-      treemapCache.invalidateScan(prunedId);
-      invalidateFolderTree(prunedId);
-      void deleteFolderTreeSidecar(prunedId);
-      void deleteIndex(prunedId);
-      void deleteFullDiffCachesForScan(prunedId);
-    }
-
-    await broadcastSnapshot(result.snapshot);
-    markFullScan();
-    warmLatestFullDiff(rootPath);
-
-    // Persist the new cursor so the NEXT tick picks up from here.
-    await import("./shared/usnCursorStore").then((m) => m.setCursor(result!.newCursor));
+    const outcome = await runIncrementalRescan(rootPath, {
+      scannerPath: resolveNativeScannerBinary(projectRoot),
+      publishSnapshot: broadcastSnapshot,
+      markFullScan,
+      loadSnapshot: loadHistoricalSnapshotCached,
+      warmFullDiff: warmLatestFullDiff,
+      onCommitted: afterScanCommitted,
+      onPruned: forgetPrunedScan,
+      log: writeCrashLog,
+    });
+    if (!outcome) return false;
+    const result = outcome;
 
     // Always surface the delta scan result — "no changes" is itself a
     // signal users want to see ("my monitoring is working"). Without
@@ -4923,10 +4585,15 @@ void (async () => {
     // memory only; write them (synchronously) so the next launch's
     // first delta starts from this session's last check.
     flushDiskMonitor();
+    // Likewise a USN tick that found nothing changed: its restamped
+    // snapshot and its cursor wait for quit.
+    scanStore.flush();
+    flushUsnCursorStore();
   });
 })().catch((err: unknown) => {
   const error = err as { stack?: string; message?: string };
   writeStartupLog(`whenReady rejected: ${error?.stack ?? error?.message ?? String(err)}`);
+  crashLog.flush();
   try {
     dialog.showErrorBox("DiskHound — Startup failed", String(error?.stack ?? error?.message ?? err));
   } catch { /* noop */ }

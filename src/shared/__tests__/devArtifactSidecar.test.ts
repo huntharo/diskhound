@@ -27,6 +27,30 @@ describe("noteDevFile", () => {
   });
 });
 
+describe("noteDevFile with Terraform", () => {
+  it("names the providers tree after the folder holding .terraform.lock.hcl", async () => {
+    const { createDevAcc, noteDevFile, sidecarFromAcc, reportFromSidecar } = await import("../devArtifactSidecar");
+    const acc = createDevAcc();
+    noteDevFile(acc, "/Users/me/infra/prod/.terraform.lock.hcl", 1_000, false);
+    noteDevFile(acc, "/Users/me/infra/prod/.terraform/terraform.tfstate", 2_000, false);
+    noteDevFile(
+      acc,
+      "/Users/me/infra/prod/.terraform/providers/registry.terraform.io/hashicorp/aws/6.54.0/darwin_arm64/terraform-provider-aws_v6.54.0_x5",
+      800_000_000,
+      false,
+    );
+
+    const result = reportFromSidecar(sidecarFromAcc(acc, "/"));
+    expect(result.artifacts).toEqual([expect.objectContaining({
+      path: "/Users/me/infra/prod/.terraform/providers",
+      kind: "terraform",
+      projectPath: "/Users/me/infra/prod",
+      projectName: "prod",
+      size: 800_000_000,
+    })]);
+  });
+});
+
 describe("noteDirectoryRoot", () => {
   it("keeps the outer target folder and skips target/debug", async () => {
     const { createDevAcc, dropNestedRoots, noteDirectoryRoot, reportFromSidecar, sidecarFromAcc } =
