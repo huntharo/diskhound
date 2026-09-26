@@ -72,6 +72,22 @@ const SEGMENT_KIND: Record<string, DevArtifactKind> = {
   rdclientautotrace: "diag-logs",
 };
 
+/**
+ * Every lowercase segment name that can start a `classifyArtifactPath`
+ * match. A path with none of these segments never classifies, so a
+ * streaming reader can skip it without building the path string.
+ */
+export const ARTIFACT_SEGMENT_NAMES: ReadonlySet<string> = new Set([
+  ...Object.keys(SEGMENT_KIND),
+  "target",
+  ".cargo",
+  "pkg",
+  ".cache",
+  "dist",
+  "build",
+  "out",
+]);
+
 function splitSegments(filePath: string): string[] {
   return filePath.split(/[\\/]+/).filter(Boolean);
 }
@@ -92,8 +108,10 @@ function joinSegments(original: string, count: number): string {
 export function classifyArtifactPath(filePath: string): { root: string; kind: DevArtifactKind } | null {
   const parts = splitSegments(filePath);
   for (let i = 0; i < parts.length; i++) {
-    const seg = parts[i]!;
-    const lower = seg.toLowerCase();
+    const lower = parts[i]!.toLowerCase();
+    // Also keeps Object.prototype names ("constructor", "toString")
+    // out of the SEGMENT_KIND lookup below.
+    if (!ARTIFACT_SEGMENT_NAMES.has(lower)) continue;
 
     if (lower === "target") {
       if (i + 1 < parts.length) {
@@ -121,7 +139,7 @@ export function classifyArtifactPath(filePath: string): { root: string; kind: De
       }
     }
 
-    const mapped = SEGMENT_KIND[lower] ?? SEGMENT_KIND[seg];
+    const mapped = SEGMENT_KIND[lower];
     if (mapped) {
       const depth = mapped === "worktree" && i + 1 < parts.length ? i + 2 : i + 1;
       return { root: joinSegments(filePath, depth), kind: mapped };
