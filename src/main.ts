@@ -57,9 +57,9 @@ import {
   checkDiskDeltas,
   flushDiskMonitor,
   getDiskDeltaHistory,
-  getDiskSpace,
   getLastFullScanAt,
   getMonitoringSnapshot,
+  getRecentDiskSpace,
   initDiskMonitor,
   markFullScan,
   startDiskMonitoring,
@@ -190,6 +190,9 @@ const SETTINGS_UPDATED_CHANNEL = "diskhound:settings-updated";
  *  and switches its active tab in response. Powers the System
  *  Widget's click-through tiles. */
 const NAVIGATE_VIEW_CHANNEL = "diskhound:navigate-view";
+/** Push from main to a window's renderer when that window is hidden,
+ *  shown, minimized or restored. See `reportWindowShown`. */
+const WINDOW_SHOWN_CHANNEL = "diskhound:window-shown";
 
 const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
 const rendererEntryUrl = process.env.VITE_DEV_SERVER_URL;
@@ -289,9 +292,34 @@ app.commandLine.appendSwitch("enable-zero-copy");
 // delivery for seconds at a time (Chromium aggressively throttles
 // hidden or occluded windows). We want progress heartbeats and the
 // [memory] interval to keep ticking regardless of focus state.
+//
+// These also keep `document.visibilityState` "visible" in a window
+// hidden to the tray (seen on macOS), so the renderer can't tell it
+// is hidden. `reportWindowShown` tells it instead.
 app.commandLine.appendSwitch("disable-renderer-backgrounding");
 app.commandLine.appendSwitch("disable-background-timer-throttling");
 app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
+
+function isWindowShown(win: BrowserWindow): boolean {
+  return win.isVisible() && !win.isMinimized();
+}
+
+/**
+ * Tells a window's renderer whenever it is hidden, shown, minimized or
+ * restored. The renderer pauses its pollers while the window can't be
+ * seen: several start a process here on every tick (df or PowerShell,
+ * the process sampler, nvidia-smi), which would otherwise run for days
+ * from the tray.
+ */
+function reportWindowShown(win: BrowserWindow): void {
+  const report = () => {
+    if (!win.isDestroyed()) win.webContents.send(WINDOW_SHOWN_CHANNEL, isWindowShown(win));
+  };
+  win.on("show", report);
+  win.on("hide", report);
+  win.on("minimize", report);
+  win.on("restore", report);
+}
 
 // Raise V8's old-generation heap ceiling for the main process from the
 // default ~4 GB to 8 GB. On big drives (1M+ directories) the post-scan
@@ -3514,7 +3542,7 @@ void (async () => {
       defaultRootPath: settings?.scanning.defaultRootPath ?? "",
     };
   });
-  ipcMain.handle("diskhound:get-disk-space", () => getDiskSpace());
+  ipcMain.handle("diskhound:get-disk-space", () => getRecentDiskSpace());
 
   // ── IPC: Cleanup Analysis ─────────────────────────────────
 
@@ -4192,6 +4220,11 @@ void (async () => {
     mainWindow?.hide();
   });
 
+  ipcMain.handle("diskhound:is-window-shown", (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    return win ? isWindowShown(win) : true;
+  });
+
   ipcMain.on("diskhound:quit-app", () => {
     quitDiskHound();
   });
@@ -4641,6 +4674,7 @@ void (async () => {
     }
 
     widgetWindowStateStore?.track(widgetWindow);
+    reportWindowShown(widgetWindow);
 
     await loadRenderer(widgetWindow, "widget");
 
@@ -4807,6 +4841,7 @@ void (async () => {
     // geometry changes. Persistence is debounced inside the store so
     // a slow drag doesn't generate a write per frame.
     windowStateStore?.track(mainWindow);
+    reportWindowShown(mainWindow);
 
     await loadRenderer(mainWindow, "app");
 

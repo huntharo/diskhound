@@ -19,6 +19,7 @@ import {
 import { basename, formatBytes, formatCount, formatElapsed, humanAge, relativeTime } from "../lib/format";
 import { useConfirmPermanentDelete, useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { saveLocalPreference } from "../lib/localPreference";
+import { useVisibleInterval } from "../lib/visiblePoll";
 import {
   buildTreemapComposition,
   colorForExtension,
@@ -129,11 +130,8 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
   // feels alive even when the scanner is mid-enumerate and hasn't
   // emitted a progress message yet.
   const [liveNow, setLiveNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (snapshot.status !== "running" || snapshot.startedAt === null) return;
-    const id = window.setInterval(() => setLiveNow(Date.now()), 250);
-    return () => window.clearInterval(id);
-  }, [snapshot.status, snapshot.startedAt]);
+  const ticking = snapshot.status === "running" && snapshot.startedAt !== null;
+  useVisibleInterval(() => setLiveNow(Date.now()), ticking ? 250 : null);
   const displayElapsedMs = snapshot.status === "running" && snapshot.startedAt !== null
     ? liveNow - snapshot.startedAt
     : snapshot.elapsedMs;

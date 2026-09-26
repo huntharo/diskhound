@@ -21,6 +21,7 @@ import {
 import { basename, formatBytes, relativeTime } from "../lib/format";
 import { useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { saveLocalPreference } from "../lib/localPreference";
+import { useVisibleInterval } from "../lib/visiblePoll";
 import { nativeApi } from "../nativeApi";
 import { toast } from "./Toasts";
 import { FileIcon } from "./FileIcon";
@@ -142,11 +143,7 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
     if (info) setScheduleInfo(info);
   }, []);
 
-  useEffect(() => {
-    void refreshScheduleInfo();
-    const id = window.setInterval(() => { void refreshScheduleInfo(); }, 30_000);
-    return () => window.clearInterval(id);
-  }, [refreshScheduleInfo]);
+  useVisibleInterval(() => void refreshScheduleInfo(), 30_000, { immediate: true });
 
   const monitoringEnabled = scheduleInfo?.enabled ?? null;
 

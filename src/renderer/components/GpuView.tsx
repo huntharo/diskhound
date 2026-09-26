@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import type { GpuAdapter, GpuProcessInfo, GpuSnapshot } from "../../shared/contracts";
 import { formatBytes } from "../lib/format";
+import { startVisiblePoll } from "../lib/visiblePoll";
 import { nativeApi } from "../nativeApi";
 import { ProcessIcon } from "./ProcessIcon";
 import { toast } from "./Toasts";
@@ -82,9 +83,7 @@ export function GpuView({ refreshMs = REFRESH_MS }: Props) {
         setLoading(false);
       });
     };
-    refresh();
-    const id = window.setInterval(refresh, refreshMs);
-    return () => window.clearInterval(id);
+    return startVisiblePoll(refresh, refreshMs, { immediate: true });
   }, [refreshMs]);
 
   const processes = useMemo(() => {

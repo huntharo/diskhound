@@ -10,11 +10,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DiskSpaceInfo } from "../contracts";
 import {
   getDiskSpace,
+  getRecentDiskSpace,
   initDiskMonitor,
   parseLinuxDfOutput,
   parseMacDfOutput,
   parseWindowsCimLogicalDisks,
   runDf,
+  SHARED_DISK_SPACE_MAX_AGE_MS,
   stdoutOfFailedDf,
 } from "../diskMonitor";
 
@@ -484,5 +486,37 @@ describe("parseWindowsCimLogicalDisks", () => {
     );
     expect(drives).toHaveLength(1);
     expect(drives[0]?.drive).toBe("C:");
+  });
+});
+
+describe("getRecentDiskSpace", () => {
+  const drive = (freeBytes: number): DiskSpaceInfo[] => [
+    { drive: "/", totalBytes: 1_000, freeBytes, usedBytes: 1_000 - freeBytes, usedPercent: 0, timestamp: 0 },
+  ];
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("shares one read between pollers inside the window, then reads again", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: 1_000_000 });
+    let reads = 0;
+    const read = async () => drive(100 + ++reads);
+
+    const [app, widget] = await Promise.all([getRecentDiskSpace(read), getRecentDiskSpace(read)]);
+    vi.setSystemTime(1_000_000 + SHARED_DISK_SPACE_MAX_AGE_MS - 1);
+    const picker = await getRecentDiskSpace(read);
+    expect(reads).toBe(1);
+    expect([app, widget, picker].map((d) => d[0]!.freeBytes)).toEqual([101, 101, 101]);
+
+    vi.setSystemTime(1_000_000 + SHARED_DISK_SPACE_MAX_AGE_MS);
+    expect((await getRecentDiskSpace(read))[0]!.freeBytes).toBe(102);
+    expect(reads).toBe(2);
+  });
+
+  it("does not hand out a failed read", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: 2_000_000 });
+    await expect(getRecentDiskSpace(() => Promise.reject(new Error("df hung")))).rejects.toThrow("df hung");
+    expect((await getRecentDiskSpace(async () => drive(7)))[0]!.freeBytes).toBe(7);
   });
 });

@@ -1374,6 +1374,14 @@ export interface DiskhoundNativeApi {
   minimizeToTray: () => void;
   /** Quit the process. Does not hide to tray. Bound to Ctrl/Cmd+Q. */
   quitApp: () => void;
+  /**
+   * Whether this renderer's window can be seen: false while it is
+   * hidden to the tray or minimized. `document.visibilityState` can't
+   * say, because main's background switches keep a hidden window
+   * "visible". Pollers pause on it (see renderer/lib/visiblePoll.ts).
+   */
+  isWindowShown: () => Promise<boolean>;
+  onWindowShownChanged: (listener: (shown: boolean) => void) => () => void;
 
   // Events
   onScanSnapshot: (listener: (snapshot: ScanSnapshot) => void) => () => void;

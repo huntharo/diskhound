@@ -36,6 +36,7 @@ const DEV_ARTIFACTS_PROGRESS_CHANNEL = "diskhound:dev-artifacts-progress";
 const PERMANENT_DELETE_PROGRESS_CHANNEL = "diskhound:permanent-delete-progress";
 const SETTINGS_UPDATED_CHANNEL = "diskhound:settings-updated";
 const NAVIGATE_VIEW_CHANNEL = "diskhound:navigate-view";
+const WINDOW_SHOWN_CHANNEL = "diskhound:window-shown";
 
 const api: DiskhoundNativeApi = {
   platform,
@@ -197,6 +198,14 @@ const api: DiskhoundNativeApi = {
   // Tray
   minimizeToTray: () => ipcRenderer.send("diskhound:minimize-to-tray"),
   quitApp: () => ipcRenderer.send("diskhound:quit-app"),
+  isWindowShown: () => ipcRenderer.invoke("diskhound:is-window-shown"),
+  onWindowShownChanged: (listener) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, shown: boolean) => {
+      listener(shown);
+    };
+    ipcRenderer.on(WINDOW_SHOWN_CHANNEL, wrapped);
+    return () => { ipcRenderer.removeListener(WINDOW_SHOWN_CHANNEL, wrapped); };
+  },
 
   // Events
   onScanSnapshot: (listener) => {
