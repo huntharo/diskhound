@@ -46,7 +46,8 @@ and local prerequisite skips. Concurrent runs do not reuse directories.
 The permission test creates a new file containing synthetic bytes and
 saves its original DACL. It denies `FILE_READ_ATTRIBUTES` on that file
 only, verifies that the real `OpenFileById` path fails, then restores the
-DACL and verifies the file can still be read. A separate test verifies
+DACL and verifies the file can still be read. It also repeats this after
+a rename A → B → A, checking that A survives while B is removed. A separate test verifies
 restoration during panic unwinding. It changes no parent ACLs, inherited
 policies, account privileges, or pre-existing files. A forcibly terminated
 process can leave its own synthetic temp fixture behind; it cannot affect
@@ -71,7 +72,8 @@ do not alter journal configuration or other volume data.
   test documents uncertainty, not complete deleted-subtree reconstruction.
 - The native executable's real journal output feeds the JS updater and a
   gzipped index. Tests cover moves into/out of the root, create-then-delete,
-  rename-back, and reusing an old path with a new file reference.
+  rename-back, and reusing an old path with a new file reference. A transient-only
+  tick preserves the baseline without creating an output index.
 - The updated index's paths and allocated sizes match a fresh native scan.
   The baseline remains byte-for-byte intact, and a second tick from the
   returned cursor does not replay the changes.

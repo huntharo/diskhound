@@ -15,6 +15,7 @@ import {
   type VolumeCursor,
 } from "./shared/usnCursorStore";
 import { normPath } from "./shared/pathUtils";
+import { indexNeedsRewrite } from "./shared/indexDeltaProbe";
 
 /**
  * End-to-end USN-journal based incremental monitoring.
@@ -240,7 +241,11 @@ export async function runIncrementalScan(params: {
     return { changed: false, newCursor, stats: statsFor(unchanged) };
   }
 
-  // Stream the previous index → new index, applying the deltas.
+  if (!await indexNeedsRewrite(params.previousIndexPath, { deletes, updates: freshEntries })) {
+    return { changed: false, newCursor, stats: statsFor(unchanged) };
+  }
+
+  // Stream the previous index → new index, applying the effective deltas.
   const counts = await applyDeltasToIndex(
     params.previousIndexPath,
     params.newIndexPath,

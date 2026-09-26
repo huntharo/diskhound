@@ -408,11 +408,35 @@ describe("scheduled USN rescan (Windows)", () => {
 
     expectIoBudget({
       scenario: "usn-tick-records-match-nothing",
-      note: "journal records under the root that leave the index as it was (a write that kept size and mtime, a delete of a file it never listed): the new index is streamed, found identical and deleted, so 1 index write (~330 MB at 7M files) and nothing committed. Used to save a history entry, copy both sidecars and prune a real scan too",
+      note: "Ineffective updates and deletes are checked against the baseline before opening an output file: 0 writes/day and 0 MB/day at both the 6-hour default and 1-minute minimum. Avoids ~330 MB/tick at 7M files (1.32 GB/day default, 475 GB/day minimum).",
       io,
     });
     expect(result).toMatchObject({ changed: false });
     expect(getScanHistory(ROOT).map((entry) => entry.id)).toEqual([...ids].reverse());
+    expect(FS.readdirSync(Path.join(dataDir, "scan-indexes")).filter((name) => name.startsWith("pending-"))).toEqual([]);
+  });
+
+  it("does not write an index for files created and deleted entirely between ticks", async () => {
+    const ids = await seedHistoryAtCap();
+    await saveCursor();
+    const previousIndex = indexFilePath(ids.at(-1)!);
+    const previousBytes = FS.readFileSync(previousIndex);
+    journal.lines = [
+      // Native folds FILE_CREATE | FILE_DELETE into a tombstone.
+      journalRecord(Path.join(ROOT, "transient.tmp"), "delete", null, now),
+      journalCursor(1),
+    ];
+    const { deps, calls } = incrementalDeps();
+    const { io, result } = await measureFsIo(() => runIncrementalRescan(ROOT, deps));
+    expectIoBudget({
+      scenario: "usn-tick-transient-only",
+      note: "Create/delete activity absent from the baseline: one read-only index pass, 0 writes/day and 0 MB/day at both the 6-hour default and 1-minute minimum. Avoids rewriting ~330 MB/tick at 7M files (~1.32 GB/day default; ~475 GB/day minimum).",
+      io,
+    });
+    expect(result).toMatchObject({ changed: false, stats: { additions: 0, modifications: 0, deletions: 0 } });
+    expect(FS.readFileSync(previousIndex)).toEqual(previousBytes);
+    expect(getScanHistory(ROOT).map((entry) => entry.id)).toEqual([...ids].reverse());
+    expect(calls).toMatchObject({ warmFullDiff: 0, onCommitted: 0 });
     expect(FS.readdirSync(Path.join(dataDir, "scan-indexes")).filter((name) => name.startsWith("pending-"))).toEqual([]);
   });
 

@@ -548,23 +548,39 @@ fn resolve_changes(
     let mut lines = Vec::new();
     let mut dropped = 0;
     for file in journal.into_files() {
+        let entry = &file.latest;
+        // Resolve the current state before emitting historical removals. A
+        // rename A -> B -> A can leave A in both sets; if today's lookup
+        // fails, its old tombstone must not delete the still-current name.
+        let deleted = entry.reason & USN_REASON_FILE_DELETE != 0;
+        let unresolved = !deleted && cache.entry(entry.file_ref)
+            .or_insert_with(|| resolve(entry.file_ref)).is_none();
+        let mut latest_name_removed = false;
         for removed in file.removed_names.values() {
             crate::work::step();
+            let same_name = removed.parent_ref == entry.parent_ref
+                && removed.name.eq_ignore_ascii_case(&entry.name);
+            // A closing record can carry accumulated OLD | NEW reasons.
+            // NEW describes a current name, not evidence it remains removed.
+            let historical = removed.usn < entry.usn
+                || removed.reason & USN_REASON_RENAME_NEW_NAME != 0;
+            if same_name && !historical {
+                latest_name_removed = true;
+            }
+            if unresolved && same_name && historical {
+                continue;
+            }
             emit_removed(removed, &mut cache, &mut resolve, &mut lines, &mut dropped);
         }
-        let entry = file.latest;
-        // The deleted name has already been emitted. Resolving its ID
-        // can fail, or return a surviving hard link at a different path.
-        if entry.reason & USN_REASON_FILE_DELETE != 0 {
+        // A deleted ID may resolve to a surviving hard link at another path.
+        if deleted {
             continue;
         }
-        let resolved = cache.entry(entry.file_ref).or_insert_with(|| resolve(entry.file_ref));
-        if let Some(resolved) = resolved {
-            lines.push(record_line(&entry, JournalOp::from_reason(entry.reason), resolved));
-        } else if !file.removed_names.contains_key(&(entry.parent_ref, entry.name.clone())) {
-            // A lookup can fail for a live file (access denied, sharing
-            // restrictions, or a path-query error). Only FILE_DELETE and
-            // RENAME_OLD_NAME justify removing a name from the index.
+        if let Some(Some(resolved)) = cache.get(&entry.file_ref) {
+            lines.push(record_line(entry, JournalOp::from_reason(entry.reason), resolved));
+        } else if !latest_name_removed {
+            // Historical removals say nothing about whether the latest name
+            // still exists. Preserve uncertainty even after a rename-back.
             dropped += 1;
         }
     }
@@ -741,33 +757,43 @@ mod tests {
 
     #[test]
     fn real_access_denied_is_dropped_and_the_live_file_survives() {
-        let Some(fixture) = Fixture::new() else { return };
-        let before = fixture.cursor();
-        let mut denied = fixture.deny_attributes_on_new_file();
-        let after = fixture.cursor();
-        let mut file_refs = std::collections::HashSet::new();
-        let mut path_buffer = vec![0u16; MAX_PATH_UNITS];
-        read_journal(fixture.volume(), before.journal_id, before.next_usn, after.next_usn, |record, name| {
-            if name == "permission.bin" {
-                if let Some(parent) = resolve_file(fixture.volume(), record.ParentFileReferenceNumber, &mut path_buffer) {
-                    if parent.path.eq_ignore_ascii_case(&fixture.root().to_string_lossy()) {
-                        file_refs.insert(record.FileReferenceNumber);
+        for rename_back in [false, true] {
+            let Some(fixture) = Fixture::new() else { return };
+            let before = fixture.cursor();
+            let mut denied = fixture.deny_attributes_on_new_file(rename_back);
+            let after = fixture.cursor();
+            let mut file_refs = std::collections::HashSet::new();
+            let mut path_buffer = vec![0u16; MAX_PATH_UNITS];
+            read_journal(fixture.volume(), before.journal_id, before.next_usn, after.next_usn, |record, name| {
+                if name == "permission.bin" {
+                    if let Some(parent) = resolve_file(fixture.volume(), record.ParentFileReferenceNumber, &mut path_buffer) {
+                        if parent.path.eq_ignore_ascii_case(&fixture.root().to_string_lossy()) {
+                            file_refs.insert(record.FileReferenceNumber);
+                        }
                     }
                 }
+            }).unwrap();
+            assert_eq!(file_refs.len(), 1, "must observe the real fixture's journal record");
+            let file_ref = *file_refs.iter().next().unwrap();
+            assert!(resolve_file(fixture.volume(), file_ref, &mut path_buffer).is_none(),
+                "fixture DACL must actually prevent OpenFileById attribute access");
+            let lines = fixture.changes(before);
+            assert!(!lines.iter().any(|line| matches!(line,
+                OutputLine::JournalRecord { file_ref: seen, path, .. }
+                    if *seen == file_ref && path.eq_ignore_ascii_case(&denied.path.to_string_lossy())
+            )), "an inaccessible current name must not emit a delete or fabricated metadata");
+            if rename_back {
+                let intermediate = fixture.root().join("permission-intermediate.bin");
+                assert!(lines.iter().any(|line| matches!(line,
+                    OutputLine::JournalRecord { op: JournalOp::Delete, path, .. }
+                        if path.eq_ignore_ascii_case(&intermediate.to_string_lossy())
+                )), "the actual intermediate rename must be observed and removed");
             }
-        }).unwrap();
-        assert_eq!(file_refs.len(), 1, "must observe the real fixture's journal record");
-        let file_ref = *file_refs.iter().next().unwrap();
-        assert!(resolve_file(fixture.volume(), file_ref, &mut path_buffer).is_none(),
-            "fixture DACL must actually prevent OpenFileById attribute access");
-        let lines = fixture.changes(before);
-        assert!(!lines.iter().any(|line| matches!(line,
-            OutputLine::JournalRecord { file_ref: seen, .. } if *seen == file_ref
-        )), "an inaccessible live file must not emit a delete or fabricated metadata");
-        assert!(matches!(lines.last(), Some(OutputLine::JournalCursor { records_dropped, .. }) if *records_dropped >= 1));
-        denied.restore().unwrap();
-        assert_eq!(std::fs::read(&denied.path).unwrap(), b"owned USN permission fixture");
-        assert!(resolve_file(fixture.volume(), file_ref, &mut path_buffer).is_some());
+            assert!(matches!(lines.last(), Some(OutputLine::JournalCursor { records_dropped, .. }) if *records_dropped >= 1));
+            denied.restore().unwrap();
+            assert_eq!(std::fs::read(&denied.path).unwrap(), b"owned USN permission fixture");
+            assert!(resolve_file(fixture.volume(), file_ref, &mut path_buffer).is_some());
+        }
     }
 
     #[test]
@@ -775,7 +801,7 @@ mod tests {
         let Some(fixture) = Fixture::new() else { return };
         let path = fixture.root().join("permission.bin");
         let panic = std::panic::catch_unwind(|| {
-            let _denied = fixture.deny_attributes_on_new_file();
+            let _denied = fixture.deny_attributes_on_new_file(false);
             panic!("intentional fixture unwind");
         }).unwrap_err();
         assert_eq!(panic.downcast_ref::<&str>(), Some(&"intentional fixture unwind"));
@@ -831,6 +857,50 @@ mod tests {
             });
             assert!(lines.is_empty(), "lookup failure emitted an operation: {lines:?}");
             assert_eq!(dropped, 1, "uncertainty must remain visible to the caller");
+        }
+    }
+
+    #[test]
+    fn unresolved_rename_back_preserves_latest_name_but_not_explicit_deletes() {
+        // Also exercise a move back between parents with the same basename.
+        for moved in [false, true] {
+            for final_reason in [USN_REASON_RENAME_NEW_NAME,
+                RENAME_OLD_NAME | USN_REASON_RENAME_NEW_NAME | USN_REASON_CLOSE,
+                USN_REASON_FILE_DELETE] {
+                let deleted = final_reason == USN_REASON_FILE_DELETE;
+                let mut journal = JournalAggregate::default();
+                let middle = if moved { "A" } else { "B" };
+                let parent = if moved { 6 } else { 5 };
+                let mut records = vec![
+                    (5, "A", RENAME_OLD_NAME),
+                    (parent, middle, USN_REASON_RENAME_NEW_NAME),
+                    (parent, middle, RENAME_OLD_NAME),
+                    (5, "A", USN_REASON_RENAME_NEW_NAME),
+                ];
+                records.push((5, "A", final_reason));
+                for (i, (parent_ref, name, reason)) in records.into_iter().enumerate() {
+                    journal.add(JournalEntry {
+                        file_ref: 7, parent_ref, name: name.into(), usn: i as i64 + 1,
+                        reason, timestamp: 0, attributes: 0,
+                    });
+                }
+                let mut calls = HashMap::<u64, u64>::new();
+                let (lines, dropped) = resolve_changes(journal, |id| {
+                    *calls.entry(id).or_default() += 1;
+                    if id == 7 { return None; }
+                    Some(ResolvedFile {
+                        path: format!(r"C:\parent-{id}"), allocated_size: None,
+                        mtime_ms: 0, is_directory: Some(true), number_of_links: None,
+                    })
+                });
+                assert!(calls.values().all(|count| *count == 1));
+                assert_eq!(dropped, if deleted { 0 } else { 1 });
+                assert_eq!(lines.len(), if deleted { 2 } else { 1 });
+                assert_eq!(lines.iter().any(|line| matches!(line,
+                    OutputLine::JournalRecord { op: JournalOp::Delete, path, .. }
+                        if path == r"C:\parent-5\A"
+                )), deleted, "only explicit deletion may remove the latest A");
+            }
         }
     }
 

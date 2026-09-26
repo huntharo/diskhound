@@ -817,7 +817,7 @@
     "lstat": 0,
     "access": 0,
     "existsSync": 7,
-    "createReadStream": 2,
+    "createReadStream": 3,
     "open": 0,
     "observedBytesWritten": 5254139
   },
@@ -842,15 +842,15 @@
     "observedBytesWritten": 0
   },
   "usn-tick-records-match-nothing": {
-    "note": "journal records under the root that leave the index as it was (a write that kept size and mtime, a delete of a file it never listed): the new index is streamed, found identical and deleted, so 1 index write (~330 MB at 7M files) and nothing committed. Used to save a history entry, copy both sidecars and prune a real scan too",
+    "note": "Ineffective updates and deletes are checked against the baseline before opening an output file: 0 writes/day and 0 MB/day at both the 6-hour default and 1-minute minimum. Avoids ~330 MB/tick at 7M files (1.32 GB/day default, 475 GB/day minimum).",
     "writeFile": 0,
     "appendFile": 0,
     "rename": 0,
     "copyFile": 0,
     "link": 0,
-    "mkdir": 1,
-    "createWriteStream": 1,
-    "unlink": 1,
+    "mkdir": 0,
+    "createWriteStream": 0,
+    "unlink": 0,
     "readFile": 1,
     "readdir": 0,
     "stat": 0,
@@ -859,7 +859,7 @@
     "existsSync": 2,
     "createReadStream": 1,
     "open": 0,
-    "observedBytesWritten": 626612
+    "observedBytesWritten": 0
   },
   "usn-tick-small-change": {
     "note": "a USN tick with 4 changed files: the whole index rewritten (~330 MB at 7M files), the history snapshot and last-scan.json (~2.3 MB each), both sidecars hard-linked (0 B, was ~50 MB of copies), disk-baselines.json and the cursor, and a real scan pruned from history. ~335 MB per tick: ~1.3 GB/day at the 6 h default, ~480 GB/day at the 1-minute minimum if every tick finds a change",
@@ -877,9 +877,29 @@
     "lstat": 0,
     "access": 0,
     "existsSync": 7,
-    "createReadStream": 2,
+    "createReadStream": 3,
     "open": 0,
-    "observedBytesWritten": 5254099
+    "observedBytesWritten": 5254093
+  },
+  "usn-tick-transient-only": {
+    "note": "Create/delete activity absent from the baseline: one read-only index pass, 0 writes/day and 0 MB/day at both the 6-hour default and 1-minute minimum. Avoids rewriting ~330 MB/tick at 7M files (~1.32 GB/day default; ~475 GB/day minimum).",
+    "writeFile": 0,
+    "appendFile": 0,
+    "rename": 0,
+    "copyFile": 0,
+    "link": 0,
+    "mkdir": 0,
+    "createWriteStream": 0,
+    "unlink": 0,
+    "readFile": 1,
+    "readdir": 0,
+    "stat": 0,
+    "lstat": 0,
+    "access": 0,
+    "existsSync": 2,
+    "createReadStream": 1,
+    "open": 0,
+    "observedBytesWritten": 0
   },
   "usn-tick-unresolved-file": {
     "note": "an unresolved current-file lookup is reported as dropped, never as a delete: preserve the index and history, with 1 snapshot read and 0 writes (0 writes/day and 0 MB/day at both the 6 h default and the 1-minute minimum; deferred session flushes use the existing quit budget). The manual probe requests a full rescan on dropped records",

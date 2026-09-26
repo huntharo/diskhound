@@ -46,7 +46,7 @@ async function indexedFiles(index: string): Promise<string[]> {
 // The native scanner and the actual Node updater share only this owned temp
 // tree; output indexes sit outside its scanned subdirectory.
 describe.skipIf(process.platform !== "win32")("real Windows USN to saved index", () => {
-  it.for(["delete and move", "rename back and reuse"] as const)("%s", { timeout: 60_000 }, async (scenario, context) => {
+  it.for(["delete and move", "rename back and reuse", "transient only"] as const)("%s", { timeout: 60_000 }, async (scenario, context) => {
     if (!existsSync(scanner)) {
       const reason = "USN integration needs the native debug scanner; run bun run test:usn:windows";
       if (required) throw new Error(reason);
@@ -82,6 +82,19 @@ describe.skipIf(process.platform !== "win32")("real Windows USN to saved index",
       const start = await queryCurrentCursor(scanner, volume);
       expect(start).not.toBeNull(); // Preflight passed; subsequent failures must fail the test.
       const cursor = { volume, cursor: start!.cursor, journalId: start!.journalId, capturedAt: Date.now(), rootPath: root };
+      if (scenario === "transient only") {
+        const transient = Path.join(root, "transient.bin");
+        await FS.writeFile(transient, "created and deleted between ticks");
+        await FS.unlink(transient);
+        const updated = Path.join(dir, "updated.ndjson.gz");
+        const result = await runIncrementalScan({ rootPath: root, scannerPath: scanner, previousIndexPath: baseline, newIndexPath: updated, cursor });
+        expect(result).toMatchObject({ changed: false, stats: { additions: 0, modifications: 0, deletions: 0 } });
+        expect(result!.stats.recordsRead).toBeGreaterThan(0);
+        expect(result!.newCursor.cursor).toBeGreaterThan(cursor.cursor);
+        expect(existsSync(updated)).toBe(false);
+        expect(await FS.readFile(baseline)).toEqual(originalIndex);
+        return;
+      }
       let expected: string[];
       if (scenario === "delete and move") {
         await FS.unlink(gone);

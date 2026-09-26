@@ -100,7 +100,7 @@ impl Fixture {
 
     /// Deny FILE_READ_ATTRIBUTES on a brand-new fixture file only. No
     /// inheritance, privileges, parent ACLs or pre-existing files are changed.
-    pub(super) fn deny_attributes_on_new_file(&self) -> DeniedAttributes {
+    pub(super) fn deny_attributes_on_new_file(&self, rename_back: bool) -> DeniedAttributes {
         let path = self.root().join("permission.bin");
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -109,6 +109,11 @@ impl Fixture {
             .unwrap();
         file.write_all(b"owned USN permission fixture").unwrap();
         drop(file);
+        if rename_back {
+            let intermediate = self.root().join("permission-intermediate.bin");
+            std::fs::rename(&path, &intermediate).unwrap();
+            std::fs::rename(&intermediate, &path).unwrap();
+        }
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
         let mut needed = 0;
         unsafe {
