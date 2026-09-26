@@ -1254,8 +1254,9 @@ export interface DiskhoundNativeApi {
   /** Verify every easy-move record's current on-disk state. Returns
    *  one verification per record with a status code so the UI can
    *  flag broken links, missing destinations, etc. Runs lstat on
-   *  every recorded path; typical call takes <100 ms for ~20 records. */
-  verifyEasyMoves: () => Promise<EasyMoveVerification[]>;
+   *  every recorded path; typical call takes <100 ms for ~20 records.
+   *  Without `force`, main reuses a verification up to 10 minutes old. */
+  verifyEasyMoves: (options?: { force?: boolean }) => Promise<EasyMoveVerification[]>;
   pickMoveDestination: () => Promise<string | null>;
 
   // Duplicate Detection

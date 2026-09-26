@@ -39,6 +39,7 @@ import {
   type ScanDiffResult,
   type ScanOptions,
   type ScanSnapshot,
+  type StorageStats,
   ALLOCATED_SIZE_SEMANTICS,
   hardlinkAccountingCompatible,
   indexUsesAllocatedSize,
@@ -957,6 +958,12 @@ void (async () => {
     );
   } catch { /* non-fatal */ }
 
+  // Settings → Storage's last sum; see get-storage-stats.
+  let storageStatsCache: { at: number; historyKey: string; stats: Promise<StorageStats> } | null = null;
+  const invalidateStorageStats = () => {
+    storageStatsCache = null;
+  };
+
   // Sweep orphan pending-* index files left behind by crashed scans.
   // Done in the background so app startup isn't delayed; if it's
   // long-running (rare — there are usually <10 such files), the
@@ -980,6 +987,7 @@ void (async () => {
         } catch { /* skip */ }
       }
       if (removed > 0) {
+        invalidateStorageStats();
         writeCrashLog("storage-cleanup", `startup sweep: pruned ${removed} orphan pending-* files, freed ${bytesFreed} bytes`);
       }
     } catch { /* directory missing, fine */ }
@@ -2424,7 +2432,11 @@ void (async () => {
   });
 
   ipcMain.handle("diskhound:get-easy-moves", () => getEasyMoves());
-  ipcMain.handle("diskhound:verify-easy-moves", () => verifyEasyMoves());
+  // A tab mount reuses a verification up to 10 minutes old; the Verify
+  // button forces a fresh lstat and stat of every move.
+  const EASY_MOVE_VERIFY_REUSE_MS = 10 * 60_000;
+  ipcMain.handle("diskhound:verify-easy-moves", (_event, options?: { force?: boolean }) =>
+    verifyEasyMoves({ maxAgeMs: options?.force ? 0 : EASY_MOVE_VERIFY_REUSE_MS }));
 
   ipcMain.handle("diskhound:pick-move-destination", async () => {
     if (!mainWindow) return null;
@@ -3944,6 +3956,30 @@ void (async () => {
   // so 20 scans of history was silently using 7 GB+ of disk before
   // v0.5.24 reduced the default to 7.
 
+  // Opening Settings again reuses the last sum (storageStatsCache,
+  // declared before the startup sweep) until the scan history changes
+  // (a scan finished, or history was pruned or cleared), an orphan
+  // sweep removed files, or it is STORAGE_STATS_MAX_AGE_MS old. Never
+  // while a scan runs: its pending-* files are still growing.
+  const STORAGE_STATS_MAX_AGE_MS = 10 * 60_000;
+  const storageHistoryKey = () => getAllEntries().map((entry) => entry.id).join(",");
+
+  ipcMain.handle("diskhound:get-storage-stats", () => {
+    const historyKey = storageHistoryKey();
+    const cached = storageStatsCache;
+    if (
+      activeScans.size === 0
+      && cached
+      && cached.historyKey === historyKey
+      && Date.now() - cached.at < STORAGE_STATS_MAX_AGE_MS
+    ) {
+      return cached.stats;
+    }
+    const stats = computeStorageStats();
+    storageStatsCache = activeScans.size === 0 ? { at: Date.now(), historyKey, stats } : null;
+    return stats;
+  });
+
   /** Drops what main caches in memory about a scan that was pruned or cleared. */
   const forgetScanCaches = (id: string) => {
     forgetScanDiffs(id);
@@ -3952,7 +3988,7 @@ void (async () => {
     devFullLoadEmptyAt.delete(id);
   };
 
-  ipcMain.handle("diskhound:get-storage-stats", async () => {
+  const computeStorageStats = async (): Promise<StorageStats> => {
     const userData = app.getPath("userData");
     const indexesDir = Path.join(userData, "scan-indexes");
     const historyDir = Path.join(userData, "scan-history");
@@ -3997,7 +4033,7 @@ void (async () => {
       orphanPendingCount: indexes.orphanPending.count,
       orphanPendingBytes: indexes.orphanPending.bytes,
     };
-  });
+  };
 
   /**
    * Wipe every scan-history snapshot, every scan-indexes file
@@ -4092,6 +4128,7 @@ void (async () => {
       }
     } catch { /* directory missing */ }
     if (removed > 0) {
+      invalidateStorageStats();
       writeCrashLog("storage-cleanup", `pruned ${removed} orphan pending-* files, freed ${bytesFreed} bytes`);
     }
     return { removed, bytesFreed };

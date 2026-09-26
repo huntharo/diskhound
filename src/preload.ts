@@ -169,7 +169,7 @@ const api: DiskhoundNativeApi = {
   easyMoveElevated: (sourcePath, destinationDir) => ipcRenderer.invoke("diskhound:easy-move-elevated", sourcePath, destinationDir),
   easyMoveBack: (recordId) => ipcRenderer.invoke("diskhound:easy-move-back", recordId),
   getEasyMoves: () => ipcRenderer.invoke("diskhound:get-easy-moves"),
-  verifyEasyMoves: () => ipcRenderer.invoke("diskhound:verify-easy-moves"),
+  verifyEasyMoves: (options) => ipcRenderer.invoke("diskhound:verify-easy-moves", options),
   pickMoveDestination: () => ipcRenderer.invoke("diskhound:pick-move-destination"),
 
   // Theme

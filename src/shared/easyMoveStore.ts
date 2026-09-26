@@ -52,6 +52,7 @@ export function setEasyMoveProgress(fn: ProgressFn): void {
 export function initEasyMoveStore(dir: string): void {
   dataDir = dir;
   records = [];
+  lastVerification = null;
   const filePath = Path.join(dataDir, STORE_FILENAME);
   try {
     if (FS.existsSync(filePath)) {
@@ -63,6 +64,8 @@ export function initEasyMoveStore(dir: string): void {
 }
 
 function persist(): void {
+  // The records changed, so the last verification no longer covers them.
+  lastVerification = null;
   if (!dataDir) return;
   try {
     FS.mkdirSync(dataDir, { recursive: true });
@@ -96,7 +99,22 @@ export function getEasyMoves(): EasyMoveRecord[] {
  *                       link) AND dest also exists — double file
  *                       state, user intervention needed
  */
-export async function verifyEasyMoves(): Promise<EasyMoveVerification[]> {
+/** The last verifyEasyMoves result, reused by a tab mount within `maxAgeMs`. */
+let lastVerification: { at: number; results: EasyMoveVerification[] } | null = null;
+
+export async function verifyEasyMoves(
+  options: {
+    /**
+     * Reuse a verification of the same records at most this old. The
+     * Easy Move tab verifies on every mount; its Verify button passes 0.
+     */
+    maxAgeMs?: number;
+  } = {},
+): Promise<EasyMoveVerification[]> {
+  const reuse = lastVerification;
+  if (reuse && options.maxAgeMs && Date.now() - reuse.at < options.maxAgeMs) {
+    return reuse.results;
+  }
   const results: EasyMoveVerification[] = [];
   for (const rec of records) {
     // lstat (not stat) so symlinks don't transparently deref into
@@ -169,6 +187,7 @@ export async function verifyEasyMoves(): Promise<EasyMoveVerification[]> {
       destSize: destStat?.size ?? 0,
     });
   }
+  lastVerification = { at: Date.now(), results };
   return results;
 }
 
