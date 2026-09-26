@@ -203,8 +203,18 @@ export function getMonitoringSnapshot(): MonitoringSnapshot {
   };
 }
 
-export function markFullScan(): void {
+/**
+ * Records that a full or incremental scan just ran, which restarts the
+ * scheduled-rescan clock. With `deferWrite`, for a rescan that found
+ * nothing changed, the time waits for flushDiskMonitor() at quit
+ * instead of rewriting the file and its 500-entry history now.
+ */
+export function markFullScan(options?: { deferWrite?: boolean }): void {
   lastFullScanAt = Date.now();
+  if (options?.deferWrite) {
+    baselineDirty = true;
+    return;
+  }
   void persistState();
 }
 

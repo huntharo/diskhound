@@ -15,6 +15,7 @@ export const DEV_KIND_LABEL: Record<DevArtifactKind, string> = {
   dotnet: "NuGet / .NET",
   "compiler-cache": "Compiler caches",
   "cmake-build": "CMake build trees",
+  terraform: "Terraform providers",
   "diag-logs": "RDP / diag traces",
 };
 
@@ -32,6 +33,7 @@ export const DEV_KIND_SHORT: Record<DevArtifactKind, string> = {
   dotnet: ".NET",
   "compiler-cache": "ccache",
   "cmake-build": "CMake",
+  terraform: "Terraform",
   "diag-logs": "RDP / diag",
 };
 
@@ -72,6 +74,24 @@ const SEGMENT_KIND: Record<string, DevArtifactKind> = {
   rdclientautotrace: "diag-logs",
 };
 
+/**
+ * Every lowercase segment name that can start a `classifyArtifactPath`
+ * match. A path with none of these segments never classifies, so a
+ * streaming reader can skip it without building the path string.
+ */
+export const ARTIFACT_SEGMENT_NAMES: ReadonlySet<string> = new Set([
+  ...Object.keys(SEGMENT_KIND),
+  "target",
+  ".cargo",
+  "pkg",
+  ".cache",
+  ".terraform",
+  ".terraform.d",
+  "dist",
+  "build",
+  "out",
+]);
+
 function splitSegments(filePath: string): string[] {
   return filePath.split(/[\\/]+/).filter(Boolean);
 }
@@ -89,11 +109,19 @@ function joinSegments(original: string, count: number): string {
   return parts.join(sep);
 }
 
+/**
+ * Every root ends at the matched segment or one past it. The folder-tree
+ * fallback (devArtifactFolderTree.ts) relies on that to skip rows whose
+ * last two segments aren't in ARTIFACT_SEGMENT_NAMES, so a rule that
+ * reaches further needs that reader changed too.
+ */
 export function classifyArtifactPath(filePath: string): { root: string; kind: DevArtifactKind } | null {
   const parts = splitSegments(filePath);
   for (let i = 0; i < parts.length; i++) {
-    const seg = parts[i]!;
-    const lower = seg.toLowerCase();
+    const lower = parts[i]!.toLowerCase();
+    // Also keeps Object.prototype names ("constructor", "toString")
+    // out of the SEGMENT_KIND lookup below.
+    if (!ARTIFACT_SEGMENT_NAMES.has(lower)) continue;
 
     if (lower === "target") {
       if (i + 1 < parts.length) {
@@ -121,7 +149,23 @@ export function classifyArtifactPath(filePath: string): { root: string; kind: De
       }
     }
 
-    const mapped = SEGMENT_KIND[lower] ?? SEGMENT_KIND[seg];
+    // Only the provider downloads, which `terraform init` puts back from
+    // the lock file. The rest of .terraform records the selected
+    // workspace and the last backend config, so it stays.
+    if (lower === ".terraform" && i + 1 < parts.length) {
+      const next = parts[i + 1]!.toLowerCase();
+      if (next === "providers" || next === "plugins") {
+        return { root: joinSegments(filePath, i + 2), kind: "terraform" };
+      }
+    }
+
+    // The documented plugin_cache_dir. `.terraform.d/plugins` holds
+    // providers installed by hand, so it stays.
+    if (lower === ".terraform.d" && i + 1 < parts.length && parts[i + 1]!.toLowerCase() === "plugin-cache") {
+      return { root: joinSegments(filePath, i + 2), kind: "terraform" };
+    }
+
+    const mapped = SEGMENT_KIND[lower];
     if (mapped) {
       const depth = mapped === "worktree" && i + 1 < parts.length ? i + 2 : i + 1;
       return { root: joinSegments(filePath, depth), kind: mapped };

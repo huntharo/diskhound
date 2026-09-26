@@ -622,6 +622,7 @@ export type DevArtifactKind =
   | "dotnet"
   | "compiler-cache"
   | "cmake-build"
+  | "terraform"
   | "diag-logs";
 
 export interface DevArtifact {
@@ -1396,8 +1397,17 @@ export interface DiskhoundNativeApi {
    *  this to surface a "run a regular scan first" hint upfront. */
   hasScanIndexForPath: (rootPath: string) => Promise<boolean>;
   getFullDiffStatus: (baselineId: string, currentId: string, limit?: number) => Promise<FullDiffStatus>;
-  /** Compute the full per-file diff from the persisted index files (not top-N). */
-  computeFullScanDiff: (baselineId: string, currentId: string, limit?: number) => Promise<FullDiffResult | null>;
+  /**
+   * Compute the full per-file diff from the persisted index files (not
+   * top-N). A pair that failed is not computed again until one of its
+   * indexes changes, unless `retryFailed` is set: the user asked again.
+   */
+  computeFullScanDiff: (
+    baselineId: string,
+    currentId: string,
+    limit?: number,
+    options?: { retryFailed?: boolean },
+  ) => Promise<FullDiffResult | null>;
   /**
    * Returns the N largest files for the given root's latest scan, sourced from
    * the persisted full-file index (not just the in-memory top-N snapshot list).

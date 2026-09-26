@@ -9055,6 +9055,7 @@ body.system-widget-body #app {
   --dev-k-dotnet: #818cf8;
   --dev-k-compiler-cache: #64748b;
   --dev-k-cmake-build: #38bdf8;
+  --dev-k-terraform: #d946ef;
   --dev-k-diag-logs: #f59e0b;
 }
 .dev-summary {

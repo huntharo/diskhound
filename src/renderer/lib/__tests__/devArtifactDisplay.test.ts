@@ -56,6 +56,26 @@ describe("artifact display", () => {
     expect(artifactTail(next)).toBe(".next");
   });
 
+  it("names Terraform providers by the working directory", () => {
+    const scoped = artifact({
+      path: "/Users/me/infra/env/prod/gif-prod/.terraform/providers",
+      kind: "terraform",
+      projectPath: "/Users/me/infra/env/prod/gif-prod",
+      projectName: "gif-prod",
+    });
+    expect(artifactHeadline(scoped)).toBe("gif-prod");
+    expect(artifactTail(scoped)).toBe(".terraform/providers");
+
+    // No lock file before Terraform 0.14.
+    const unscoped = artifact({ path: "/Users/me/infra/old/.terraform/plugins", kind: "terraform" });
+    expect(artifactHeadline(unscoped)).toBe("/Users/me/infra/old");
+    expect(artifactTail(unscoped)).toBe(".terraform/plugins");
+
+    const cache = artifact({ path: "/Users/me/.terraform.d/plugin-cache", kind: "terraform" });
+    expect(artifactHeadline(cache)).toBe(".terraform.d/plugin-cache");
+    expect(artifactTail(cache)).toBe("/Users/me");
+  });
+
   it("keeps a real project folder as the headline", () => {
     const hub = artifact({
       path: "C:\\Users\\thoma\\pour-over-hub\\.next",
