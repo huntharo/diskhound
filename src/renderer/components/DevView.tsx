@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 
-import type { DevArtifact, DevArtifactKind, DevArtifactReport, DevArtifactsRescanProgress, ScanSnapshot } from "../../shared/contracts";
+import type {
+  DevArtifact,
+  DevArtifactKind,
+  DevArtifactReport,
+  DevArtifactsRescanProgress,
+  ScanSnapshot,
+  StorageAccountingReport,
+} from "../../shared/contracts";
 import {
   DEV_KIND_LABEL,
   DEV_KIND_SHORT,
@@ -11,6 +18,13 @@ import {
 } from "../../shared/devArtifacts";
 import { inFlightDeleteBytes } from "../../shared/deleteProgress";
 import { formatScanRoot, normPath } from "../../shared/pathUtils";
+import {
+  devArtifactSharing,
+  isMeaningfullyShared,
+  summarizeDevSharing,
+  userDataSnapshots,
+  type DevArtifactSharing,
+} from "../../shared/storageSharing";
 import { artifactHeadline, artifactTail } from "../lib/devArtifactDisplay";
 import {
   effectiveDevSort,
@@ -23,8 +37,9 @@ import {
   type DevGroupBy,
   type DevSortBy,
 } from "../lib/devArtifactViewState";
-import { formatBytes, formatCount } from "../lib/format";
-import { dispatchDevArtifactsUpdated } from "../lib/uiEvents";
+import { formatBytes, formatBytesRange, formatCount, relativeTime } from "../lib/format";
+import { checkFreedSpace, freeBytesBeforeDelete } from "../lib/freedSpaceCheck";
+import { dispatchDevArtifactsUpdated, STORAGE_ACCOUNTING_STALE_EVENT } from "../lib/uiEvents";
 import { nativeApi } from "../nativeApi";
 import { DEV_FOLDER_TREE_STAGES, DEV_RESCAN_STAGES, DEV_SIDECAR_STAGES, IndexLoadingPanel } from "./IndexLoadingPanel";
 import { toast } from "./Toasts";
@@ -92,12 +107,62 @@ function yieldToUi(): Promise<void> {
   });
 }
 
-function permanentDeleteConfirm(label: string, trees: number, bytes: number): string {
+function permanentDeleteConfirm(
+  label: string,
+  trees: number,
+  bytes: number,
+  frees: { low: number; high: number } | null,
+): string {
+  // APFS clone accounting: say up front when most of the selection is
+  // clone copies, instead of promising the full size. A range when the
+  // selection may hold every copy of some clones (see summarizeDevSharing).
+  const note = frees !== null && frees.low < bytes * 0.9
+    ? `\nFrees ≈ ${formatBytesRange(frees.low, frees.high)} — the rest is APFS clone copies; their blocks come back only when every copy is gone.\n`
+    : "";
   return (
     `${label}\n\n` +
-    `${formatCount(trees)} trees · ${formatBytes(bytes)}\n\n` +
+    `${formatCount(trees)} trees · ${formatBytes(bytes)}\n${note}\n` +
     `This permanently deletes the trees from disk. It cannot be undone and does not go to the Recycle Bin. Protected folders are skipped.`
   );
+}
+
+/**
+ * A selection's or group's size, or what deleting it frees once the header
+ * leads with that, so every total on the page counts clones the same way.
+ */
+function reclaimTally(listed: number, frees: number, freesAtMost: number, reclaim: boolean): string {
+  const range = formatBytesRange(frees, freesAtMost);
+  if (!reclaim || range === formatBytes(listed)) return formatBytes(listed);
+  return range === formatBytes(frees) ? `frees ≈ ${range}` : `frees ${range}`;
+}
+
+/** Tooltip for a row's "Shared" badge / "frees ≈" line. */
+function sharingTitle(sharing: DevArtifactSharing, size: number): string {
+  if (!sharing.measured) {
+    return `${sharing.hint?.detail ?? ""} Rescan the drive on macOS to measure it.`.trim();
+  }
+  const lines: string[] = [];
+  if (sharing.sharedBytes > 0) {
+    const others = sharing.sharedRoots > 0
+      ? `${formatCount(sharing.sharedRoots)} other tree${sharing.sharedRoots === 1 ? "" : "s"}`
+      : "files outside the Dev list";
+    lines.push(
+      `${formatBytes(sharing.sharedBytes)} of this ${formatBytes(size)} tree is APFS-cloned with ${others}; only deleting every copy frees those blocks.`,
+    );
+  }
+  // Clones of each other inside the tree (Cargo's deps/ vs. final
+  // binaries, for example): counted per copy in `size`, freed once.
+  const internalDup = Math.max(0, size - (sharing.freesBytes ?? size) - sharing.sharedBytes);
+  if (internalDup >= 1024 * 1024) {
+    lines.push(
+      `${formatBytes(internalDup)} is counted more than once because files inside this tree are APFS clones of each other.`,
+    );
+  }
+  lines.push(`Deleting this tree frees ≈ ${formatBytes(sharing.freesBytes ?? 0)} once no local snapshot holds it.`);
+  if (sharing.sharedWith.length > 0) {
+    lines.push(`\nShares blocks with:\n${sharing.sharedWith.map((p) => `  ${p}`).join("\n")}`);
+  }
+  return lines.join(" ");
 }
 
 function seedViewState(
@@ -137,6 +202,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
   const [rescanning, setRescanning] = useState(false);
   const [rescanProgress, setRescanProgress] = useState<DevArtifactsRescanProgress | null>(null);
   const [loadPath, setLoadPath] = useState<"sidecar" | "folder-tree">("sidecar");
+  const [storageReport, setStorageReport] = useState<StorageAccountingReport | null>(null);
   const rescanningRef = useRef(false);
   const rescanGenRef = useRef(0);
   const loadGenRef = useRef(0);
@@ -333,30 +399,76 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     totalFiles: remaining.reduce((sum, a) => sum + a.fileCount, 0),
     projectCount: new Set(remaining.map((a) => a.projectPath).filter(Boolean)).size,
   }), [remaining]);
+  const sharingSummary = useMemo(() => summarizeDevSharing(remaining), [remaining]);
+
+  // Local snapshots (macOS) for the note above the list: deleting any of
+  // these trees frees nothing until the snapshot holding them expires.
+  useEffect(() => {
+    if (nativeApi.platform !== "darwin" || !root) {
+      setStorageReport(null);
+      return;
+    }
+    let cancelled = false;
+    const load = (fresh = false) => {
+      void nativeApi.getStorageAccounting(root, { fresh }).then((next) => {
+        if (!cancelled) setStorageReport(next);
+      }).catch(() => { /* keep last */ });
+    };
+    load();
+    const onStale = () => load(true);
+    window.addEventListener(STORAGE_ACCOUNTING_STALE_EVENT, onStale);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(STORAGE_ACCOUNTING_STALE_EVENT, onStale);
+    };
+  }, [root]);
+  const devSnapshots = userDataSnapshots(storageReport);
+  const newestSnapshotAt = devSnapshots.find((s) => s.createdAt !== null)?.createdAt ?? null;
+  const showSharedNote = sharingSummary.measuredTrees > 0
+    && sharingSummary.sharedBytes >= Math.max(64 * 1024 * 1024, summary.totalBytes * 0.02);
+  // APFS clones count at full size in every tree that holds a copy, so
+  // the trees' sizes add up to more than deleting them frees. Lead with
+  // what comes back once the gap is worth a second number.
+  const cloneAwareTotal = sharingSummary.measuredTrees > 0
+    && summary.totalBytes - sharingSummary.freesBytes >= Math.max(64 * 1024 * 1024, summary.totalBytes * 0.02);
+  const reclaimRange = formatBytesRange(sharingSummary.freesBytes, sharingSummary.freesAtMostBytes);
+  const reclaimIsRange = reclaimRange !== formatBytes(sharingSummary.freesBytes);
+  // Only worth saying when the copies stand for noticeably fewer blocks
+  // (older sidecars report no blocks, and then the two are equal).
+  const showSharedBlocks = sharingSummary.sharedBlocks < sharingSummary.sharedBytes * 0.9;
 
   const kindTotals = useMemo(() => {
-    const map = new Map<DevArtifactKind, { size: number; count: number }>();
+    const byKind = new Map<DevArtifactKind, DevArtifact[]>();
     for (const artifact of remaining) {
-      const entry = map.get(artifact.kind) ?? { size: 0, count: 0 };
-      entry.size += artifact.size;
-      entry.count += 1;
-      map.set(artifact.kind, entry);
+      const list = byKind.get(artifact.kind);
+      if (list) list.push(artifact);
+      else byKind.set(artifact.kind, [artifact]);
     }
-    return [...map.entries()]
-      .map(([kind, stats]) => ({ kind, size: stats.size, count: stats.count }))
-      .sort((a, b) => b.size - a.size);
+    return [...byKind.entries()].map(([kind, artifacts]): KindTotal => {
+      const sharing = summarizeDevSharing(artifacts);
+      return {
+        kind,
+        count: artifacts.length,
+        size: sharing.totalBytes,
+        frees: sharing.freesBytes,
+        freesAtMost: sharing.freesAtMostBytes,
+      };
+    });
   }, [remaining]);
 
   const reportHasChangeData = useMemo(() => hasDevChangeData(remaining), [remaining]);
   const filterHasIncrease = useMemo(() => hasDevChangeData(rows), [rows]);
   const listSort = effectiveDevSort(sortBy, filterHasIncrease);
-  const groups = useMemo(() => groupDevArtifacts(rows, groupBy, listSort), [rows, groupBy, listSort]);
+  const groups = useMemo(
+    () => groupDevArtifacts(rows, groupBy, listSort, cloneAwareTotal),
+    [rows, groupBy, listSort, cloneAwareTotal],
+  );
 
   const selectedVisible = useMemo(
     () => rows.filter((a) => selected.has(a.path)),
     [rows, selected],
   );
-  const selectedBytes = selectedVisible.reduce((sum, a) => sum + a.size, 0);
+  const selectedSharing = useMemo(() => summarizeDevSharing(selectedVisible), [selectedVisible]);
   const allVisibleSelected = rows.length > 0 && rows.every((a) => selected.has(a.path));
 
   const toggleOne = (path: string) => {
@@ -401,8 +513,20 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     const targets = remaining.filter((artifact) => paths.includes(artifact.path));
     if (targets.length === 0) return;
     const totalBytes = targets.reduce((sum, artifact) => sum + artifact.size, 0);
-    const ok = window.confirm(permanentDeleteConfirm(label, targets.length, totalBytes));
+    const targetSharing = summarizeDevSharing(targets);
+    const ok = window.confirm(permanentDeleteConfirm(
+      label,
+      targets.length,
+      totalBytes,
+      targetSharing.measuredTrees > 0
+        ? { low: targetSharing.freesBytes, high: targetSharing.freesAtMostBytes }
+        : null,
+    ));
     if (!ok) return;
+    // Did free space actually move? (macOS; see freedSpaceCheck.ts)
+    const freeBefore = await freeBytesBeforeDelete(root, totalBytes);
+    let deletedSharedBytes = 0;
+    let deletedMeasured = false;
     setBulkBusy(true);
     let succeeded = 0;
     let failed = 0;
@@ -453,6 +577,13 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
           }
           succeeded += 1;
           deletedBytes += artifact.size;
+          // Everything the row said would not come back: clone blocks
+          // shared outside the tree plus extra copies inside it.
+          const deletedSharing = devArtifactSharing(artifact);
+          if (deletedSharing.freesBytes !== null) {
+            deletedSharedBytes += Math.max(0, artifact.size - deletedSharing.freesBytes);
+          }
+          deletedMeasured ||= deletedSharing.measured;
           noteForgotten(scanKey, [artifact.path]);
           live = overlayForgotten(dropArtifactsFromReport(live ?? emptyDevReport(root), [artifact.path]), scanKey);
           setReport(live);
@@ -483,6 +614,14 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
           `Permanently deleted ${formatCount(succeeded)} tree${succeeded === 1 ? "" : "s"}`,
           "This cannot be undone.",
         );
+        if (freeBefore !== null) {
+          void checkFreedSpace({
+            path: root,
+            expectedBytes: deletedBytes,
+            freeBefore,
+            sharedBytes: deletedMeasured ? deletedSharedBytes : undefined,
+          });
+        }
       }
       if (failed > 0 && succeeded === 0) {
         toast("error", "Nothing was deleted", `${failed} failed`);
@@ -658,8 +797,31 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
       <div className="dev-summary">
         <div className="dev-summary-net">
           <span className="scan-root-chip" title={root}>{rootLabel}</span>
-          <span className="changes-delta-big">{formatBytes(summary.totalBytes)}</span>
-          <span className="changes-delta-label">reclaimable on this scan</span>
+          {cloneAwareTotal ? (
+            <>
+              <span
+                className="changes-delta-big"
+                title={
+                  `Deleting every tree listed frees about ${formatBytes(sharingSummary.freesBytes)}`
+                  + (reclaimIsRange
+                    ? `, up to ${formatBytes(sharingSummary.freesAtMostBytes)} if no copy of their shared APFS clones is left elsewhere`
+                    : "")
+                  + `. Their sizes add up to ${formatBytes(summary.totalBytes)} because every clone copy counts at full size.`
+                  + " A local snapshot holds the space until it expires."
+                }
+              >
+                {reclaimIsRange ? reclaimRange : `≈ ${reclaimRange}`}
+              </span>
+              <span className="changes-delta-label">
+                reclaimable on this scan · {formatBytes(summary.totalBytes)} listed
+              </span>
+            </>
+          ) : (
+            <>
+              <span className="changes-delta-big">{formatBytes(summary.totalBytes)}</span>
+              <span className="changes-delta-label">reclaimable on this scan</span>
+            </>
+          )}
         </div>
         <div className="changes-summary-stats">
           <div className="summary-item">
@@ -687,10 +849,50 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
         </div>
       </div>
 
+      {(showSharedNote || devSnapshots.length > 0) && (
+        <div className="dev-sharing-note" role="note">
+          {showSharedNote && (
+            <div>
+              <strong>{formatBytes(sharingSummary.sharedBytes)}</strong> of these trees is APFS clones sharing
+              blocks with files elsewhere.
+              {showSharedBlocks && (
+                <>
+                  {" "}Each copy counts at full size, but together they hold about{" "}
+                  <strong>{formatBytes(sharingSummary.sharedBlocks)}</strong> of blocks.
+                </>
+              )}
+              {" "}Deleting a tree frees only its own blocks: about{" "}
+              <strong>{formatBytes(sharingSummary.freesBytes)}</strong> if you deleted everything listed
+              {reclaimIsRange && (
+                <>
+                  , up to <strong>{formatBytes(sharingSummary.freesAtMostBytes)}</strong> if no copy is left
+                  elsewhere
+                </>
+              )}
+              . Rows marked <span className="dev-share-badge">Shared</span> say with what.
+            </div>
+          )}
+          {devSnapshots.length > 0 && (
+            <div>
+              {devSnapshots.length === 1 ? "A local snapshot" : `${formatCount(devSnapshots.length)} local snapshots`}
+              {newestSnapshotAt ? ` (newest ${relativeTime(newestSnapshotAt)})` : ""}
+              {devSnapshots.length === 1 ? " still references" : " still reference"} files that existed when
+              {devSnapshots.length === 1 ? " it was" : " they were"} taken. Space from deleting them comes back when
+              the snapshot expires — usually within 24 hours. See Overview for how to thin snapshots now.
+            </div>
+          )}
+        </div>
+      )}
+
       {kindTotals.length > 0 && (
         <KindTape
           totals={kindTotals}
-          totalBytes={summary.totalBytes}
+          all={{
+            size: summary.totalBytes,
+            frees: sharingSummary.freesBytes,
+            freesAtMost: sharingSummary.freesAtMostBytes,
+          }}
+          reclaim={cloneAwareTotal}
           kindFilter={kindFilter}
           onFilter={setKindFilter}
         />
@@ -805,8 +1007,16 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
       >
         {selectedVisible.length > 0 ? (
           <>
-            <span className="dev-select-bar-tally">
-              {formatCount(selectedVisible.length)} · {formatBytes(selectedBytes)}
+            <span
+              className="dev-select-bar-tally"
+              title={cloneAwareTotal ? `${formatBytes(selectedSharing.totalBytes)} listed` : undefined}
+            >
+              {formatCount(selectedVisible.length)} · {reclaimTally(
+                selectedSharing.totalBytes,
+                selectedSharing.freesBytes,
+                selectedSharing.freesAtMostBytes,
+                cloneAwareTotal,
+              )}
             </span>
             <button
               type="button"
@@ -880,10 +1090,19 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                   ) : null}
                   <span className="dev-group-title">{group.label}</span>
                 </label>
-                <span className="dev-group-size">{formatBytes(group.size)}</span>
+                <span
+                  className="dev-group-size"
+                  title={cloneAwareTotal ? `${formatBytes(group.size)} listed` : undefined}
+                >
+                  {reclaimTally(group.size, group.frees, group.freesAtMost, cloneAwareTotal)}
+                </span>
               </header>
               )}
-              {group.artifacts.map((artifact) => (
+              {group.artifacts.map((artifact) => {
+                const sharing = devArtifactSharing(artifact);
+                const shared = isMeaningfullyShared(sharing, artifact.size);
+                const freesLess = sharing.freesBytes !== null && sharing.freesBytes < artifact.size * 0.9;
+                return (
                 <div
                   key={artifact.path}
                   className={`dev-row ${selected.has(artifact.path) ? "selected" : ""} ${busyPaths.has(artifact.path) ? "is-busy" : ""}`}
@@ -909,9 +1128,31 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                           {` · ${artifact.deltaBytes > 0 ? "+" : ""}${formatBytes(artifact.deltaBytes)} since last scan`}
                         </span>
                       ) : null}
+                      {shared && (
+                        <>
+                          {" · "}
+                          <span
+                            className={`dev-share-badge ${sharing.measured ? "" : "likely"}`}
+                            title={sharingTitle(sharing, artifact.size)}
+                          >
+                            {!sharing.measured
+                              ? "Likely shared"
+                              : sharing.sharedRoots > 0
+                                ? `Shared with ${formatCount(sharing.sharedRoots)} other tree${sharing.sharedRoots === 1 ? "" : "s"}`
+                                : "Shared"}
+                          </span>
+                        </>
+                      )}
                     </div>
                   </div>
-                  <div className="dev-row-size">{formatBytes(artifact.size)}</div>
+                  <div className="dev-row-size">
+                    {formatBytes(artifact.size)}
+                    {freesLess && (
+                      <span className="dev-row-frees" title={sharingTitle(sharing, artifact.size)}>
+                        frees ≈ {formatBytes(sharing.freesBytes!)}
+                      </span>
+                    )}
+                  </div>
                   <div className="dev-row-actions">
                     <button className="action-btn" onClick={() => void nativeApi.revealPath(artifact.path)}>Reveal</button>
                     <button
@@ -924,7 +1165,8 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                     </button>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </section>
           );
         })}
@@ -933,14 +1175,27 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
   );
 }
 
+interface KindTotal {
+  kind: DevArtifactKind;
+  count: number;
+  /** Sum of the trees' sizes. */
+  size: number;
+  /** What deleting every tree of this kind frees, low and high end. */
+  frees: number;
+  freesAtMost: number;
+}
+
 function KindTape({
   totals,
-  totalBytes,
+  all,
+  reclaim,
   kindFilter,
   onFilter,
 }: {
-  totals: Array<{ kind: DevArtifactKind; size: number; count: number }>;
-  totalBytes: number;
+  totals: KindTotal[];
+  all: Pick<KindTotal, "size" | "frees" | "freesAtMost">;
+  /** Show what deleting frees, as the header does once clones matter. */
+  reclaim: boolean;
   kindFilter: DevArtifactKind | "all";
   onFilter: (kind: DevArtifactKind | "all") => void;
 }) {
@@ -948,6 +1203,14 @@ function KindTape({
     onFilter(kindFilter === kind ? "all" : kind);
   };
   const filtered = kindFilter !== "all";
+  // Per-tree figures add up, so the kinds' ranges sum to the header's.
+  // Segments and fills take the middle of each range.
+  const amount = (t: Pick<KindTotal, "size" | "frees" | "freesAtMost">) =>
+    reclaim ? (t.frees + t.freesAtMost) / 2 : t.size;
+  const label = (t: Pick<KindTotal, "size" | "frees" | "freesAtMost">) =>
+    reclaim ? formatBytesRange(t.frees, t.freesAtMost) : formatBytes(t.size);
+  const sorted = [...totals].sort((a, b) => amount(b) - amount(a));
+  const allAmount = amount(all);
   return (
     <div className="dev-tape">
       <div
@@ -955,17 +1218,19 @@ function KindTape({
         role="list"
         aria-label="Reclaimable bytes by kind"
       >
-        {totals.map((entry) => (
+        {sorted.map((entry) => (
           <button
             key={entry.kind}
             type="button"
             role="listitem"
             className={`dev-spectrum-seg ${kindFilter === entry.kind ? "active" : ""}`}
             style={{
-              flexGrow: Math.max(entry.size, 1),
+              flexGrow: Math.max(amount(entry), 1),
               background: devKindCssVar(entry.kind),
             }}
-            title={`${DEV_KIND_LABEL[entry.kind]} · ${formatBytes(entry.size)}`}
+            title={reclaim
+              ? `${DEV_KIND_LABEL[entry.kind]} · ${label(entry)} reclaimable · ${formatBytes(entry.size)} listed`
+              : `${DEV_KIND_LABEL[entry.kind]} · ${formatBytes(entry.size)}`}
             onClick={() => toggle(entry.kind)}
           />
         ))}
@@ -983,10 +1248,10 @@ function KindTape({
           onClick={() => onFilter("all")}
         >
           <span className="dev-kind-cell-label">All kinds</span>
-          <span className="dev-kind-cell-size">{formatBytes(totalBytes)}</span>
+          <span className="dev-kind-cell-size">{label(all)}</span>
         </button>
-        {totals.map((entry) => {
-          const share = totalBytes > 0 ? entry.size / totalBytes : 0;
+        {sorted.map((entry) => {
+          const share = allAmount > 0 ? amount(entry) / allAmount : 0;
           const selected = kindFilter === entry.kind;
           return (
             <button
@@ -995,13 +1260,15 @@ function KindTape({
               className={`dev-kind-cell ${selected ? "active" : ""}`}
               aria-pressed={selected}
               onClick={() => toggle(entry.kind)}
-              title={DEV_KIND_LABEL[entry.kind]}
+              title={reclaim
+                ? `${DEV_KIND_LABEL[entry.kind]} · ${formatBytes(entry.size)} listed`
+                : DEV_KIND_LABEL[entry.kind]}
               style={{ "--cell-kind": devKindCssVar(entry.kind) }}
             >
               <span className="dev-kind-cell-top">
                 <span className="dev-kind-swatch" aria-hidden="true" />
                 <span className="dev-kind-cell-label">{DEV_KIND_SHORT[entry.kind]}</span>
-                <span className="dev-kind-cell-size">{formatBytes(entry.size)}</span>
+                <span className="dev-kind-cell-size">{label(entry)}</span>
               </span>
               <span className="dev-kind-cell-bar" aria-hidden="true">
                 <span className="dev-kind-cell-fill" style={{ width: `${Math.max(share * 100, 3)}%` }} />

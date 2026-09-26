@@ -96,6 +96,16 @@ describe("sidecarFromFolderTreeFile", () => {
     expect(report.projectCount).toBe(1);
   });
 
+  it("finds pnpm's global store from its folder row", async () => {
+    const treePath = await writeTree([
+      `${line("/Users/me/Library/pnpm", [["/Users/me/Library/pnpm/store", 30_000_000, 900]])}\n`,
+    ]);
+    const { sidecar } = await classify(treePath, "/");
+    expect(reportFromSidecar(sidecar!).artifacts.map((a) => [a.path, a.kind])).toEqual([
+      ["/Users/me/Library/pnpm/store", "package-cache"],
+    ]);
+  });
+
   it("returns null when the folder-tree sidecar is missing", async () => {
     await expect(sidecarFromFolderTreeFile(Path.join(tempDir, "missing.ndjson.gz"), "C:\\")).resolves.toBeNull();
   });
@@ -248,7 +258,7 @@ describe("sidecarFromFolderTreeFile", () => {
     const artifactNames = [...ARTIFACT_SEGMENT_NAMES, "Node_Modules", "TARGET"];
     // Names that only matter after an artifact name, and plain ones.
     const otherNames = [
-      "debug", "release", "doc", "incremental", "registry", "mod", "ccache", "sccache", "yarn", "pnpm",
+      "debug", "release", "doc", "incremental", "registry", "mod", "ccache", "sccache", "yarn", "pnpm", "store",
       "providers", "plugins", "plugin-cache",
       "src", "lib", "feat", "a", "b",
     ];

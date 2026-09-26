@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+use crate::clone_attrs::CloneAttrs;
 use crate::work;
 
 /// One name of a hardlinked file, held until the tracker knows which name
@@ -36,6 +37,10 @@ pub struct Link {
     pub path: PathBuf,
     pub size: u64,
     pub modified_at: u64,
+    /// `(st_dev, st_ino)`, written to the index as `"i"` on every name.
+    pub link_id: Option<(u64, u64)>,
+    /// APFS clone attributes (macOS walker only).
+    pub clone: Option<CloneAttrs>,
 }
 
 /// The names of one inode seen so far.
@@ -170,6 +175,8 @@ mod tests {
             path: path.into(),
             size: 4096,
             modified_at: 0,
+            link_id: None,
+            clone: None,
         }
     }
 

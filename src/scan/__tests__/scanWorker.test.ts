@@ -13,6 +13,7 @@ interface IndexLine {
   s?: number;
   t?: "d";
   h?: 1;
+  i?: string;
 }
 
 let base: string;
@@ -178,6 +179,38 @@ describe.skipIf(process.platform === "win32")("scanWorker hardlinks", () => {
     expect(rescan.snapshot.filesVisited).toBe(1);
     expect(rescan.extraLinks).toEqual([]);
     expect(rescan.snapshot.bytesSeen).toBe(occupancy(at("root/b/y.bin")));
+  });
+
+  it("gives every name of a hardlinked file the same link id, owner included", async () => {
+    const shared = write("root/a.bin", 16 * 1024);
+    link(shared, "root/sub/b.bin");
+    write("root/solo.bin", 16 * 1024);
+
+    const { files } = await scan("root", "ids");
+    const idOf = (rel: string) => files.find((line) => line.p === at(rel))?.i;
+    const stat = FS.statSync(shared, { bigint: true });
+
+    expect(idOf("root/a.bin")).toBe(`${stat.dev}:${stat.ino}`);
+    expect(idOf("root/sub/b.bin")).toBe(idOf("root/a.bin"));
+    expect(idOf("root/solo.bin")).toBeUndefined();
+  });
+
+  it("keeps the link id on inherited files whose other name is outside the root", async () => {
+    // No name inside the root is an extra link, so the baseline has no
+    // h:1 and inheritance stays on; the id has to come from the baseline.
+    const outside = write("elsewhere/lib.so", 16 * 1024);
+    link(outside, "root/vendor/lib.so");
+    write("root/keep.txt", 4 * 1024);
+    settleDirMtimes(at("root"));
+    const baseline = await scan("root", "baseline");
+    const baselineId = baseline.files.find((line) => line.p.endsWith("lib.so"))?.i;
+    expect(baselineId).toMatch(/^\d+:\d+$/);
+
+    write("root/c/new.bin", 4 * 1024);
+    const rescan = await scan("root", "rescan", { baselineIndex: baseline.indexOutput });
+
+    expect(logged("Phase-1 inheritance: 1 dirs skipped")).toBe(true);
+    expect(rescan.files.find((line) => line.p.endsWith("lib.so"))?.i).toBe(baselineId);
   });
 
   it("still inherits unchanged subtrees when there are no hardlinks", async () => {
