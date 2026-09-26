@@ -45,6 +45,12 @@ beforeAll(async () => {
       FS.writeFileSync(Path.join(userData, "easy-moves.json"), JSON.stringify(records, null, 2));
     },
   });
+  // A normal launch's startup probe asks isElevated and hasScheduledTask
+  // once, and both answers are cached for the session. The harness's
+  // `--launched-by-task` skips that probe, so ask here, where the probe
+  // would. Otherwise the first Settings open would start PowerShell and
+  // schtasks on Windows.
+  await main.invoke("diskhound:get-elevation-status");
 }, 60_000);
 
 /** What App's mount and SettingsView's sections ask main for. */
