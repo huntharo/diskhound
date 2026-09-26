@@ -455,5 +455,14 @@ export async function bootMainProcess(options: BootOptions = {}): Promise<MainPr
       harness.app.emit(name, ...args);
     },
   };
+
+  // Startup pre-warms the folder tree of the scan last-scan.json
+  // restored, without awaiting it. Wait for that load here, or its
+  // crash.log lines can land in a test's first measurement on a slow
+  // machine. Asking for the root's folders joins the load in flight.
+  const restored = await booted.invoke<{ status?: string; rootPath?: string | null } | null>("diskhound:get-current-snapshot");
+  if (restored?.status === "done" && restored.rootPath) {
+    await booted.invoke("diskhound:get-folder-children", restored.rootPath, restored.rootPath);
+  }
   return booted;
 }

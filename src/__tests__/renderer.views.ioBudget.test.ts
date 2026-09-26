@@ -117,7 +117,7 @@ describe("Folders tab", () => {
     ui.takeIpc();
     expectIoBudget({
       scenario: "renderer-folders-first-mount",
-      note: "first Folders mount after startup: main pre-warmed the latest scan's folder tree at boot, so 0 reads",
+      note: "first Folders mount once startup's pre-warm has loaded the latest scan's folder tree: 0 reads",
       io: mounted.io,
     });
 

@@ -705,7 +705,7 @@
     "observedBytesWritten": 0
   },
   "main-folders-drill-in-warm": {
-    "note": "201 get-folder-children calls on the drive whose tree startup pre-warmed: 0 reads",
+    "note": "201 get-folder-children calls once startup's pre-warm has loaded the drive's tree: 0 reads",
     "writeFile": 0,
     "appendFile": 0,
     "rename": 0,
@@ -1020,7 +1020,7 @@
     "observedBytesWritten": 0
   },
   "renderer-folders-first-mount": {
-    "note": "first Folders mount after startup: main pre-warmed the latest scan's folder tree at boot, so 0 reads",
+    "note": "first Folders mount once startup's pre-warm has loaded the latest scan's folder tree: 0 reads",
     "writeFile": 0,
     "appendFile": 0,
     "rename": 0,

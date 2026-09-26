@@ -61,11 +61,12 @@ async function browse(rootPath: string, count: number): Promise<void> {
 
 describe("Folders tab", () => {
   it("drills into every folder of the pre-warmed drive from memory", async () => {
-    // Startup pre-warms the tree of the scan last-scan.json restored.
+    // Startup pre-warmed the tree of the scan last-scan.json restored,
+    // and bootMainProcess waited for that load.
     const { io } = await measureFsIo(() => browse(DATA, 200), { countProcesses: true });
     expectIoBudget({
       scenario: "main-folders-drill-in-warm",
-      note: "201 get-folder-children calls on the drive whose tree startup pre-warmed: 0 reads",
+      note: "201 get-folder-children calls once startup's pre-warm has loaded the drive's tree: 0 reads",
       io,
     });
   });
