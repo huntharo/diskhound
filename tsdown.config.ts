@@ -41,6 +41,16 @@ export default defineConfig([
     ...shared,
     entry: ["src/preload.ts"],
   },
+  {
+    // Local-agent (MCP) runtime. Separate so main.cjs doesn't require
+    // the MCP SDK and Express at startup; electronHost.ts loads it by
+    // path the first time AI Agents is turned on.
+    ...shared,
+    ...noCodeSplitting,
+    entry: {
+      "mcp/agentRuntime": "src/mcp/agentRuntime.ts",
+    },
+  },
   ...scanWorkers.map((name) => ({
     ...shared,
     ...noCodeSplitting,

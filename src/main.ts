@@ -28,7 +28,10 @@ import {
   type DevArtifactReport,
   type DevBranch,
   type DiskIoSnapshot,
+  type DuplicateAnalysis,
+  type DuplicateScanProgress,
   type FullDiffStatus,
+  type IndexSearchQuery,
   type MonitoringSnapshot,
   type NavigateViewPayload,
   type PathActionResult,
@@ -168,6 +171,7 @@ import { searchIndexFile } from "./shared/scanIndex";
 import { analyzeCleanupFromIndex } from "./shared/suggestions";
 import { createNativeScannerSession, type NativeScannerSession } from "./nativeScanner";
 import * as elevationModule from "./elevation";
+import { createAgentHost, type AgentHost } from "./mcp/electronHost";
 
 const SCAN_SNAPSHOT_CHANNEL = "diskhound:scan-snapshot";
 const DISK_DELTA_CHANNEL = "diskhound:disk-delta";
@@ -971,7 +975,16 @@ void (async () => {
 
   // ── Scan helpers ──────────────────────────────────────────
 
+  // Latest running snapshot per root. scanStore only holds the most
+  // recent broadcast, which is ambiguous with parallel scans; MCP agents
+  // polling progress need each root's own numbers.
+  const liveSnapshotByKey = new Map<string, ScanSnapshot>();
+
   const broadcastSnapshot = async (nextSnapshot: ScanSnapshot, options?: SnapshotWriteOptions) => {
+    if (nextSnapshot.rootPath) {
+      if (nextSnapshot.status === "running") liveSnapshotByKey.set(scanKey(nextSnapshot.rootPath), nextSnapshot);
+      else liveSnapshotByKey.delete(scanKey(nextSnapshot.rootPath));
+    }
     await scanStore.set(nextSnapshot, options);
     mainWindow?.webContents.send(SCAN_SNAPSHOT_CHANNEL, nextSnapshot);
   };
@@ -2008,7 +2021,7 @@ void (async () => {
       if (result) throw new Error(result);
     }),
   );
-  ipcMain.handle("diskhound:trash-path", async (_event, targetPath: string) => {
+  const trashPathImpl = async (targetPath: string): Promise<PathActionResult> => {
     const blocked = protectedPathBlock(targetPath, "Trash");
     if (blocked) {
       writeCrashLog("trash", `blocked path=${targetPath} ${blocked.message}`);
@@ -2039,7 +2052,8 @@ void (async () => {
       writeCrashLog("trash", `ok path=${resolved}`);
       return { ok: true, message: "Moved to trash." };
     }
-  });
+  };
+  ipcMain.handle("diskhound:trash-path", (_event, targetPath: string) => trashPathImpl(targetPath));
   ipcMain.handle("diskhound:permanent-delete-path", async (_event, targetPath: string) => {
     const blocked = protectedPathBlock(targetPath, "Delete");
     if (blocked) {
@@ -2161,7 +2175,10 @@ void (async () => {
   ipcMain.handle("diskhound:get-settings", () => settingsStore!.get());
   ipcMain.handle("diskhound:update-settings", async (_event, settings: AppSettings) => {
     const previousSettings = settingsStore!.get();
-    const normalizedSettings = normalizeAppSettings(settings);
+    // `agents` is owned by the AI Agents toggle (its own IPC, which also
+    // starts/stops the listener). A Settings save carrying a stale copy
+    // must not flip it back.
+    const normalizedSettings = normalizeAppSettings({ ...settings, agents: previousSettings.agents });
 
     await settingsStore!.set(normalizedSettings);
 
@@ -2337,14 +2354,17 @@ void (async () => {
     void fullDiffLoader.warmLatest(rootPath);
   };
 
-  ipcMain.handle("diskhound:compute-scan-diff", async (_event, baselineId: string, currentId: string) => {
+  const computeScanDiffImpl = async (baselineId: string, currentId: string) => {
     const [baseline, current] = await Promise.all([
       loadHistoricalSnapshotCached(baselineId),
       loadHistoricalSnapshotCached(currentId),
     ]);
     if (!baseline || !current) return null;
     return computeDiff(baseline, current, baselineId, currentId);
-  });
+  };
+  ipcMain.handle("diskhound:compute-scan-diff", (_event, baselineId: string, currentId: string) =>
+    computeScanDiffImpl(baselineId, currentId),
+  );
 
   ipcMain.handle("diskhound:get-full-diff-status", async (
     _event,
@@ -3005,9 +3025,7 @@ void (async () => {
     return tree;
   }
 
-  ipcMain.handle(
-    "diskhound:get-folder-children",
-    async (_event, rootPath: string, parentPath: string) => {
+  const getFolderChildrenImpl = async (rootPath: string, parentPath: string) => {
       const history = getScanHistory(rootPath);
       const currentId = history[0]?.id;
       const empty = {
@@ -3074,7 +3092,10 @@ void (async () => {
         );
         return empty;
       }
-    },
+  };
+  ipcMain.handle(
+    "diskhound:get-folder-children",
+    (_event, rootPath: string, parentPath: string) => getFolderChildrenImpl(rootPath, parentPath),
   );
 
   ipcMain.handle("diskhound:get-latest-diff", async (_event, rootPath: string) => {
@@ -3113,7 +3134,7 @@ void (async () => {
 
   // ── IPC: Cleanup Analysis ─────────────────────────────────
 
-  ipcMain.handle("diskhound:analyze-cleanup", async (_event, rootPath: string) => {
+  const analyzeCleanupImpl = async (rootPath: string) => {
     const history = getScanHistory(rootPath);
     const current = history[0];
     const settings = settingsStore!.get();
@@ -3131,13 +3152,17 @@ void (async () => {
       settings.cleanup,
       settings.scanning.excludedFolderPaths,
     );
-  });
-  ipcMain.handle("diskhound:search-index", async (_event, rootPath: string, query: { query: string; minSizeBytes?: number; extension?: string; limit?: number }) => {
+  };
+  ipcMain.handle("diskhound:analyze-cleanup", (_event, rootPath: string) => analyzeCleanupImpl(rootPath));
+  const searchIndexImpl = async (rootPath: string, query: IndexSearchQuery) => {
     const history = getScanHistory(rootPath);
     const current = history[0];
     if (!current) return { hits: [], truncated: false, filesScanned: 0 };
     return searchIndexFile(indexFilePath(current.id), query);
-  });
+  };
+  ipcMain.handle("diskhound:search-index", (_event, rootPath: string, query: IndexSearchQuery) =>
+    searchIndexImpl(rootPath, query),
+  );
   const devArtifactCache = new Map<string, DevArtifactReport>();
   const devArtifactInflight = new Map<string, Promise<DevArtifactReport | null>>();
   const devRescanAbort = new Map<string, AbortController>();
@@ -3150,7 +3175,10 @@ void (async () => {
       previousId ? devArtifactsSidecarPath(previousId) : null,
     );
 
-  ipcMain.handle("diskhound:get-dev-artifacts", async (_event, rootPath: string, options?: { sidecarOnly?: boolean }) => {
+  const getDevArtifactsImpl = async (
+    rootPath: string,
+    options?: { sidecarOnly?: boolean },
+  ): Promise<DevArtifactReport | null> => {
     const history = getScanHistory(rootPath);
     const current = history[0];
     if (!current) return null;
@@ -3225,7 +3253,10 @@ void (async () => {
     });
     devArtifactInflight.set(current.id, pending);
     return pending;
-  });
+  };
+  ipcMain.handle("diskhound:get-dev-artifacts", (_event, rootPath: string, options?: { sidecarOnly?: boolean }) =>
+    getDevArtifactsImpl(rootPath, options),
+  );
 
   ipcMain.handle("diskhound:cancel-dev-artifacts-rescan", (_event, rootPath: string) => {
     const key = scanKey(rootPath);
@@ -3322,7 +3353,11 @@ void (async () => {
 
   // ── IPC: Duplicate Detection ────────────────────────────
 
-  ipcMain.handle("diskhound:start-duplicate-scan", (_event, rootPath: string, options?: { minSizeBytes?: number }) => {
+  // Latest duplicate progress / result per root, kept so MCP agents can
+  // read them — the renderer keeps its own copies from the broadcasts.
+  const duplicateProgressByKey = new Map<string, DuplicateScanProgress>();
+  const duplicateResultByKey = new Map<string, DuplicateAnalysis>();
+  const startDuplicateScanImpl = (rootPath: string, options?: { minSizeBytes?: number }) => {
     // Whole-handler try/catch — main-process IPC handlers that throw
     // synchronously surface as the "DiskHound — Unexpected error"
     // dialog via the uncaughtException hook. Belt-and-suspenders.
@@ -3359,6 +3394,8 @@ void (async () => {
     // memory than re-walking the filesystem. Fall back to walk if no
     // suitable index exists or if the path isn't under any known scan.
     const indexPath = findIndexCoveringPath(resolvedRoot);
+    duplicateResultByKey.delete(key);
+    duplicateProgressByKey.delete(key);
 
     const handle = runDuplicateScan(
       resolvedRoot,
@@ -3366,12 +3403,12 @@ void (async () => {
         onProgress: (progress) => {
           // Tag every progress emission with the rootPath so the
           // renderer can route it to the right per-drive state slot.
-          mainWindow?.webContents.send(DUPLICATE_PROGRESS_CHANNEL, {
-            ...progress,
-            rootPath: resolvedRoot,
-          });
+          const tagged = { ...progress, rootPath: resolvedRoot };
+          duplicateProgressByKey.set(key, { ...tagged, newGroups: undefined });
+          mainWindow?.webContents.send(DUPLICATE_PROGRESS_CHANNEL, tagged);
         },
         onResult: (result) => {
+          duplicateResultByKey.set(key, result);
           mainWindow?.webContents.send(DUPLICATE_RESULT_CHANNEL, result);
           activeDuplicateScans.delete(key);
           sendToast("success", "Duplicate scan complete",
@@ -3389,7 +3426,7 @@ void (async () => {
             "dup-scan-error",
             `root=${resolvedRoot} error=${error.stack ?? error.message ?? String(error)}`,
           );
-          mainWindow?.webContents.send(DUPLICATE_PROGRESS_CHANNEL, {
+          const errorProgress: DuplicateScanProgress = {
             rootPath: resolvedRoot,
             status: "error",
             filesWalked: 0,
@@ -3398,7 +3435,9 @@ void (async () => {
             groupsConfirmed: 0,
             elapsedMs: 0,
             errorMessage: error.message,
-          });
+          };
+          duplicateProgressByKey.set(key, errorProgress);
+          mainWindow?.webContents.send(DUPLICATE_PROGRESS_CHANNEL, errorProgress);
           activeDuplicateScans.delete(key);
         },
       },
@@ -3440,7 +3479,10 @@ void (async () => {
         });
       } catch { /* ignore */ }
     }
-  });
+  };
+  ipcMain.handle("diskhound:start-duplicate-scan", (_event, rootPath: string, options?: { minSizeBytes?: number }) =>
+    startDuplicateScanImpl(rootPath, options),
+  );
 
   /**
    * Search the scan-history index for the most recent scan whose root
@@ -3966,14 +4008,14 @@ void (async () => {
 
   // ── Window ────────────────────────────────────────────────
 
-  const loadRenderer = async (window: BrowserWindow, mode: "app" | "widget") => {
+  const loadRenderer = async (window: BrowserWindow, mode: "app" | "widget" | "consent") => {
     if (rendererEntryUrl) {
-      const url = mode === "widget"
-        ? `${rendererEntryUrl}${rendererEntryUrl.includes("?") ? "&" : "?"}widget=1`
-        : rendererEntryUrl;
+      const url = mode === "app"
+        ? rendererEntryUrl
+        : `${rendererEntryUrl}${rendererEntryUrl.includes("?") ? "&" : "?"}${mode}=1`;
       await window.loadURL(url);
-    } else if (mode === "widget") {
-      await window.loadFile(rendererEntryFile, { query: { widget: "1" } });
+    } else if (mode !== "app") {
+      await window.loadFile(rendererEntryFile, { query: { [mode]: "1" } });
     } else {
       await window.loadFile(rendererEntryFile);
     }
@@ -4264,9 +4306,69 @@ void (async () => {
   // Wire launchOnStartup from persisted settings
   applyLoginItemSettings(settings.general.launchOnStartup);
 
+  // ── Local AI agents (MCP) ─────────────────────────────────
+  // Loopback MCP server + OAuth + native approval window. Idle unless
+  // Settings → AI Agents is on. See src/mcp/ and docs/mcp.md. The IPC
+  // handlers register before the window loads; the server starts after.
+  let agentHost: AgentHost | null = null;
+  try {
+    agentHost = createAgentHost({
+      projectRoot,
+      preloadPath: Path.join(__dirname, "preload.cjs"),
+      getMainWindow: () => mainWindow,
+      ensureMainWindow,
+      loadRenderer,
+      getSettings: () => settingsStore!.get(),
+      setAgentsEnabled: async (enabled) => {
+        await settingsStore!.update((current) => ({ ...current, agents: { ...current.agents, enabled } }));
+      },
+      toast: sendToast,
+      log: writeCrashLog,
+      listDrives: () => getDiskSpace(),
+      activeScans: () =>
+        Array.from(activeScans.values()).map((session) =>
+          liveSnapshotByKey.get(scanKey(session.rootPath)) ?? {
+            ...createIdleScanSnapshot(),
+            status: "running",
+            rootPath: session.rootPath,
+          },
+        ),
+      currentSnapshotRoot: async () => (await scanStore.get()).rootPath,
+      allHistory: () => [...getAllEntries()],
+      scanHistory: (rootPath) => getScanHistory(rootPath),
+      loadSnapshot: (id) => loadHistoricalSnapshotCached(id),
+      startScan: (rootPath) => startScan(rootPath, defaultScanOptions()),
+      cancelScan: async (rootPath) => {
+        await cancelActiveScan(rootPath);
+      },
+      folderChildren: (rootPath, parentPath) => getFolderChildrenImpl(rootPath, parentPath),
+      searchIndex: (rootPath, query) => searchIndexImpl(rootPath, query),
+      cleanupSuggestions: (rootPath) => analyzeCleanupImpl(rootPath),
+      devArtifacts: (rootPath) => getDevArtifactsImpl(rootPath),
+      diff: (baselineId, currentId) => computeScanDiffImpl(baselineId, currentId),
+      fullDiff: (baselineId, currentId, limit) => fullDiffLoader.load(baselineId, currentId, limit),
+      duplicates: (rootPath) => {
+        const key = scanKey(Path.resolve(rootPath));
+        return {
+          running: activeDuplicateScans.has(key),
+          progress: duplicateProgressByKey.get(key) ?? null,
+          analysis: duplicateResultByKey.get(key) ?? null,
+        };
+      },
+      startDuplicateScan: (rootPath, minSizeBytes) => startDuplicateScanImpl(rootPath, { minSizeBytes }),
+      trashPath: (targetPath) => trashPathImpl(targetPath),
+    });
+  } catch (err) {
+    writeCrashLog("agent-access", `startup failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+  }
+
   restartMonitoring(settings);
   await ensureMainWindow();
   writeStartupLog("window created and loaded");
+  await agentHost?.start().catch((err: unknown) => {
+    writeCrashLog("agent-access", `start failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+  });
+
 
   // "Start minimized" is an AUTOSTART-ONLY preference — we want a
   // fresh-install launch, a post-update restart, and a user-initiated
@@ -4559,6 +4661,7 @@ void (async () => {
     // snapshot and its cursor wait for quit.
     scanStore.flush();
     flushUsnCursorStore();
+    void agentHost?.dispose();
   });
 })().catch((err: unknown) => {
   const error = err as { stack?: string; message?: string };

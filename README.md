@@ -51,6 +51,7 @@ WinDirStat was the gold standard for a decade. DiskHound is what it would be tod
 - 🔗 **Easy Move** — move a large file to another drive, leave a symlink or junction in its place. Fully reversible. Tracks every move so you can put files back with one click. Offers a one-UAC fast-scan mode for system installs.
 - 📁 **Folder explorer** — drill into directories with breadcrumb navigation and proportional size bars.
 - 🧹 **Dev Artifacts** (`Ctrl+4`) — groups worktrees, `node_modules`, Rust `target/` trees, package caches, and venvs. Pick trees and permanently delete them. A finished scan writes a sidecar so the tab opens without reading the drive again.
+- 🤖 **AI agents (MCP)**: let Claude Code, Codex, or another MCP client read your scans, run scans, and steer the window while it helps you free up space. Agents get DiskHound's cleanup procedures (including the APFS clone and Time Machine snapshot checks on macOS). You approve each agent in DiskHound, and nothing moves to the Trash without your confirmation. Off by default; see [docs/mcp.md](docs/mcp.md).
 - 🛎️ **Drive monitoring** — periodic free-space polling with delta alerts when space drops meaningfully. Rolling history of drive-level events is persisted.
 - ⚙️ **Processes viewer** — real-time memory + CPU sampling for every process, with icons pulled from each executable. **Four views**: List, Treemap, scrolling CPU Heatmap (time on X, process on Y), and details.
 - 🎮 **GPU viewer** — per-process GPU utilisation + VRAM pulled from Windows `\GPU Engine(*)` / `\GPU Process Memory(*)` performance counters. Adapter overview (3D / Compute / Decode / Encode stats).
@@ -150,6 +151,10 @@ src/
 ├── preload.ts           Context bridge (IPC → renderer)
 ├── nativeScanner.ts     Spawn and manage the Rust binary
 ├── scan/scanWorker.ts   JS fallback scanner (worker thread)
+├── mcp/                 Local MCP server for AI agents (loaded on first enable)
+│   ├── server.ts        Tools, prompts, and SEP-2640 skills
+│   ├── agentOAuth.ts    OAuth 2.1 provider (DCR, PKCE, native approval)
+│   └── electronHost.ts  Approval window, Trash confirmation, Settings IPC
 ├── shared/
 │   ├── contracts.ts     All TypeScript types and IPC interface
 │   ├── scanDiff.ts      Snapshot diff algorithm (top-N)
@@ -166,6 +171,8 @@ src/
 
 native/diskhound-native-scanner/
 └── src/main.rs          Rust scanner (Win32 APIs + jwalk)
+
+skills/                  Cleanup procedures served to agents over MCP
 ```
 
 ## How it works

@@ -1,5 +1,6 @@
 import { spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,6 +35,7 @@ export type SeedSettings = {
   monitoring?: Partial<AppSettings["monitoring"]>;
   notifications?: Partial<AppSettings["notifications"]>;
   storage?: Partial<AppSettings["storage"]>;
+  agents?: Partial<AppSettings["agents"]>;
 };
 
 /**
@@ -51,6 +53,8 @@ export type LaunchOptions = {
   dataDir?: string;
   /** Merged over the E2E defaults. Only written to a fresh profile. */
   settings?: SeedSettings;
+  /** Port for the AI agent (MCP) server. A free one when omitted. */
+  agentPort?: number;
 };
 
 export type AppHandle = {
@@ -59,6 +63,8 @@ export type AppHandle = {
   /** Temp dir that holds this launch's userData (and HOME on Linux). */
   dataDir: string;
   userDataDir: string;
+  /** Where the AI agent (MCP) server listens once it is turned on. */
+  agentPort: number;
   /** Path the next "Browse for folder..." dialog returns. */
   setPickDirectory: (dir: string | null) => Promise<void>;
   /** Idempotent. The fixture also calls it after each test. Kills the
@@ -111,7 +117,20 @@ function appEnv(extra: Record<string, string>): Record<string, string> {
   // A parent `bun run dev` would make main load its dev server.
   delete env.VITE_DEV_SERVER_URL;
   delete env.DISKHOUND_NATIVE_SCANNER_PATH;
+  delete env.DISKHOUND_AGENT_PORT;
   return { ...env, ...extra };
+}
+
+/** A loopback port nothing is listening on right now. */
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address() as AddressInfo;
+      server.close(() => resolve(port));
+    });
+  });
 }
 
 function writeSeedSettings(userDataDir: string, seed: SeedSettings = {}): void {
@@ -154,6 +173,8 @@ export async function launchApp(
   if (!existsSync(join(userDataDir, "settings.json"))) {
     writeSeedSettings(userDataDir, opts.settings);
   }
+  // Never 51733, which a DiskHound the developer runs may hold.
+  const agentPort = opts.agentPort ?? (await freePort());
 
   const diagnostics: LaunchDiagnostics = { page: null, userDataDir, mainOutput: [], rendererConsole: [] };
   let app: ElectronApplication | null = null;
@@ -163,10 +184,11 @@ export async function launchApp(
       cwd: REPO_ROOT,
       env: appEnv({
         DISKHOUND_NATIVE_SCANNER_PATH: scanner,
+        DISKHOUND_AGENT_PORT: String(agentPort),
         ...(process.platform === "linux" ? { HOME: homeDir } : {}),
       }),
     });
-    return await attach(app, dataDir, diagnostics);
+    return await attach(app, dataDir, diagnostics, agentPort);
   } catch (error) {
     // The fixture only learns about a launch that returns, so report and
     // clean up here.
@@ -181,6 +203,7 @@ async function attach(
   app: ElectronApplication,
   dataDir: string,
   diagnostics: LaunchDiagnostics,
+  agentPort: number,
 ): Promise<AppHandle> {
   const { userDataDir, mainOutput, rendererConsole } = diagnostics;
   app.process().stdout?.on("data", (chunk) => mainOutput.push(String(chunk)));
@@ -212,6 +235,7 @@ async function attach(
     page,
     dataDir,
     userDataDir,
+    agentPort,
     setPickDirectory: async (dir) => {
       await app.evaluate(({ dialog }, pick) => {
         (dialog as unknown as { __e2ePick: string | null }).__e2ePick = pick;
