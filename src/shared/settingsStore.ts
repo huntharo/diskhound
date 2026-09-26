@@ -106,5 +106,6 @@ function mergeSettings(defaults: AppSettings, partial: Partial<AppSettings>): Ap
     storage: { ...defaults.storage, ...partial.storage },
     recentScans: partial.recentScans ?? defaults.recentScans,
     affinityRules: partial.affinityRules ?? defaults.affinityRules,
+    agents: { ...defaults.agents, ...partial.agents },
   };
 }

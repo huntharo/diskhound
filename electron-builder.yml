@@ -29,6 +29,11 @@ extraResources:
     to: icons
     filter:
       - "*.png"
+  # MCP skills served to connected AI agents (Settings → AI Agents).
+  # Plain files under resources/skills/ so the catalog can hash and
+  # serve them without reaching into the asar.
+  - from: skills
+    to: skills
 
 asar: true
 # Native modules (.node binaries) must live OUTSIDE the asar archive

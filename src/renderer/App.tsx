@@ -17,7 +17,7 @@ import {
 } from "../shared/contracts";
 import { formatScanRoot } from "../shared/pathUtils";
 import { formatBytes } from "./lib/format";
-import { clearDeletedPaths } from "./lib/deletedPaths";
+import { clearDeletedPaths, markDeletedPaths } from "./lib/deletedPaths";
 import { useLiveDiskSpace } from "./lib/hooks";
 import { setColorBlindPalette } from "./lib/treemap";
 import { setProcessPaletteColorBlind } from "./components/MemoryView";
@@ -25,6 +25,7 @@ import { dispatchSettingsUpdated, SETTINGS_UPDATED_EVENT } from "./lib/uiEvents"
 import { nativeApi } from "./nativeApi";
 
 import { ChangesView } from "./components/ChangesView";
+import { AgentActivityPill } from "./components/AgentActivityPill";
 import { DiskPicker } from "./components/DiskPicker";
 import { DevBranchChip } from "./components/DevBranchChip";
 import { DevView } from "./components/DevView";
@@ -167,10 +168,18 @@ export function App() {
 
   const [scanOptions, setScanOptions] = useState<ScanOptions>(defaultScanOptions());
   const [view, setView] = useState<AppView>("overview");
+  /** Folder an agent asked the Folders tab to open (MCP navigation). */
+  const [folderFocus, setFolderFocus] = useState<{ path: string; nonce: number } | null>(null);
+  const folderFocusNonce = useRef(0);
   const [devTabMounted, setDevTabMounted] = useState(false);
   useEffect(() => {
     if (view === "dev") setDevTabMounted(true);
   }, [view]);
+  // Tell main what this window shows, so an agent's diskhound_status
+  // knows which tab and drive the user is looking at.
+  useEffect(() => {
+    nativeApi.reportViewState({ view, rootPath: snapshot.rootPath ?? (currentRoot || null) });
+  }, [view, snapshot.rootPath, currentRoot]);
   const { drives, refresh: refreshDiskSpace } = useLiveDiskSpace();
   const [filterExt, setFilterExt] = useState<string | undefined>();
   // null = still loading the initial snapshot; prevents a flash of the picker
@@ -550,12 +559,30 @@ export function App() {
     // the widget's "C:" drive row drops the user into Overview pre-pointed
     // at C:; then switch the tab. Skip the picker — user's intent was to
     // see this view immediately, not pick a drive.
-    const unsubNavigate = nativeApi.onNavigateView(({ view, scanRoot }) => {
+    const unsubNavigate = nativeApi.onNavigateView(({ view, scanRoot, folderPath }) => {
       if (scanRoot) {
         setCurrentRoot(scanRoot);
+        // A root this window hasn't shown yet (an agent asking for an
+        // older scan): load its latest saved snapshot, never clobbering
+        // a live one that's already here.
+        const key = rootKey(scanRoot);
+        void nativeApi.getLatestSnapshotForRoot(scanRoot).then((latest) => {
+          if (!latest) return;
+          setSnapshotsByRoot((prev) => (prev.has(key) ? prev : new Map(prev).set(key, latest)));
+        });
+      }
+      if (folderPath) {
+        folderFocusNonce.current += 1;
+        setFolderFocus({ path: folderPath, nonce: folderFocusNonce.current });
       }
       setShowPicker(false);
       setView(view);
+    });
+
+    // Paths an agent moved to the Trash (the user confirmed each batch
+    // in a native dialog): strike them through like in-app trashes.
+    const unsubPathsTrashed = nativeApi.onPathsTrashed((paths) => {
+      markDeletedPaths(paths, "trash");
     });
 
     // ── Duplicate scan IPC wiring ──
@@ -674,6 +701,7 @@ export function App() {
       unsub();
       unsubUpdate();
       unsubNavigate();
+      unsubPathsTrashed();
       unsubDupProgress();
       unsubDupResult();
       unsubEasyMoveProgress();
@@ -1172,6 +1200,23 @@ export function App() {
            *  weight without stealing horizontal real estate from
            *  the pills next to them. */}
           <div className="header-utilities">
+            {/* Which AI agent is driving (MCP); hidden until one acts. */}
+            <AgentActivityPill
+              onOpen={() => {
+                setShowPicker(false);
+                setView("settings");
+                // Settings and the AI Agents section both load async;
+                // wait (up to ~1 s) for the section before scrolling.
+                let frames = 0;
+                const scrollWhenReady = () => {
+                  const section = document.getElementById("settings-ai-agents");
+                  if (section) section.scrollIntoView({ block: "start" });
+                  else if (++frames < 60) window.requestAnimationFrame(scrollWhenReady);
+                };
+                window.requestAnimationFrame(scrollWhenReady);
+              }}
+            />
+
             {/* Search toggle */}
             <button
               className={`header-icon-btn ${searchOpen ? "active" : ""}`}
@@ -1314,6 +1359,8 @@ export function App() {
                       if (snapshot.rootPath) void doScan(snapshot.rootPath);
                     }}
                     otherScannedRoots={otherScannedRoots}
+                    focusRequest={folderFocus}
+                    onFocusApplied={(nonce) => setFolderFocus((prev) => (prev?.nonce === nonce ? null : prev))}
                   />
                 </ErrorBoundary>
               )}

@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
+import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import { FOLDER_CHILDREN_MAX_DIRS, type ScanFileRecord, type ScanSnapshot } from "../../shared/contracts";
 import { protectedFolderDisplayName } from "../../shared/pathProtection";
 import type { ExcludedFolderActionBlocker } from "../../shared/pathProtection";
-import { formatScanRoot } from "../../shared/pathUtils";
+import { formatScanRoot, normPath } from "../../shared/pathUtils";
 import { formatBytes, formatCount } from "../lib/format";
+import { deletedPathLabel, deletedPathTitle, useDeletedPaths, type DeletedPathRecord } from "../lib/deletedPaths";
 import { useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
 import { FileIcon } from "./FileIcon";
@@ -15,6 +16,29 @@ interface Props {
   snapshot: ScanSnapshot;
   onStartScan?: () => void;
   otherScannedRoots?: string[];
+  /**
+   * Open this folder (an AI agent's drill-down, via the MCP navigate
+   * tools). A new `nonce` re-applies the same path. Applied once the
+   * snapshot for a root containing it is showing.
+   */
+  focusRequest?: { path: string; nonce: number } | null;
+  /** The focus request was applied; the caller clears it so a later visit to the tab starts fresh. */
+  onFocusApplied?: (nonce: number) => void;
+}
+
+/**
+ * `target` re-cased to match `root` when it lives under it, else null.
+ * Windows paths compare case-insensitively, but the breadcrumbs and the
+ * folder index want the root spelled exactly as the scan recorded it.
+ */
+function folderUnderRoot(root: string, target: string): string | null {
+  const r = normPath(root, nativeApi.platform);
+  const t = normPath(target, nativeApi.platform);
+  if (t === r) return root;
+  const inside = r === "" ? t.startsWith("/") : t.startsWith(`${r}/`) || t.startsWith(`${r}\\`);
+  if (!inside) return null;
+  const rest = target.replace(/[\\/]+$/, "").slice(root.replace(/[\\/]+$/, "").length).replace(/^[\\/]+/, "");
+  return /[\\/]$/.test(root) ? `${root}${rest}` : `${root}${root.includes("\\") ? "\\" : "/"}${rest}`;
 }
 
 /**
@@ -93,7 +117,7 @@ function buildBreadcrumbs(currentPath: string, rootPath: string): { label: strin
 
 // ── Component ───────────────────────────────────────────────
 
-export function FolderList({ snapshot, onStartScan, otherScannedRoots = [] }: Props) {
+export function FolderList({ snapshot, onStartScan, otherScannedRoots = [], focusRequest = null, onFocusApplied }: Props) {
   const rootPath = snapshot.rootPath ?? "";
   const [currentPath, setCurrentPath] = useState(rootPath);
   const [children, setChildren] = useState<FolderChild[]>([]);
@@ -116,14 +140,38 @@ export function FolderList({ snapshot, onStartScan, otherScannedRoots = [] }: Pr
   } | null>(null);
   const { busy, runAction, handleEasyMove } = usePathActions();
   const { findProtectedFolder, findProtectionBlocker } = useExcludedFolderProtection();
+  // Folders trashed this session (from the context menu or by an AI
+  // agent after the user confirmed) stay listed until the next scan.
+  const { getDeletedRecord } = useDeletedPaths();
+
+  const focusRef = useRef(focusRequest);
+  focusRef.current = focusRequest;
+  const appliedFocusNonce = useRef<number | null>(null);
+  /** The pending agent focus path if it belongs to `root`; consumes it. */
+  const takeFocus = (root: string): string | null => {
+    const request = focusRef.current;
+    if (!root || !request || request.nonce === appliedFocusNonce.current) return null;
+    const target = folderUnderRoot(root, request.path);
+    if (target) {
+      appliedFocusNonce.current = request.nonce;
+      onFocusApplied?.(request.nonce);
+    }
+    return target;
+  };
 
   // Reset navigation when the scan root changes (drive switch etc).
+  // An agent that switched roots to open a folder lands in that folder.
   useEffect(() => {
     if (rootPath) {
-      setCurrentPath(rootPath);
+      setCurrentPath(takeFocus(rootPath) ?? rootPath);
       setShowOtherFiles(false);
     }
   }, [rootPath]);
+
+  useEffect(() => {
+    const target = takeFocus(rootPath);
+    if (target) setCurrentPath(target);
+  }, [focusRequest?.nonce]);
 
   useEffect(() => {
     setShowOtherFiles(false);
@@ -413,6 +461,7 @@ export function FolderList({ snapshot, onStartScan, otherScannedRoots = [] }: Pr
                 rootPath={rootPath}
                 canDrillIn={hasChildren(child.path)}
                 isBusy={busy.has(child.path)}
+                deletedRecord={getDeletedRecord(child.path)}
                 protectionBlocker={findProtectionBlocker(child.path)}
                 onNavigate={() => setCurrentPath(child.path)}
                 onReveal={() => void runAction(child.path, () => nativeApi.revealPath(child.path))}
@@ -511,6 +560,7 @@ function FolderRow(props: {
   rootPath: string;
   canDrillIn: boolean;
   isBusy: boolean;
+  deletedRecord: DeletedPathRecord | null;
   protectionBlocker: ExcludedFolderActionBlocker | null;
   onNavigate: () => void;
   onReveal: () => void;
@@ -518,7 +568,7 @@ function FolderRow(props: {
   onEasyMove: () => void;
   onContextMenu: (x: number, y: number) => void;
 }) {
-  const { dir, parentSize, rootPath, canDrillIn, isBusy, protectionBlocker, onNavigate, onReveal, onOpen, onEasyMove, onContextMenu } = props;
+  const { dir, parentSize, rootPath, canDrillIn, isBusy, deletedRecord, protectionBlocker, onNavigate, onReveal, onOpen, onEasyMove, onContextMenu } = props;
   const pct = parentSize > 0 ? (dir.size / parentSize) * 100 : 0;
   const name = protectedFolderDisplayName(dir.path, nativeApi.platform) ?? displayName(dir.path, rootPath);
   const actionDisabled = isBusy || Boolean(protectionBlocker);
@@ -530,7 +580,7 @@ function FolderRow(props: {
 
   return (
     <div
-      className={`folder-row ${canDrillIn ? "folder-row-clickable" : ""}`}
+      className={`folder-row ${canDrillIn ? "folder-row-clickable" : ""} ${deletedRecord ? "deleted" : ""}`}
       onClick={canDrillIn ? onNavigate : undefined}
       onContextMenu={(e) => {
         e.preventDefault();
@@ -554,7 +604,12 @@ function FolderRow(props: {
       </div>
       <div className="folder-row-info">
         <div className="folder-row-name">
-          {name}
+          <span className="folder-row-name-text">{name}</span>
+          {deletedRecord && (
+            <span className={`deleted-path-badge ${deletedRecord.action}`} title={deletedPathTitle(deletedRecord)}>
+              {deletedPathLabel(deletedRecord)}
+            </span>
+          )}
           {protectionBlocker && <span className="protected-path-badge" title={protectionTitle}>Protected</span>}
           {canDrillIn && (
             <svg className="folder-row-chevron" width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.3">

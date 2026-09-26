@@ -13,6 +13,7 @@ import { reportPollFailure } from "../lib/pollFailure";
 import { nativeApi } from "../nativeApi";
 import { dispatchSettingsUpdated } from "../lib/uiEvents";
 import { toast } from "./Toasts";
+import { AgentsSection } from "./AgentsSection";
 import { normPath } from "../../shared/pathUtils";
 import {
   basenameForPath,
@@ -283,6 +284,9 @@ export function SettingsView() {
           value={settings.cleanup.confirmPermanentDelete}
           onChange={(v) => void save({ ...settings, cleanup: { ...settings.cleanup, confirmPermanentDelete: v } })} />
       </div>
+
+      {/* ── AI Agents (MCP) ── */}
+      <AgentsSection />
 
       {/* ── Storage ── */}
       <StorageSection
