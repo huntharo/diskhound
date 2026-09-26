@@ -1,7 +1,7 @@
 import { type ComponentChild, render } from "preact";
 import { act } from "preact/test-utils";
 
-import { rendererIpcState } from "./mainProcessHarness";
+import { onMainProcessDispose, rendererIpcState } from "./mainProcessHarness";
 
 /**
  * Mounts real renderer components on top of the real main process from
@@ -94,6 +94,12 @@ export async function bootRenderer(): Promise<Renderer> {
     },
     unmount,
   };
+  const mountedRenderer = renderer;
+  onMainProcessDispose(async () => {
+    mountedRenderer.unmount();
+    await mountedRenderer.settle();
+    renderer = null;
+  });
   return renderer;
 }
 

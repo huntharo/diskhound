@@ -3,9 +3,9 @@ import { createRequire } from "node:module";
 import * as OS from "node:os";
 import * as Path from "node:path";
 
-import { vi } from "vitest";
+import { afterAll, vi } from "vitest";
 
-import { onSettle } from "./ioBudget";
+import { onSettle, settleFsIo } from "./ioBudget";
 
 /**
  * Boots the real `src/main.ts` against a fake `electron`, so a test
@@ -47,6 +47,10 @@ import { onSettle } from "./ioBudget";
  *   and `HOME` points into the temp dir, so the Linux desktop
  *   integration writes there instead of into the real home.
  *
+ * - `--launched-by-task` suppresses startup's real elevation handoff.
+ *   Teardown restores argv/env, stops timers and removes the temp root,
+ *   even if seeding or startup fails.
+ *
  * Real: every DiskHound module, fs, child processes and workers. Use
  * the `ioBudget.ts` mocks to count them. Startup still runs `df` (or
  * PowerShell on Windows) once for the disk monitor.
@@ -84,8 +88,13 @@ function current(): HarnessState {
   if (state) return state;
   const root = realFs.mkdtempSync(Path.join(OS.tmpdir(), "diskhound-main-"));
   const userData = Path.join(root, "userData");
-  realFs.mkdirSync(userData, { recursive: true });
-  realFs.mkdirSync(Path.join(root, "home"), { recursive: true });
+  try {
+    realFs.mkdirSync(userData, { recursive: true });
+    realFs.mkdirSync(Path.join(root, "home"), { recursive: true });
+  } catch (error) {
+    realFs.rmSync(root, { recursive: true, force: true });
+    throw error;
+  }
   state = {
     root,
     userData,
@@ -399,6 +408,7 @@ export function fakeElectron(): Record<string, unknown> {
 /** setTimeout's largest delay, ~24.8 days. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
 let crashLogSettled = false;
+const logCleanups: Array<() => void> = [];
 /** Tags main has logged, for waiting on startup work that only logs when done. */
 const loggedTags = new Set<string>();
 
@@ -417,7 +427,8 @@ export function settledCrashLog(
     ...original,
     createCrashLog: (options) => {
       const log = original.createCrashLog({ ...options, flushDelayMs: MAX_TIMER_MS });
-      onSettle(() => log.flush());
+      const unsubscribe = onSettle(() => log.flush());
+      logCleanups.push(() => { log.flushAll(); unsubscribe(); });
       crashLogSettled = true;
       return {
         ...log,
@@ -444,6 +455,8 @@ export interface MainProcess {
   send(channel: string, ...args: unknown[]): void;
   /** Everything main sent to a window's webContents, oldest first. */
   sent: Array<{ channel: string; args: unknown[] }>;
+  /** Stops background work and removes the profile. Also runs in afterAll. */
+  dispose(): Promise<void>;
   /** Emits an `app` event, such as "before-quit". */
   emitApp(event: string, ...args: unknown[]): void;
 }
@@ -461,6 +474,83 @@ const READY_CHANNEL = "diskhound:quit-and-install";
 const BOOT_TIMEOUT_MS = 20_000;
 
 let booted: MainProcess | null = null;
+let restoreRuntime: (() => void) | null = null;
+const timers = new Set<ReturnType<typeof setTimeout>>();
+const beforeDispose: Array<() => void | Promise<void>> = [];
+
+/** Renderer harnesses unmount and drain IPC before main releases its stores. */
+export function onMainProcessDispose(cleanup: () => void | Promise<void>): void {
+  beforeDispose.push(cleanup);
+}
+
+/** Keep real timers, but retain handles so partial startup can be stopped too. */
+function isolateRuntime(): void {
+  const argv = process.argv;
+  const env = { HOME: process.env.HOME, VITE_DEV_SERVER_URL: process.env.VITE_DEV_SERVER_URL };
+  const events = ["exit", "uncaughtException", "unhandledRejection"] as const;
+  const listeners = events.map((event) => new Set((process as EventEmitter).listeners(event)));
+  const timeout = globalThis.setTimeout;
+  const interval = globalThis.setInterval;
+  const timeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+    const handle = timeout(() => {
+      timers.delete(handle);
+      callback(...args);
+    }, ms);
+    timers.add(handle);
+    return handle;
+  }) as typeof setTimeout);
+  const intervalSpy = vi.spyOn(globalThis, "setInterval").mockImplementation(((callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+    const handle = interval(callback, ms, ...args);
+    timers.add(handle);
+    return handle;
+  }) as typeof setInterval);
+  process.argv = [...argv, "--launched-by-task"];
+  restoreRuntime = () => {
+    timeoutSpy.mockRestore();
+    intervalSpy.mockRestore();
+    process.argv = argv;
+    for (const [name, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    events.forEach((event, i) => {
+      for (const listener of (process as EventEmitter).listeners(event)) {
+        if (!listeners[i]!.has(listener)) (process as EventEmitter).removeListener(event, listener as (...args: unknown[]) => void);
+      }
+    });
+  };
+}
+
+export async function disposeMainProcess(): Promise<void> {
+  const harness = state;
+  if (!harness) return;
+  const stopTimers = () => {
+    for (const timer of timers) { clearTimeout(timer); clearInterval(timer); }
+    timers.clear();
+  };
+  try {
+    for (const cleanup of beforeDispose.splice(0)) await cleanup();
+    stopTimers();
+    harness.app.emit("before-quit");
+    for (const window of harness.windows) window.destroy();
+    await settleFsIo();
+    harness.app.emit("will-quit");
+  } finally {
+    for (const cleanup of logCleanups.splice(0)) cleanup();
+    stopTimers();
+    restoreRuntime?.();
+    restoreRuntime = null;
+    harness.app.removeAllListeners();
+    harness.handlers.clear();
+    harness.listeners.clear();
+    harness.rendererListeners.clear();
+    booted = null;
+    state = null;
+    realFs.rmSync(harness.root, { recursive: true, force: true, maxRetries: 3 });
+  }
+}
+
+afterAll(disposeMainProcess);
 
 /**
  * Starts main.ts once per test file and resolves when every handler is
@@ -470,61 +560,70 @@ export async function bootMainProcess(options: BootOptions = {}): Promise<MainPr
   if (booted) return booted;
   const harness = current();
   const { userData } = harness;
-  vi.stubEnv("VITE_DEV_SERVER_URL", "http://127.0.0.1:1/");
-  vi.stubEnv("HOME", Path.join(harness.root, "home"));
+  isolateRuntime();
+  process.env.VITE_DEV_SERVER_URL = "http://127.0.0.1:1/";
+  process.env.HOME = Path.join(harness.root, "home");
 
-  await options.seed?.(userData);
-  // Imported for its side effects: the startup IIFE registers the handlers.
-  await import("../main");
-  if (!crashLogSettled) {
-    throw new Error(
-      "main.ts's crash log still flushes on its own timer, so its lines would land in random "
-        + "measurements.\nAdd the vi.mock(\"../shared/crashLog\") line from this harness's doc "
-        + "comment to the test file.",
-    );
-  }
+  try {
+    await options.seed?.(userData);
+    // Imported for its side effects: the startup IIFE registers the handlers.
+    await import("../main");
 
-  const startedAt = Date.now();
-  while (!harness.listeners.has(READY_CHANNEL)) {
-    if (harness.errorBoxes.length > 0) {
-      throw new Error(`main.ts startup failed:\n${harness.errorBoxes.join("\n")}`);
-    }
-    if (Date.now() - startedAt > BOOT_TIMEOUT_MS) {
-      throw new Error(`main.ts did not finish startup in ${BOOT_TIMEOUT_MS} ms (${harness.handlers.size} handlers registered).`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
 
-  booted = {
-    userData,
-    sent: harness.sent,
-    invoke: <T>(channel: string, ...args: unknown[]) => callHandler<T>(harness, channel, args),
-    send: (channel, ...args) => callListeners(harness, channel, args),
-    emitApp: (name, ...args) => {
-      harness.app.emit(name, ...args);
-    },
-  };
-
-  // Startup pre-warms the folder tree of the scan last-scan.json
-  // restored, without awaiting it. Wait for that load here, or its
-  // reads can land in a test's first measurement on a slow machine.
-  // Asking for the root's folders joins the load in flight.
-  const restored = await booted.invoke<{ status?: string; rootPath?: string | null } | null>("diskhound:get-current-snapshot");
-  if (restored?.status === "done" && restored.rootPath) {
-    await booted.invoke("diskhound:get-folder-children", restored.rootPath, restored.rootPath);
-  }
-  // On Linux, startup also installs a .desktop file and icons into
-  // HOME without awaiting it, and logs a linux-integration line when
-  // done (the temp HOME is empty, so it always writes). Wait for that
-  // line, or it lands in a test's first measurement.
-  if (process.platform === "linux") {
-    const waitedAt = Date.now();
-    while (!loggedTags.has("linux-integration")) {
-      if (Date.now() - waitedAt > BOOT_TIMEOUT_MS) {
-        throw new Error(`main.ts's Linux desktop integration did not log in ${BOOT_TIMEOUT_MS} ms.`);
+    const startedAt = Date.now();
+    while (!harness.listeners.has(READY_CHANNEL)) {
+      if (harness.errorBoxes.length > 0) {
+        throw new Error(`main.ts startup failed:\n${harness.errorBoxes.join("\n")}`);
+      }
+      if (Date.now() - startedAt > BOOT_TIMEOUT_MS) {
+        throw new Error(`main.ts did not finish startup in ${BOOT_TIMEOUT_MS} ms (${harness.handlers.size} handlers registered).`);
       }
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
+
+    if (!crashLogSettled) {
+      throw new Error(
+        "main.ts's crash log still flushes on its own timer, so its lines would land in random "
+          + "measurements.\nAdd the vi.mock(\"../shared/crashLog\") line from this harness's doc "
+          + "comment to the test file.",
+      );
+    }
+
+    booted = {
+      userData,
+      dispose: disposeMainProcess,
+      sent: harness.sent,
+      invoke: <T>(channel: string, ...args: unknown[]) => callHandler<T>(harness, channel, args),
+      send: (channel, ...args) => callListeners(harness, channel, args),
+      emitApp: (name, ...args) => {
+        harness.app.emit(name, ...args);
+      },
+    };
+
+    // Startup pre-warms the folder tree of the scan last-scan.json
+    // restored, without awaiting it. Wait for that load here, or its
+    // reads can land in a test's first measurement on a slow machine.
+    // Asking for the root's folders joins the load in flight.
+    const restored = await booted.invoke<{ status?: string; rootPath?: string | null } | null>("diskhound:get-current-snapshot");
+    if (restored?.status === "done" && restored.rootPath) {
+      await booted.invoke("diskhound:get-folder-children", restored.rootPath, restored.rootPath);
+    }
+    // On Linux, startup also installs a .desktop file and icons into
+    // HOME without awaiting it, and logs a linux-integration line when
+    // done (the temp HOME is empty, so it always writes). Wait for that
+    // line, or it lands in a test's first measurement.
+    if (process.platform === "linux") {
+      const waitedAt = Date.now();
+      while (!loggedTags.has("linux-integration")) {
+        if (Date.now() - waitedAt > BOOT_TIMEOUT_MS) {
+          throw new Error(`main.ts's Linux desktop integration did not log in ${BOOT_TIMEOUT_MS} ms.`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+    return booted;
+  } catch (error) {
+    await disposeMainProcess();
+    throw error;
   }
-  return booted;
 }

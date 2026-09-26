@@ -1772,6 +1772,7 @@ void (async () => {
   // refresh requests so we don't stack PowerShell invocations.
   let memoryCache: SystemMemorySnapshot | null = null;
   let memorySamplePromise: Promise<SystemMemorySnapshot> | null = null;
+  let memorySampleStartedAt = Number.NEGATIVE_INFINITY;
   // Same pattern for GPU sampling. Get-Counter is the slow one — we
   // dedupe concurrent refreshes and cache between them so the UI tab
   // switch is instant.
@@ -1792,6 +1793,7 @@ void (async () => {
 
   const refreshMemorySample = (): Promise<SystemMemorySnapshot> => {
     if (memorySamplePromise) return memorySamplePromise;
+    memorySampleStartedAt = Date.now();
     memorySamplePromise = sampleSystemMemory()
       .then((snap) => {
         memoryCache = snap;
@@ -1809,6 +1811,18 @@ void (async () => {
       });
     return memorySamplePromise;
   };
+
+  // Persistent rules must also see new/reset processes while every window
+  // is hidden. Reuse UI samples when fresh, and do no background sampling
+  // unless Windows has an enabled rule. This preserves the widget's former
+  // 4 s enforcement cadence without keeping hidden renderer polls alive.
+  const affinityInterval = setInterval(() => {
+    if (process.platform !== "win32" || isQuitting) return;
+    if (!settingsStore?.get().affinityRules.some((rule) => rule.enabled)) return;
+    if (Date.now() - memorySampleStartedAt < 4_000) return;
+    void refreshMemorySample().catch(() => { /* retry on the next tick */ });
+  }, 4_000);
+  affinityInterval.unref?.();
 
   ipcMain.handle("diskhound:get-memory-snapshot", () => refreshMemorySample());
 
@@ -2401,6 +2415,14 @@ void (async () => {
       loadHistoricalSnapshotCached(currentId),
     ]);
     if (!baseline || !current) return null;
+    // Another request for this pair may have filled the cache while we
+    // awaited the snapshots. Charge its rows only once.
+    const concurrent = scanDiffCache.get(key);
+    if (concurrent) {
+      scanDiffCache.delete(key);
+      scanDiffCache.set(key, concurrent);
+      return concurrent;
+    }
     const diff = computeDiff(baseline, current, baselineId, currentId);
     scanDiffCache.set(key, diff);
     scanDiffCacheRows += scanDiffRows(diff);
@@ -4756,6 +4778,7 @@ void (async () => {
 
   app.on("before-quit", () => {
     isQuitting = true;
+    clearInterval(affinityInterval);
     clearUpdateCheckTimer();
     for (const session of activeScans.values()) {
       void session.stop();

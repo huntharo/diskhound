@@ -33,7 +33,7 @@ The same harness budgets reads. A UI action on data the app already holds (sort,
   - Assert `takeIpc()` too, where the answer should be no IPC at all.
   - See `src/__tests__/renderer.views.ioBudget.test.ts`.
 - **Polls.** Pass `{ countProcesses: true }` to `measureFsIo` to also count child processes and workers. A poll that runs `df`, PowerShell or a sampler per tick needs that.
-  - Renderer pollers use `startVisiblePoll` or `useVisibleInterval` from `src/renderer/lib/visiblePoll.ts`, so they stop while the window is hidden to the tray. `e2e/tray.spec.ts` checks that no process starts while hidden.
+  - Renderer pollers use `startVisiblePoll` or `useVisibleInterval` from `src/renderer/lib/visiblePoll.ts`, so they stop while the window is hidden to the tray. `e2e/tray.spec.ts` checks that no UI poll starts a process while hidden. Enabled Windows affinity rules still require main-process sampling while hidden so enforcement continues.
 
 ## E2E
 
