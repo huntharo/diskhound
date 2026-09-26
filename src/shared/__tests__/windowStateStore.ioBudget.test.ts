@@ -80,7 +80,7 @@ describe("window state store", () => {
 
     expectIoBudget({
       scenario: "window-state-drag",
-      note: "100 move/resize events 16 ms apart, then the 400 ms debounce: 1 write of window-state.json",
+      note: "100 move/resize events 16 ms apart, then the 400 ms debounce: 1 atomic write of window-state.json (temp file + rename); per drag, maximize or fullscreen change",
       io,
     });
     const saved = JSON.parse(FS.readFileSync(Path.join(paths.userData, "window-state.json"), "utf8"));
@@ -126,7 +126,7 @@ describe("window state store", () => {
 
     expectIoBudget({
       scenario: "window-state-drag-then-quit",
-      note: "a drag, its debounced save, then the before-quit flush: 1 write in total; was 2",
+      note: "a drag, its debounced save, then the before-quit flush, which waits for that save: 1 atomic write (temp file + rename) in total; was 2",
       io,
     });
   });

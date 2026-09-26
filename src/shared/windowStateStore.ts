@@ -3,6 +3,8 @@ import * as Path from "node:path";
 
 import { app, type BrowserWindow, screen } from "electron";
 
+import { atomicWritesSettled, writeFileAtomic } from "./atomicWrite";
+
 /**
  * Persists the main window's geometry across restarts.
  *
@@ -62,6 +64,9 @@ import { app, type BrowserWindow, screen } from "electron";
  * event arrived since the last save (a widget that was never opened
  * writes nothing), and a save whose JSON matches the file, such as
  * the maximize event a restored maximized window reports, is skipped.
+ *
+ * Saves are atomic and run one at a time per file (see atomicWrite),
+ * so the close handler's save and the quit flush cannot interleave.
  */
 
 const FILE_NAME = "window-state.json";
@@ -178,8 +183,7 @@ export async function createWindowStateStore(opts: {
     const text = JSON.stringify(payload, null, 2);
     if (text === persistedText) return;
     try {
-      await FS.mkdir(dir, { recursive: true });
-      await FS.writeFile(filePath, text, "utf8");
+      await writeFileAtomic(filePath, text);
       persistedText = text;
     } catch {
       // Persistence failure is non-fatal. The user just loses one
@@ -295,6 +299,8 @@ export async function createWindowStateStore(opts: {
         saveTimer = null;
       }
       await persistNow();
+      // The close handler's save may still be running.
+      await atomicWritesSettled(filePath);
     },
   };
 }

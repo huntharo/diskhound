@@ -4,6 +4,7 @@ import * as Path from "node:path";
 import { randomUUID } from "node:crypto";
 import { execSync, spawn } from "node:child_process";
 
+import { writeFileAtomicSync } from "./atomicWrite";
 import type {
   EasyMoveRecord,
   EasyMoveResult,
@@ -62,11 +63,12 @@ export function initEasyMoveStore(dir: string): void {
   }
 }
 
+/** Atomic: a truncated file loads as no records, and every move loses its undo. */
 function persist(): void {
   if (!dataDir) return;
   try {
     FS.mkdirSync(dataDir, { recursive: true });
-    FS.writeFileSync(
+    writeFileAtomicSync(
       Path.join(dataDir, STORE_FILENAME),
       JSON.stringify(records, null, 2),
     );

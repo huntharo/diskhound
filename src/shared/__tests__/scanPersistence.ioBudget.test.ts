@@ -54,7 +54,7 @@ describe("scan snapshot store (last-scan.json)", () => {
 
     expectIoBudget({
       scenario: "scan-store-progress-then-done",
-      note: "450 progress snapshots (90 s at the 200 ms tick) then done, at the 5,000-file/10,000-dir caps: 1 write of last-scan.json (~2.8 MB) per completed scan; 4 scheduled scans/day at the 6 h default is ~11 MB/day",
+      note: "450 progress snapshots (90 s at the 200 ms tick) then done, at the 5,000-file/10,000-dir caps: 1 atomic write of last-scan.json (~2.8 MB; temp file + rename) per completed scan; 4 scheduled scans/day at the 6 h default is ~11 MB/day",
       io,
     });
     expect(JSON.parse(FS.readFileSync(Path.join(dataDir, "last-scan.json"), "utf8")).status).toBe("done");
@@ -68,7 +68,7 @@ describe("scan history", () => {
 
     expectIoBudget({
       scenario: "scan-history-save",
-      note: "one completed scan: scan-<id>.json (~2.8 MB) plus a sync, pretty-printed scan-history-index.json; ~11 MB/day at the 6 h scheduled-rescan default",
+      note: "one completed scan: scan-<id>.json (~2.8 MB) plus a sync, pretty-printed, atomic scan-history-index.json (temp file + rename); ~11 MB/day at the 6 h scheduled-rescan default",
       io,
     });
   });
@@ -83,7 +83,7 @@ describe("scan history", () => {
 
     expectIoBudget({
       scenario: "scan-history-save-with-prune",
-      note: "the 8th scan of a root with the default 7-scan cap: the two writes of a save plus one unlink of the pruned snapshot",
+      note: "the 8th scan of a root with the default 7-scan cap: the two writes and the index rename of a save, plus one unlink of the pruned snapshot",
       io,
     });
   });
@@ -102,7 +102,7 @@ describe("scan history", () => {
 
     expectIoBudget({
       scenario: "scan-completed-json-files",
-      note: "one completed scan's JSON: the history snapshot and last-scan.json hold the same ~2.8 MB, 5.6 MB per scan and ~22 MB/day at the 6 h default, half of it the duplicate; the NDJSON index and sidecar renames are not in this scenario",
+      note: "one completed scan's JSON: the history snapshot and last-scan.json hold the same ~2.8 MB, 5.6 MB per scan and ~22 MB/day at the 6 h default, half of it the duplicate; the history index and last-scan.json are atomic (2 renames); the NDJSON index and sidecar renames are not in this scenario",
       io,
     });
   });

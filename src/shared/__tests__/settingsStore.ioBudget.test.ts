@@ -36,7 +36,7 @@ describe("settings store", () => {
 
     expectIoBudget({
       scenario: "settings-set-changed",
-      note: "one settings change: 1 pretty-printed rewrite of settings.json (~1 KB), per user action",
+      note: "one settings change: 1 pretty-printed rewrite of settings.json (~1 KB), written to a flushed temp file and renamed over it so a crash cannot truncate it; per user action, a handful a day",
       io,
     });
     expect(JSON.parse(FS.readFileSync(settingsPath(), "utf8")).general.theme).toBe("light");
