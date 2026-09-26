@@ -132,6 +132,18 @@ async function keepFolders(): Promise<string[]> {
 }
 
 /**
+ * DISKHOUND_AGENT_PORT moves the MCP server off 51733. The E2E suite
+ * gives each launch its own port, so it never collides with a DiskHound
+ * the developer runs with agents turned on.
+ */
+function agentAccessPort(): number {
+  const raw = process.env.DISKHOUND_AGENT_PORT?.trim();
+  if (!raw) return AGENT_ACCESS_PORT;
+  const port = Number(raw);
+  return Number.isInteger(port) && port > 0 && port < 65536 ? port : AGENT_ACCESS_PORT;
+}
+
+/**
  * Registers the agent IPC handlers right away (the renderer asks for
  * agent state as soon as it mounts). The MCP server itself starts in
  * `start()`, after the main window is up.
@@ -140,6 +152,7 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
   const userData = app.getPath("userData");
   const policy = new McpPolicyStore(Path.join(userData, "mcp-policy.json"));
   const clientsFile = Path.join(userData, "mcp-oauth-clients.json");
+  const port = agentAccessPort();
 
   const mainWindowSend = (channel: string, payload: unknown) => {
     const main = deps.getMainWindow();
@@ -456,6 +469,7 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
         clientsFile,
         requestConsent: broker.request,
         onChanged: broadcast,
+        port,
         saveEnabled: (enabled) => deps.setAgentsEnabled(enabled),
       });
       return service;
@@ -466,8 +480,8 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
     service?.status() ?? {
       enabled: false,
       listening: false,
-      mcpUrl: agentAccessMcpUrl(AGENT_ACCESS_PORT),
-      port: AGENT_ACCESS_PORT,
+      mcpUrl: agentAccessMcpUrl(port),
+      port,
     };
   const snapshot = (): AgentAccessSnapshot => ({
     status: status(),
