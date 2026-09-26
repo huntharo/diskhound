@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { classifyArtifactPath, dropArtifactsFromReport, mergeDiagLogHotspots } from "../devArtifacts";
+import {
+  ARTIFACT_SEGMENT_NAMES,
+  classifyArtifactPath,
+  dropArtifactsFromReport,
+  mergeDiagLogHotspots,
+} from "../devArtifacts";
 
 describe("classifyArtifactPath", () => {
   it("detects node_modules at the package root", () => {
@@ -42,6 +47,24 @@ describe("classifyArtifactPath", () => {
 
   it("ignores ordinary documents", () => {
     expect(classifyArtifactPath("C:\\Users\\thoma\\Documents\\tax-2025.pdf")).toBeNull();
+  });
+
+  it("ignores folders named after Object.prototype members", () => {
+    // These used to match through the plain-object kind lookup, with a
+    // function as the kind.
+    for (const name of ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"]) {
+      expect(classifyArtifactPath(`/src/app/${name}/index.ts`), name).toBeNull();
+    }
+  });
+
+  it("lists only lowercase ASCII names that can start a match", () => {
+    for (const name of ARTIFACT_SEGMENT_NAMES) {
+      expect(name, name).toMatch(/^[\x21-\x7e]+$/);
+      expect(name.toLowerCase(), name).toBe(name);
+      const inside = classifyArtifactPath(`/p/${name}/debug/x`) ?? classifyArtifactPath(`/p/${name}/registry/x`)
+        ?? classifyArtifactPath(`/p/${name}/mod/x`) ?? classifyArtifactPath(`/p/${name}/ccache/x`);
+      expect(inside, name).not.toBeNull();
+    }
   });
 
   it("keeps UNC prefixes", () => {
