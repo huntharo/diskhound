@@ -1703,6 +1703,16 @@ button, input, select, textarea { font: inherit; }
   text-decoration: underline;
 }
 
+/* "Other disks are mounted here" line above the scan summary, linking
+ * each disk a scan left out to its own drive. */
+.other-disks-note {
+  margin: 0 12px 8px;
+  padding: 0 2px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
 /* ── Storage accounting card (macOS Overview) ──────────────────
  * Why "delete X to free Y" goes wrong on APFS: local snapshots still
  * holding deleted blocks, and clones sharing blocks between trees.

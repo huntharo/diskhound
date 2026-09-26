@@ -87,6 +87,7 @@ export async function saveScanToHistory(snapshot: ScanSnapshot): Promise<string 
     engine: snapshot.engine,
     sizeSemantics: snapshot.sizeSemantics === "allocated" ? "allocated" : undefined,
     hardlinkAccounting: snapshot.hardlinkAccounting,
+    volumeAccounting: snapshot.volumeAccounting,
   };
 
   // Write the full snapshot
