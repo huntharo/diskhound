@@ -233,3 +233,19 @@ describe("runDevArtifactsRescanWorker progress", () => {
     expect(result).toEqual(report);
   });
 });
+
+describe("Dev Artifacts worker heap", () => {
+  it("runs under its own limit, well inside the 4 GB cage it shares with main", async () => {
+    // The worker replies with the limits it was started under.
+    const workerPath = await fakeWorker(
+      `parentPort.postMessage({ requestId: request.requestId, type: "result", report: require("node:worker_threads").resourceLimits });`,
+    );
+    const devRuntimes = runtimes.filter((runtime) => runtime.label === "Dev artifacts worker");
+    expect(devRuntimes).toHaveLength(2);
+    for (const runtime of devRuntimes) {
+      const limits = await runtime.run(workerPath) as { maxOldGenerationSizeMb: number; maxYoungGenerationSizeMb: number };
+      expect(limits.maxOldGenerationSizeMb).toBe(1024);
+      expect(limits.maxYoungGenerationSizeMb).toBe(64);
+    }
+  });
+});

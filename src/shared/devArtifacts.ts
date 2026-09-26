@@ -72,6 +72,23 @@ const SEGMENT_KIND: Record<string, DevArtifactKind> = {
   rdclientautotrace: "diag-logs",
 };
 
+/**
+ * Every lowercase segment name that can start a `classifyArtifactPath`
+ * match. A path with none of these segments never classifies, so a
+ * streaming reader can skip it without building the path string.
+ */
+export const ARTIFACT_SEGMENT_NAMES: ReadonlySet<string> = new Set([
+  ...Object.keys(SEGMENT_KIND),
+  "target",
+  ".cargo",
+  "pkg",
+  "pnpm",
+  ".cache",
+  "dist",
+  "build",
+  "out",
+]);
+
 function splitSegments(filePath: string): string[] {
   return filePath.split(/[\\/]+/).filter(Boolean);
 }
@@ -89,26 +106,19 @@ function joinSegments(original: string, count: number): string {
   return parts.join(sep);
 }
 
-const PNPM_STORE_PARENTS: string[][] = [
-  ["library", "pnpm", "store"],
-  [".local", "share", "pnpm", "store"],
-  ["appdata", "local", "pnpm", "store"],
-];
-
-/** Segment count up to and including `store` when parts[i] starts a pnpm store path. */
-function pnpmStoreRootDepth(parts: string[], i: number): number | null {
-  for (const seq of PNPM_STORE_PARENTS) {
-    if (i + seq.length > parts.length) continue;
-    if (seq.every((name, j) => parts[i + j]!.toLowerCase() === name)) return i + seq.length;
-  }
-  return null;
-}
-
+/**
+ * Every root ends at the matched segment or one past it. The folder-tree
+ * fallback (devArtifactFolderTree.ts) relies on that to skip rows whose
+ * last two segments aren't in ARTIFACT_SEGMENT_NAMES, so a rule that
+ * reaches further needs that reader changed too.
+ */
 export function classifyArtifactPath(filePath: string): { root: string; kind: DevArtifactKind } | null {
   const parts = splitSegments(filePath);
   for (let i = 0; i < parts.length; i++) {
-    const seg = parts[i]!;
-    const lower = seg.toLowerCase();
+    const lower = parts[i]!.toLowerCase();
+    // Also keeps Object.prototype names ("constructor", "toString")
+    // out of the SEGMENT_KIND lookup below.
+    if (!ARTIFACT_SEGMENT_NAMES.has(lower)) continue;
 
     if (lower === "target") {
       if (i + 1 < parts.length) {
@@ -129,12 +139,13 @@ export function classifyArtifactPath(filePath: string): { root: string; kind: De
     }
 
     // pnpm's global content-addressable store outside a `.pnpm-store`
-    // folder: ~/Library/pnpm/store (macOS), ~/.local/share/pnpm/store
-    // (Linux), %LOCALAPPDATA%\pnpm\store (Windows). Projects' node_modules
-    // are clones / hard links of it — see storageSharing.ts.
-    const pnpmStoreDepth = pnpmStoreRootDepth(parts, i);
-    if (pnpmStoreDepth !== null) {
-      return { root: joinSegments(filePath, pnpmStoreDepth), kind: "package-cache" };
+    // folder: `$PNPM_HOME/store`, by default ~/Library/pnpm/store (macOS),
+    // ~/.local/share/pnpm/store (Linux) or %LOCALAPPDATA%\pnpm\store
+    // (Windows). Projects' node_modules are clones / hard links of it —
+    // see storageSharing.ts. Same rule as `classify` in the native
+    // scanner's dev_artifacts.rs.
+    if (lower === "pnpm" && i + 1 < parts.length && parts[i + 1]!.toLowerCase() === "store") {
+      return { root: joinSegments(filePath, i + 2), kind: "package-cache" };
     }
 
     if (lower === ".cache" && i + 1 < parts.length) {
@@ -145,7 +156,7 @@ export function classifyArtifactPath(filePath: string): { root: string; kind: De
       }
     }
 
-    const mapped = SEGMENT_KIND[lower] ?? SEGMENT_KIND[seg];
+    const mapped = SEGMENT_KIND[lower];
     if (mapped) {
       const depth = mapped === "worktree" && i + 1 < parts.length ? i + 2 : i + 1;
       return { root: joinSegments(filePath, depth), kind: mapped };

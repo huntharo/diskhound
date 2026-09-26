@@ -300,10 +300,11 @@ fn classify(path: &str) -> Option<(String, Kind)> {
         if lower == "pkg" && i + 1 < parts.len() && parts[i + 1].eq_ignore_ascii_case("mod") {
             return Some((join_segments(path, &parts, i + 2), Kind::GoModule));
         }
-        // pnpm's global store outside a `.pnpm-store` folder — keep in
-        // sync with `pnpmStoreRootDepth` in src/shared/devArtifacts.ts.
-        if let Some(depth) = pnpm_store_root_depth(&parts, i) {
-            return Some((join_segments(path, &parts, depth), Kind::PackageCache));
+        // pnpm's global store outside a `.pnpm-store` folder:
+        // `$PNPM_HOME/store`. Same rule as `classifyArtifactPath` in
+        // src/shared/devArtifacts.ts.
+        if lower == "pnpm" && i + 1 < parts.len() && parts[i + 1].eq_ignore_ascii_case("store") {
+            return Some((join_segments(path, &parts, i + 2), Kind::PackageCache));
         }
         if lower == ".cache" && i + 1 < parts.len() {
             let next = parts[i + 1].to_ascii_lowercase();
@@ -331,24 +332,6 @@ fn classify(path: &str) -> Option<(String, Kind)> {
     None
 }
 
-const PNPM_STORE_PARENTS: &[&[&str]] = &[
-    &["library", "pnpm", "store"],
-    &[".local", "share", "pnpm", "store"],
-    &["appdata", "local", "pnpm", "store"],
-];
-
-fn pnpm_store_root_depth(parts: &[&str], i: usize) -> Option<usize> {
-    PNPM_STORE_PARENTS.iter().find_map(|seq| {
-        let end = i + seq.len();
-        if end > parts.len() {
-            return None;
-        }
-        seq.iter()
-            .zip(&parts[i..end])
-            .all(|(want, got)| got.eq_ignore_ascii_case(want))
-            .then_some(end)
-    })
-}
 
 fn mapped_kind(lower: &str) -> Option<Kind> {
     Some(match lower {
