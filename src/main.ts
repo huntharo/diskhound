@@ -64,6 +64,7 @@ import {
 } from "./shared/diskMonitor";
 import { readDevBranch } from "./shared/devBranch";
 import { createScanSnapshotStore } from "./shared/scanStore";
+import { createAffinityEnforcer, upsertAffinityRule } from "./shared/affinityEnforcer";
 import { createSettingsStore, type SettingsStore } from "./shared/settingsStore";
 import { createUpdaterStateStore } from "./shared/updaterStateStore";
 import { createWindowStateStore, type WindowStateStore } from "./shared/windowStateStore";
@@ -1833,14 +1834,16 @@ void (async () => {
   let gpuSamplePromise: Promise<import("./shared/contracts").GpuSnapshot> | null = null;
   let diskIoCache: DiskIoSnapshot | null = null;
   let diskIoSamplePromise: Promise<DiskIoSnapshot> | null = null;
-  // Throttle affinity-rule enforcement to one pass per 4 s regardless
-  // of how often the memory sample refreshes. Affinity reads + writes
-  // shell out to PowerShell, which isn't free; 4 s is fast enough to
-  // catch a newly-launched process within a few ticks yet slow enough
-  // that the shell overhead stays a rounding error of the system load.
-  const AFFINITY_ENFORCE_INTERVAL_MS = 4000;
-  let lastAffinityEnforcementAt = 0;
-  let affinityEnforcementInFlight = false;
+  // Affinity rules are enforced against each fresh process sample,
+  // at most one pass per 4 s. The enforcer keeps its counters in
+  // memory and saves them every 15 min and at quit.
+  const affinityEnforcer = createAffinityEnforcer({
+    settings: settingsStore,
+    enforce: async (rules, processes) =>
+      (await import("./affinityRuleEngine")).enforceAffinityRules(rules, processes),
+    log: writeCrashLog,
+    isSupported: () => process.platform === "win32",
+  });
 
   const refreshMemorySample = (): Promise<SystemMemorySnapshot> => {
     if (memorySamplePromise) return memorySamplePromise;
@@ -1852,7 +1855,7 @@ void (async () => {
         // process sample. Throttled internally — spawning the
         // enforcement pass here is cheap because it returns
         // immediately when not due.
-        void maybeEnforceAffinityRules(snap).catch(() => { /* non-fatal */ });
+        void affinityEnforcer.maybeEnforce(snap.processes).catch(() => { /* non-fatal */ });
         return snap;
       })
       .catch((err) => {
@@ -1860,55 +1863,6 @@ void (async () => {
         throw err;
       });
     return memorySamplePromise;
-  };
-
-  const maybeEnforceAffinityRules = async (snap: SystemMemorySnapshot) => {
-    if (process.platform !== "win32") return;
-    if (affinityEnforcementInFlight) return;
-    const now = Date.now();
-    if (now - lastAffinityEnforcementAt < AFFINITY_ENFORCE_INTERVAL_MS) return;
-    const settings = settingsStore?.get();
-    if (!settings || settings.affinityRules.length === 0) return;
-
-    affinityEnforcementInFlight = true;
-    try {
-      const { enforceAffinityRules } = await import("./affinityRuleEngine");
-      const results = await enforceAffinityRules(settings.affinityRules, snap.processes);
-      lastAffinityEnforcementAt = Date.now();
-      if (results.length === 0) return;
-
-      // Persist the updated counters. We only update rules that were
-      // actually applied this tick; unchanged rules keep their prior
-      // values. Rule order preserved via index lookup.
-      const byId = new Map<string, typeof results[number]>();
-      for (const r of results) byId.set(r.ruleId, r);
-      const nowMs = Date.now();
-      const nextRules = settings.affinityRules.map((rule) => {
-        const hit = byId.get(rule.id);
-        if (!hit || !hit.ok) return rule;
-        return {
-          ...rule,
-          lastAppliedAt: nowMs,
-          appliedCount: rule.appliedCount + 1,
-        };
-      });
-      await settingsStore?.set({ ...settings, affinityRules: nextRules });
-      for (const r of results) {
-        if (r.ok) {
-          writeCrashLog(
-            "affinity-rule-applied",
-            `rule=${r.ruleId} pid=${r.pid} name=${r.processName} prevMask=${r.previousMask} newMask=${r.newMask}`,
-          );
-        } else if (r.error) {
-          writeCrashLog(
-            "affinity-rule-error",
-            `rule=${r.ruleId} pid=${r.pid} name=${r.processName}: ${r.error}`,
-          );
-        }
-      }
-    } finally {
-      affinityEnforcementInFlight = false;
-    }
   };
 
   ipcMain.handle("diskhound:get-memory-snapshot", () => refreshMemorySample());
@@ -2062,17 +2016,14 @@ void (async () => {
   // Read/write goes through settingsStore — the same normalization
   // pass that validates `general.theme` / `monitoring.*` also strips
   // malformed rule entries, so we never crash on a tampered file.
-  ipcMain.handle("diskhound:get-affinity-rules", () => {
-    const settings = settingsStore?.get();
-    return settings?.affinityRules ?? [];
-  });
+  //
+  // appliedCount / lastAppliedAt are the enforcer's: reads include
+  // the counts it hasn't saved yet, and saves keep its values.
+  ipcMain.handle("diskhound:get-affinity-rules", () => affinityEnforcer.rules());
   ipcMain.handle("diskhound:upsert-affinity-rule", async (_event, rule: AffinityRule) => {
     const settings = settingsStore?.get();
     if (!settings) return { ok: false, message: "Settings unavailable" };
-    const next = settings.affinityRules.slice();
-    const idx = next.findIndex((r) => r.id === rule.id);
-    if (idx >= 0) next[idx] = rule;
-    else next.push(rule);
+    const next = upsertAffinityRule(settings.affinityRules, rule);
     await settingsStore?.set({ ...settings, affinityRules: next });
     return { ok: true };
   });
@@ -4936,6 +4887,8 @@ void (async () => {
     // calls persistNow as a belt-and-suspenders.
     void windowStateStore?.flush();
     void widgetWindowStateStore?.flush();
+    // Affinity-rule counters since the last 15-minute save.
+    void affinityEnforcer.flush();
     // Idle monitoring checks leave the latest drive readings in
     // memory only; write them (synchronously) so the next launch's
     // first delta starts from this session's last check.
