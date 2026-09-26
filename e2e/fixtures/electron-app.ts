@@ -36,6 +36,7 @@ export type SeedSettings = {
   notifications?: Partial<AppSettings["notifications"]>;
   storage?: Partial<AppSettings["storage"]>;
   agents?: Partial<AppSettings["agents"]>;
+  diagnostics?: Partial<AppSettings["diagnostics"]>;
 };
 
 /**
@@ -55,6 +56,8 @@ export type LaunchOptions = {
   settings?: SeedSettings;
   /** Port for the AI agent (MCP) server. A free one when omitted. */
   agentPort?: number;
+  /** Extra env for the app, such as the DISKHOUND_HEAP_* overrides. */
+  env?: Record<string, string>;
 };
 
 export type AppHandle = {
@@ -187,6 +190,7 @@ export async function launchApp(
         DISKHOUND_AGENT_PORT: String(agentPort),
         DISKHOUND_DISABLE_UPDATES: "1",
         ...(process.platform === "linux" ? { HOME: homeDir } : {}),
+        ...opts.env,
       }),
     });
     return await attach(app, dataDir, diagnostics, agentPort);
