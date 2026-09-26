@@ -32,14 +32,17 @@ if (parentPort) {
           // while this thread sorts the current index. Sorting is
           // CPU-bound: two threads take it from ~70 s to ~35 s on a
           // 20M-file pair.
-          sortElsewhere: (job, signal) => runFullDiffSortWorker(job, { workerPath: __filename, signal }),
+          sortElsewhere: (job, signal, onSortProgress) => runFullDiffSortWorker(job, { workerPath: __filename, signal, onSortProgress }),
+          onProgress: (progress) => parentPort?.postMessage({ type: "progress", requestId, progress }),
         }).then((result) => ({ type: "result", requestId, result })),
       );
     } else if (message?.type === "sort") {
       const { requestId } = message;
       respond(
         requestId,
-        sortIndexIntoRuns(message.job).then((sorted) => ({ type: "sorted", requestId, sorted })),
+        sortIndexIntoRuns(message.job, undefined, (bytesRead) => {
+          parentPort?.postMessage({ type: "sort-progress", requestId, bytesRead });
+        }).then((sorted) => ({ type: "sorted", requestId, sorted })),
       );
     }
   });

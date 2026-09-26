@@ -1015,6 +1015,7 @@ void (async () => {
   const broadcastSnapshot = async (nextSnapshot: ScanSnapshot, options?: SnapshotWriteOptions) => {
     await scanStore.set(nextSnapshot, options);
     mainWindow?.webContents.send(SCAN_SNAPSHOT_CHANNEL, nextSnapshot);
+    widgetWindow?.webContents.send(SCAN_SNAPSHOT_CHANNEL, nextSnapshot);
   };
 
   /** In-memory side of a scan whose index now sits under `historyId`. */
@@ -1108,6 +1109,8 @@ void (async () => {
         );
         if (committed.historyId && committed.indexCommitted && rootPath) {
           afterScanCommitted(rootPath, committed.historyId);
+          // Publish comparison-start before Done so completion never flashes in between.
+          warmLatestFullDiff(rootPath, message.snapshot);
         }
       }
 
@@ -1129,9 +1132,6 @@ void (async () => {
           "memory",
           `post-scan ${message.snapshot.rootPath ?? "?"} files=${message.snapshot.filesVisited}: ${describeCacheMemory()}`,
         );
-        if (message.snapshot.rootPath) {
-          warmLatestFullDiff(message.snapshot.rootPath);
-        }
 
         // Phase-2b: capture the volume's current USN cursor so the next
         // monitoring tick can do a cheap incremental scan. Best-effort —
@@ -1503,6 +1503,7 @@ void (async () => {
       lastUpdatedAt: Date.now(),
     }));
     mainWindow?.webContents.send(SCAN_SNAPSHOT_CHANNEL, cancelledSnapshot);
+    widgetWindow?.webContents.send(SCAN_SNAPSHOT_CHANNEL, cancelledSnapshot);
     return cancelledSnapshot;
   };
 
@@ -2467,12 +2468,19 @@ void (async () => {
   };
   const fullDiffLoader = createFullDiffLoader({
     loadSnapshot: loadHistoricalSnapshotCached,
-    runWorker: (input) => runFullDiffWorker(input, { workerPath: fullDiffWorkerEntry }),
-    computeInline: computeFullDiffFromIndexFiles,
+    runWorker: (input, onProgress) => runFullDiffWorker(input, { workerPath: fullDiffWorkerEntry, onProgress }),
+    computeInline: (input, onProgress) => computeFullDiffFromIndexFiles(input, { onProgress }),
+    onProgress: (progress) => {
+      // This channel is transient; do not send it through scanStore or history.
+      for (const window of BrowserWindow.getAllWindows()) {
+        window.webContents.send("diskhound:full-diff-progress", progress);
+      }
+    },
     log: writeCrashLog,
   });
-  const warmLatestFullDiff = (rootPath: string) => {
-    void fullDiffLoader.warmLatest(rootPath);
+  ipcMain.handle("diskhound:get-full-diff-progress", () => fullDiffLoader.getProgress());
+  const warmLatestFullDiff = (rootPath: string, snapshot?: ScanSnapshot) => {
+    void fullDiffLoader.warmLatest(rootPath, snapshot);
   };
 
   ipcMain.handle("diskhound:compute-scan-diff", (_event, baselineId: string, currentId: string) =>

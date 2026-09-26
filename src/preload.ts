@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from "electron";
 
 import type {
   AppSettings,
+  FullDiffProgress,
   DiskDelta,
   DiskhoundNativeApi,
   DiskhoundPlatform,
@@ -211,6 +212,12 @@ const api: DiskhoundNativeApi = {
   },
 
   // Events
+  getFullDiffProgress: () => ipcRenderer.invoke("diskhound:get-full-diff-progress"),
+  onFullDiffProgress: (listener) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, progress: FullDiffProgress) => listener(progress);
+    ipcRenderer.on("diskhound:full-diff-progress", wrapped);
+    return () => { ipcRenderer.removeListener("diskhound:full-diff-progress", wrapped); };
+  },
   onScanSnapshot: (listener) => {
     const wrapped = (_event: Electron.IpcRendererEvent, snapshot: ScanSnapshot) => {
       listener(snapshot);
