@@ -1,6 +1,7 @@
 import { dirname, join } from "node:path";
 
 import { createIdleScanSnapshot, type ScanSnapshot } from "../src/shared/contracts";
+import { runScan } from "../src/scan/scanWorker";
 import { expect, test, type AppHandle } from "./fixtures/electron-app";
 
 async function publish(handle: AppHandle, snapshot: ScanSnapshot): Promise<void> {
@@ -75,7 +76,7 @@ test("progress stays visible through walking, indexing, and indeterminate finali
   await expect(progress).not.toHaveAttribute("aria-valuenow");
 
   // A walker can report files before it has any countable bytes or known total.
-  await publish(handle, { ...initial, scanPhase: undefined, filesVisited: 4, directoriesVisited: 2 });
+  await publish(handle, { ...initial, scanPhase: "walking", filesVisited: 4, directoriesVisited: 2 });
   await expect(panel).toContainText("Scanning folders");
   await expect(panel).toContainText("4 files · 2 folders");
   await expect(progress).not.toHaveAttribute("aria-valuenow");
@@ -117,4 +118,44 @@ test("progress stays visible through walking, indexing, and indeterminate finali
   await publish(handle, { ...indexed, status: "done", scanPhase: "complete", finishedAt: Date.now() });
   await expect(panel).toBeHidden();
   await expect(page.locator(".tab-status")).toHaveText("Complete");
+});
+
+test("actual JS worker snapshots show walking progress on the first scan and rescan", async ({ launch, scanTree }, testInfo) => {
+  const handle = await launch();
+  await prepareRescan(handle, scanTree.root);
+  const { page } = handle;
+  const panel = page.locator(".scan-progress");
+  const progress = panel.getByRole("progressbar");
+  let baselineIndex: string | undefined;
+
+  for (const name of ["first", "rescan"]) {
+    const snapshots: ScanSnapshot[] = [];
+    const indexOutput = testInfo.outputPath(`${name}.ndjson.gz`);
+    // Exercise the worker itself, then replay its snapshots without changing
+    // engine, phase, counts, or timestamps. No full-disk scan or native fallback
+    // manipulation is needed to keep short-lived states visible for assertions.
+    await runScan({ rootPath: scanTree.root, options: {}, indexOutput, baselineIndex }, (message) => {
+      if (message.type === "error") throw new Error(message.message);
+      snapshots.push(message.snapshot);
+    });
+    const walking = snapshots.find((s) => s.status === "running" && s.filesVisited > 0 && s.scanPhase !== "finalizing");
+    expect(walking).toBeDefined();
+    await publish(handle, walking!);
+    await expect(panel).toContainText("Scanning folders");
+    await expect(panel).not.toContainText("Preparing");
+    // The small fixture may round to 0% of the drive; it still has a valid
+    // denominator and must render determinate progress instead of preparation.
+    await expect(progress).toHaveAttribute("aria-valuenow", /^\d+$/);
+    await expect(page.locator(".metric-progress")).toBeVisible();
+    await expect(page.locator(".tab-status")).not.toContainText("Preparing");
+
+    const finalizing = snapshots.find((s) => s.scanPhase === "finalizing");
+    expect(finalizing).toBeDefined();
+    await publish(handle, finalizing!);
+    await expect(panel).toContainText("Finalizing");
+    await expect(progress).not.toHaveAttribute("aria-valuenow");
+    await publish(handle, snapshots.at(-1)!);
+    await expect(panel).toBeHidden();
+    baselineIndex = indexOutput;
+  }
 });
