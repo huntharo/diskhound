@@ -17,6 +17,7 @@ import {
   shell,
   Tray,
   type MenuItemConstructorOptions,
+  type OpenDialogOptions,
 } from "electron";
 import {
   createIdleScanSnapshot,
@@ -1603,25 +1604,30 @@ void (async () => {
 
   // ── IPC: Scan ─────────────────────────────────────────────
 
-  ipcMain.handle("diskhound:pick-root", async () => {
+  // Since Electron 43 a dialog without defaultPath always opens in
+  // Downloads, and the OS no longer restores the last folder. Each
+  // picker reopens where its last pick was (this session only), and
+  // starts in home.
+  const lastPickParentDirs = new Map<string, string>();
+  const pickDirectory = async (key: string, options: Omit<OpenDialogOptions, "properties" | "defaultPath">) => {
     if (!mainWindow) return null;
     const result = await dialog.showOpenDialog(mainWindow, {
+      ...options,
       properties: ["openDirectory"],
-      title: "Choose a folder to scan",
-      buttonLabel: "Scan folder",
+      defaultPath: lastPickParentDirs.get(key) ?? app.getPath("home"),
     });
-    return result.canceled ? null : result.filePaths[0] ?? null;
-  });
+    const picked = result.canceled ? null : result.filePaths[0] ?? null;
+    if (picked) lastPickParentDirs.set(key, Path.dirname(picked));
+    return picked;
+  };
 
-  ipcMain.handle("diskhound:pick-protected-folder", async () => {
-    if (!mainWindow) return null;
-    const result = await dialog.showOpenDialog(mainWindow, {
-      properties: ["openDirectory"],
-      title: "Choose a folder to protect",
-      buttonLabel: "Protect folder",
-    });
-    return result.canceled ? null : result.filePaths[0] ?? null;
-  });
+  ipcMain.handle("diskhound:pick-root", () =>
+    pickDirectory("scan-root", { title: "Choose a folder to scan", buttonLabel: "Scan folder" }),
+  );
+
+  ipcMain.handle("diskhound:pick-protected-folder", () =>
+    pickDirectory("protected-folder", { title: "Choose a folder to protect", buttonLabel: "Protect folder" }),
+  );
 
   // Elevation + fast-scan admin UX. Renderer reads `isElevated` on
   // boot to decide whether to show the "Run as admin for faster
@@ -2280,14 +2286,9 @@ void (async () => {
   ipcMain.handle("diskhound:get-easy-moves", () => getEasyMoves());
   ipcMain.handle("diskhound:verify-easy-moves", () => verifyEasyMoves());
 
-  ipcMain.handle("diskhound:pick-move-destination", async () => {
-    if (!mainWindow) return null;
-    const result = await dialog.showOpenDialog(mainWindow, {
-      properties: ["openDirectory"],
-      title: "Choose destination folder",
-    });
-    return result.canceled ? null : result.filePaths[0] ?? null;
-  });
+  ipcMain.handle("diskhound:pick-move-destination", () =>
+    pickDirectory("move-destination", { title: "Choose destination folder" }),
+  );
 
   // ── IPC: Scan History & Diff ──────────────────────────────
 

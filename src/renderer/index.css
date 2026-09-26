@@ -887,11 +887,19 @@ button, input, select, textarea { font: inherit; }
   overflow: hidden;
 }
 
-:root.platform-windows .header,
-:root.platform-linux .header {
+:root.platform-windows .header {
   /* titleBarOverlay draws min/max/close over the web content.
    * Without this the utility buttons sit under those controls. */
   padding-right: 140px;
+}
+
+:root.platform-linux .header {
+  /* On Linux the overlay follows the desktop's button layout (Electron
+   * 43+): buttons can sit on the left, the right or both, and GNOME
+   * shows only close. env(titlebar-area-*) is the free span between
+   * them. The fallbacks keep the Windows padding. */
+  padding-left: calc(env(titlebar-area-x, 0px) + 12px);
+  padding-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, calc(100vw - 128px)) + 12px);
 }
 
 :root.platform-macos .header {

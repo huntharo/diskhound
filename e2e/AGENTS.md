@@ -13,8 +13,9 @@ bun run test:e2e -- --grep restart    # extra args go to playwright test
 ```
 
 `build:e2e` does four things:
-1. It runs Electron's own installer. `bun install` skips it, because
-   `trustedDependencies` in package.json lists only blake2.
+1. It runs Electron's own installer. Since Electron 42 the package has
+   no postinstall and downloads its binary on first use; this fetches
+   it before the first test starts.
 2. It builds the debug scanner.
 3. It builds the renderer.
 4. It builds main.
@@ -22,9 +23,8 @@ bun run test:e2e -- --grep restart    # extra args go to playwright test
 It skips `bun run build`, which rewrites `build/icon*.png`. On Linux
 wrap the command in `xvfb-run --auto-servernum`.
 
-- **Use Node 24.** On Node 26, `node_modules/electron/install.js`
-  exits 0 without extracting anything. Every launch then fails with
-  "Electron failed to install correctly".
+- **Use Node 22.12 or later.** Electron's installer requires it. Node 24
+  and 26 both work.
 - **The scanner is required.** The fixture pins
   `native/diskhound-native-scanner/target/debug/diskhound-native-scanner`,
   or `DISKHOUND_NATIVE_SCANNER_PATH` when set. It fails when the binary
