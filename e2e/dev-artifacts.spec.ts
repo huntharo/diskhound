@@ -126,3 +126,51 @@ test("marks old build classifications incomplete without relabeling Gradle as Sc
   await expect(second.page.locator('.dev-kind-cell-label', { hasText: /^Gradle \/ JVM$/ })).toBeVisible();
   await expect(second.page.locator('.dev-kind-cell-label', { hasText: /^Rust target$/ })).toHaveCount(0);
 });
+
+
+test("keeps tool configuration out of native and folder-tree cache reports", async ({ launch }, testInfo) => {
+  const root = testInfo.outputPath("dev");
+  const generated: Array<[string, string, string]> = [
+    [".yarn/cache/pkg.zip", ".yarn/cache", "package-cache"],
+    [".bun/install/cache/pkg/a.js", ".bun/install/cache", "package-cache"],
+    [".gradle/caches/modules/a.jar", ".gradle/caches", "jvm"],
+    [".m2/repository/org/a.jar", ".m2/repository", "jvm"],
+    [".nuget/packages/pkg/a.dll", ".nuget/packages", "dotnet"],
+    ["obj/Debug/net8.0/App.dll", "obj/Debug/net8.0", "dotnet"],
+    [".tox/py312/lib/python3.12/site-packages/pkg/a.py", ".tox/py312/lib/python3.12/site-packages", "python"],
+    [".cache/ccache/a.o", ".cache/ccache", "compiler-cache"],
+    ["custom-build/CMakeFiles/a.o", "custom-build/CMakeFiles", "cmake-build"],
+    ["go/pkg/mod/example.com/team/module/v2@v2.0.0/a.go", "go/pkg/mod/example.com/team/module/v2@v2.0.0", "go-module"],
+  ];
+  for (const [file] of generated) writeFile(root, file.split("/"), SMALL_BYTES);
+  for (const file of [
+    ".yarn/patches/pkg.patch", ".yarn/releases/yarn.cjs", ".bun/bin/bun",
+    ".gradle/gradle.properties", ".gradle/init.d/init.gradle", ".m2/settings.xml",
+    ".nuget/NuGet.Config", "obj/mesh.obj", "venv/app.py", "ccache/src/a.c",
+    "cmake-build-debug/README.txt", "go/pkg/mod/helpers.go",
+  ]) writeFile(root, file.split("/"), SMALL_BYTES);
+
+  const first = await launch();
+  const scanned = await scanFolderFromPicker(first, root);
+  if (!scanned.rootPath) throw new Error("scan has no root path");
+  const check = async (handle: AppHandle, sidecarOnly: boolean) => {
+    const report = await handle.page.evaluate(
+      ([scanRoot, only]) => window.diskhound.getDevArtifacts(scanRoot, { sidecarOnly: only }),
+      [scanned.rootPath!, sidecarOnly] as const,
+    );
+    expect(report?.classificationNeedsFullScan).toBeUndefined();
+    expect(report?.totalBytes).toBe(generated.length * SMALL_BYTES);
+    expect(report?.artifacts).toHaveLength(generated.length);
+    const actual = report!.artifacts.map((r) => [r.path.toLowerCase(), r.kind]);
+    expect(actual).toEqual(expect.arrayContaining(generated.map(([, path, kind]) => [join(root, ...path.split("/")).toLowerCase(), kind])));
+  };
+  await check(first, true);
+  await first.close();
+  const indexDir = join(first.userDataDir, "scan-indexes");
+  for (const name of readdirSync(indexDir).filter((name) => name.endsWith(".dev-artifacts.json"))) {
+    rmSync(join(indexDir, name));
+  }
+  const second = await launch({ dataDir: first.dataDir });
+  await waitForScanComplete(second.page);
+  await check(second, false);
+});
