@@ -26,6 +26,29 @@ test("separates VM disks and snapshots from installers and camera images", async
   await handle.page.getByRole("button", { name: "Virtual machines", exact: true }).click();
   await expect(handle.page.locator(".file-row")).toHaveCount(vms.length);
   await expect(handle.page.getByText(/Manage snapshots in the VM application/)).toBeVisible();
+  const gridRows = () => handle.page.locator(".file-view").evaluate((el) =>
+    getComputedStyle(el).gridTemplateRows.split(" ").length);
+  expect(await gridRows()).toBe(5);
+  // Exercise the merged bulk-progress row alongside the VM notice, without deleting files.
+  await handle.app.evaluate(({ ipcMain }) => {
+    ipcMain.removeHandler("diskhound:trash-path");
+    ipcMain.handle("diskhound:trash-path", () => ({ ok: false, message: "Test: keep VM files" }));
+  });
+  await handle.page.getByRole("button", { name: "Select page", exact: true }).click();
+  await handle.page.getByRole("button", { name: "Trash selected", exact: true }).click();
+  const status = handle.page.locator(".file-view [role=status]");
+  await expect(status).toContainText("Done");
+  expect(await gridRows()).toBe(6);
+  const statusBox = await status.boundingBox();
+  const rowBox = await handle.page.locator(".file-row").first().boundingBox();
+  expect(rowBox!.y).toBeGreaterThanOrEqual(statusBox!.y + statusBox!.height);
+  expect(rowBox!.y - (statusBox!.y + statusBox!.height)).toBeLessThan(60);
+  // The intentional failures leave a persistent toast that can cover filter chips
+  // on smaller CI displays. Verify and dismiss it before testing other categories.
+  const failureToast = handle.page.locator(".toast").filter({ hasText: "Test: keep VM files" });
+  await expect(failureToast).toContainText("7 failed");
+  await failureToast.getByRole("button", { name: "Dismiss", exact: true }).click();
+  await expect(failureToast).toHaveCount(0);
   await handle.page.getByRole("button", { name: "Installers", exact: true }).click();
   await expect(handle.page.locator(".file-row")).toHaveCount(2);
   expect((await handle.page.locator(".file-row .file-name-text").allTextContents()).sort()).toEqual(["linux.iso", "setup.dmg"]);
