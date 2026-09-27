@@ -2,9 +2,12 @@ import * as FS from "node:fs";
 import * as FSP from "node:fs/promises";
 import * as OS from "node:os";
 import * as Path from "node:path";
+import { gunzipSync } from "node:zlib";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { checkUsnForAnyChanges } from "../usnMonitor";
+import { normPath } from "../shared/pathUtils";
 import { runIncrementalRescan, type IncrementalRescanDeps } from "../incrementalRescan";
 import { commitCompletedScan, settingsWithRecentScan } from "../scanCommit";
 import type { DiskDelta, ScanSnapshot } from "../shared/contracts";
@@ -103,7 +106,7 @@ let now: number;
 beforeEach(async () => {
   dataDir = FS.realpathSync(await FSP.mkdtemp(Path.join(OS.tmpdir(), "diskhound-rescan-io-")));
   paths.userData = dataDir;
-  // The full diff's external sort spills into OS.tmpdir().
+  // The full diff's external sort writes its runs to OS.tmpdir().
   tmpDir = Path.join(dataDir, "tmp");
   FS.mkdirSync(tmpDir);
   savedTmpEnv = { TMPDIR: process.env.TMPDIR, TEMP: process.env.TEMP, TMP: process.env.TMP };
@@ -217,14 +220,14 @@ async function seedHistoryAtCap(): Promise<string[]> {
   return ids;
 }
 
-function journalRecord(filePath: string, op: string, size: number | null, mtime: number) {
+function journalRecord(filePath: string, op: string, size: number | null, mtime: number, identity = { fileRef: 1, usn: 3 }) {
   return JSON.stringify({
     type: "journal-record",
     op,
     path: filePath,
-    fileRef: 1,
+    fileRef: identity.fileRef,
     parentRef: 2,
-    usn: 3,
+    usn: identity.usn,
     reasonMask: 0,
     timestamp: mtime,
     ...(size === null ? {} : { size }),
@@ -233,13 +236,13 @@ function journalRecord(filePath: string, op: string, size: number | null, mtime:
   });
 }
 
-function journalCursor(records: number) {
+function journalCursor(records: number, dropped = 0) {
   return JSON.stringify({
     type: "journal-cursor",
     cursor: 2_000_000,
     journalId: JOURNAL_ID,
     recordsEmitted: records,
-    recordsDropped: 0,
+    recordsDropped: dropped,
   });
 }
 
@@ -338,6 +341,30 @@ describe("scheduled USN rescan (Windows)", () => {
     expect(getCursor("C:")?.cursor).toBe(2_000_000);
   });
 
+  it("preserves the saved index when a live file's journal lookup was dropped", async () => {
+    const ids = await seedHistoryAtCap();
+    await saveCursor();
+    const previousIndex = indexFilePath(ids.at(-1)!);
+    const previousBytes = FS.readFileSync(previousIndex);
+    // A create/modify/rename record whose file could not be opened by ID:
+    // native emits no delete, and reports the unresolved operation instead.
+    journal.lines = [journalCursor(0, 1)];
+    const { deps, calls } = incrementalDeps();
+
+    const { io, result } = await measureFsIo(() => runIncrementalRescan(ROOT, deps));
+
+    expectIoBudget({
+      scenario: "usn-tick-unresolved-file",
+      note: "an unresolved current-file lookup is reported as dropped, never as a delete: preserve the index and history, with 1 snapshot read and 0 writes (0 writes/day and 0 MB/day at both the 6 h default and the 1-minute minimum; deferred session flushes use the existing quit budget). The manual probe requests a full rescan on dropped records",
+      io,
+    });
+    expect(result).toMatchObject({ changed: false, stats: { recordsDropped: 1, deletions: 0 } });
+    expect(getScanHistory(ROOT).map((entry) => entry.id)).toEqual([...ids].reverse());
+    expect(FS.readFileSync(previousIndex)).toEqual(previousBytes);
+    expect(calls).toMatchObject({ warmFullDiff: 0, onCommitted: 0 });
+    expect(calls.published[0]?.filesVisited).toBe(FILES);
+  });
+
   it("writes an hour of no-op ticks once, at quit", async () => {
     await seedHistoryAtCap();
     await saveCursor();
@@ -381,12 +408,94 @@ describe("scheduled USN rescan (Windows)", () => {
 
     expectIoBudget({
       scenario: "usn-tick-records-match-nothing",
-      note: "journal records under the root that leave the index as it was (a write that kept size and mtime, a delete of a file it never listed): the new index is streamed, found identical and deleted, so 1 index write (~330 MB at 7M files) and nothing committed. Used to save a history entry, copy both sidecars and prune a real scan too",
+      note: "Ineffective updates and deletes are checked against the baseline before opening an output file: 0 writes/day and 0 MB/day at both the 6-hour default and 1-minute minimum. Avoids ~330 MB/tick at 7M files (1.32 GB/day default, 475 GB/day minimum).",
       io,
     });
     expect(result).toMatchObject({ changed: false });
     expect(getScanHistory(ROOT).map((entry) => entry.id)).toEqual([...ids].reverse());
     expect(FS.readdirSync(Path.join(dataDir, "scan-indexes")).filter((name) => name.startsWith("pending-"))).toEqual([]);
+  });
+
+  it("does not write an index for files created and deleted entirely between ticks", async () => {
+    const ids = await seedHistoryAtCap();
+    await saveCursor();
+    const previousIndex = indexFilePath(ids.at(-1)!);
+    const previousBytes = FS.readFileSync(previousIndex);
+    journal.lines = [
+      // Native folds FILE_CREATE | FILE_DELETE into a tombstone.
+      journalRecord(Path.join(ROOT, "transient.tmp"), "delete", null, now),
+      journalCursor(1),
+    ];
+    const { deps, calls } = incrementalDeps();
+    const { io, result } = await measureFsIo(() => runIncrementalRescan(ROOT, deps));
+    expectIoBudget({
+      scenario: "usn-tick-transient-only",
+      note: "Create/delete activity absent from the baseline: one read-only index pass, 0 writes/day and 0 MB/day at both the 6-hour default and 1-minute minimum. Avoids rewriting ~330 MB/tick at 7M files (~1.32 GB/day default; ~475 GB/day minimum).",
+      io,
+    });
+    expect(result).toMatchObject({ changed: false, stats: { additions: 0, modifications: 0, deletions: 0 } });
+    expect(FS.readFileSync(previousIndex)).toEqual(previousBytes);
+    expect(getScanHistory(ROOT).map((entry) => entry.id)).toEqual([...ids].reverse());
+    expect(calls).toMatchObject({ warmFullDiff: 0, onCommitted: 0 });
+    expect(FS.readdirSync(Path.join(dataDir, "scan-indexes")).filter((name) => name.startsWith("pending-"))).toEqual([]);
+  });
+
+  it("removes deleted and renamed paths from the committed index", async () => {
+    const ids = await seedHistoryAtCap();
+    await saveCursor();
+    const [gone, old, reused] = baseTree.files;
+    const renamedPath = Path.join(ROOT, "renamed.bin");
+    journal.lines = [
+      journalRecord(gone!.path, "delete", null, now, { fileRef: 1, usn: 10 }),
+      journalRecord(old!.path, "delete", null, now, { fileRef: 2, usn: 20 }),
+      journalRecord(renamedPath, "rename", old!.size, old!.mtime, { fileRef: 2, usn: 21 }),
+      // Grouping by file reference can put an older removal after the
+      // current file at a reused path. USN, not output order, must win.
+      journalRecord(reused!.path, "create", reused!.size, reused!.mtime, { fileRef: 3, usn: 30 }),
+      journalRecord(reused!.path, "delete", null, now, { fileRef: 4, usn: 5 }),
+      journalCursor(5),
+    ];
+    const { deps, calls } = incrementalDeps();
+    const { io, result } = await measureFsIo(() => runIncrementalRescan(ROOT, deps));
+
+    expectIoBudget({
+      scenario: "usn-tick-delete-and-rename",
+      note: "one delete and one rename, including an older delete at a reused path: 5 writeFile calls and 1 index stream, the same persistence as an existing changed tick, with 2 sidecar links and history pruning. At 7M files ~335 MB/tick: 24 content writes/day and ~1,340 MB/day at the 6 h default; 8,640 content writes/day and ~482,400 MB/day at the 1-minute minimum if every tick changes files. No per-record writes added; this records the existing whole-index rewrite cost",
+      io,
+    });
+    expect(result).toMatchObject({ changed: true, stats: { additions: 1, modifications: 0, deletions: 2 } });
+    expect(calls).toMatchObject({ onCommitted: 1, warmFullDiff: 1 });
+    const newest = getScanHistory(ROOT)[0]!;
+    expect(newest.id).not.toBe(ids.at(-1));
+    const entries = gunzipSync(FS.readFileSync(indexFilePath(newest.id))).toString("utf8")
+      .trim().split("\n").map((line) => JSON.parse(line) as { p: string; s?: number; t?: string });
+    const files = new Map(entries.filter((entry) => entry.t !== "d").map((entry) => [normPath(entry.p), entry]));
+    expect(files.size).toBe(FILES - 1);
+    expect(files.has(normPath(gone!.path))).toBe(false);
+    expect(files.has(normPath(old!.path))).toBe(false);
+    expect(files.get(normPath(renamedPath))?.s).toBe(old!.size);
+    expect(files.get(normPath(reused!.path))?.s).toBe(reused!.size);
+    expect(calls.published[0]?.filesVisited).toBe(FILES - 1);
+    expect(getCursor("C:")?.cursor).toBe(2_000_000);
+  });
+
+  it.each([
+    { emitted: 0, dropped: 1, changed: true },
+    { emitted: 1, dropped: 0, changed: true },
+    { emitted: 0, dropped: 0, changed: false },
+  ])("manual probe with $emitted emitted and $dropped dropped records", async ({ emitted, dropped, changed }) => {
+    await saveCursor();
+    journal.lines = [
+      ...(emitted ? [journalRecord(baseTree.files[0]!.path, "delete", null, now)] : []),
+      journalCursor(emitted, dropped),
+    ];
+    const { io, result } = await measureFsIo(() => checkUsnForAnyChanges("diskhound-native-scanner", ROOT));
+    expectIoBudget({
+      scenario: "usn-manual-probe",
+      note: "manual USN probe, including dropped records whose paths cannot be ruled outside the root: 0 writes and 0 MB/day at both the 6 h default and the 1-minute minimum; an uncertain probe requests a full scan",
+      io,
+    });
+    expect(result).toMatchObject({ changed, recordCount: emitted });
   });
 
   it("rewrites the index when files under the root changed", async () => {
@@ -437,28 +546,29 @@ describe("full diff after a scan", () => {
   function loader(failing = false) {
     const compute = (input: Parameters<typeof computeFullDiffFromIndexFiles>[0]) =>
       computeFullDiffFromIndexFiles({ ...input, sortChunkRecords: SORT_CHUNK });
-    // A diff that spills both indexes and then fails, in the worker and
-    // again inline, like one that runs the temp volume out of space.
-    const spillThenFail = async (input: Parameters<typeof computeFullDiffFromIndexFiles>[0]) => {
+    // A diff that writes both indexes' runs and then fails, in the
+    // worker and again inline, like one that runs the temp volume out of
+    // space.
+    const writeRunsThenFail = async (input: Parameters<typeof computeFullDiffFromIndexFiles>[0]) => {
       await compute(input);
       throw new Error("ENOSPC: no space left on device");
     };
     return createFullDiffLoader({
       loadSnapshot: loadHistoricalSnapshot,
-      runWorker: failing ? spillThenFail : compute,
-      computeInline: failing ? spillThenFail : compute,
+      runWorker: failing ? writeRunsThenFail : compute,
+      computeInline: failing ? writeRunsThenFail : compute,
       log: () => {},
     });
   }
 
-  it("spills both indexes to the temp dir to warm the latest pair", async () => {
+  it("sorts both indexes through the temp dir to warm the latest pair", async () => {
     await seedPair();
 
     const { io, result } = await measureFsIo(() => loader().warmLatest(ROOT));
 
     expectIoBudget({
       scenario: "full-diff-warm",
-      note: "the latest pair's full diff, warmed after every scan whose totals moved: both indexes sorted into runs spilled to OS.tmpdir() as uncompressed JSONL, ~265 B per file per side (the path twice). 8 runs and 10.6 MB here; 59 runs per side and ~3.7 GB per scan at 7M files, ~15 GB/day at the 6 h default. Plus a ~150 KB full-diff-cache entry, and 2 stats for the failed-diff check",
+      note: "the latest pair's full diff, warmed after every scan whose totals moved: both indexes sorted into runs of 5,000 records (120,000 in the app) written to OS.tmpdir() as deflated binary blocks, ~20 B per file per side (the path once, next to sorted neighbours that share its prefix). Was uncompressed JSONL at ~265 B, the path twice. 8 runs and 0.82 MB here, was 10.6 MB; ~0.29 GB per diff at 7M files, was ~3.7 GB, and 0.49 GB on a real 20.5M-file root, was 12.7 GB. ~1.2 GB/day at the 6 h default, was ~15 GB/day; up to 1,440/day and ~415 GB/day at the 1-minute minimum, was ~5.3 TB/day. Plus a ~150 KB full-diff-cache entry, and 2 stats for the failed-diff check",
       io,
     });
     expect(result?.totalChanges).toBeGreaterThan(0);
@@ -475,7 +585,7 @@ describe("full diff after a scan", () => {
 
     expectIoBudget({
       scenario: "full-diff-retry-after-failure",
-      note: "asking again for a pair whose diff failed in the worker and inline: 2 stats and 0 writes, since the failure is remembered against both indexes' size and mtime. Was both spills again, 2 × 10.6 MB here and ~7.4 GB at 7M files per retry",
+      note: "asking again for a pair whose diff failed in the worker and inline: 2 stats and 0 writes, since the failure is remembered against both indexes' size and mtime. Was both indexes' runs written again: 2 × 0.82 MB here and ~0.58 GB at 7M files per retry, and 2 × 10.6 MB and ~7.4 GB before the runs were deflated",
       io,
     });
     expect(result).toBeNull();

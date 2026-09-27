@@ -1,5 +1,11 @@
 import type { DevArtifact } from "../../shared/contracts";
 import { basenameOf, dirnameOf } from "../../shared/pathUtils";
+import { formatBytes } from "./format";
+
+export function artifactDeltaLabel(deltaBytes: number): string {
+  const sign = deltaBytes > 0 ? "+" : deltaBytes < 0 ? "−" : "";
+  return `${sign}${formatBytes(Math.abs(deltaBytes))} since last scan`;
+}
 
 /** Folder names that do not identify a project on their own. */
 const GENERIC_LEAVES = new Set([
