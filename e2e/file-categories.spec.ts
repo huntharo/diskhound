@@ -43,6 +43,12 @@ test("separates VM disks and snapshots from installers and camera images", async
   const rowBox = await handle.page.locator(".file-row").first().boundingBox();
   expect(rowBox!.y).toBeGreaterThanOrEqual(statusBox!.y + statusBox!.height);
   expect(rowBox!.y - (statusBox!.y + statusBox!.height)).toBeLessThan(60);
+  // The intentional failures leave a persistent toast that can cover filter chips
+  // on smaller CI displays. Verify and dismiss it before testing other categories.
+  const failureToast = handle.page.locator(".toast").filter({ hasText: "Test: keep VM files" });
+  await expect(failureToast).toContainText("7 failed");
+  await failureToast.getByRole("button", { name: "Dismiss", exact: true }).click();
+  await expect(failureToast).toHaveCount(0);
   await handle.page.getByRole("button", { name: "Installers", exact: true }).click();
   await expect(handle.page.locator(".file-row")).toHaveCount(2);
   expect((await handle.page.locator(".file-row .file-name-text").allTextContents()).sort()).toEqual(["linux.iso", "setup.dmg"]);
