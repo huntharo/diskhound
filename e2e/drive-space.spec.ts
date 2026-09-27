@@ -20,6 +20,25 @@ test("macOS header and picker show Available including purgeable and use it for 
   await expect(page.locator(".drive-card-free")).toHaveText("724 GB available · 686 GB purgeable");
   await expect(page.locator(".drive-card-fill")).toHaveClass(/ok/);
 
+  // At the narrow-header breakpoint only the secondary detail disappears;
+  // Available and the complete tooltip remain, and the picker is unaffected.
+  for (const contentWidth of [961, 960, 1280]) {
+    await app.evaluate(({ BrowserWindow }, width) => {
+      BrowserWindow.getAllWindows()[0].setContentSize(width, 800);
+    }, contentWidth);
+    await expect.poll(() => page.evaluate(() => window.innerWidth)).toBe(contentWidth);
+    const purgeable = pill.locator(".drive-pill-purgeable");
+    if (contentWidth <= 960) {
+      await expect(purgeable).toBeHidden();
+      await expect(pill.locator(".drive-pill-free")).toHaveText("724 GB available", { useInnerText: true });
+    } else {
+      await expect(purgeable).toBeVisible();
+      await expect(pill.locator(".drive-pill-free")).toHaveText("724 GB available · 686 GB purgeable", { useInnerText: true });
+    }
+    await expect(pill).toHaveAttribute("title", "View / (724 GB available · 686 GB purgeable)");
+    await expect(page.locator(".drive-card-free")).toHaveText("724 GB available · 686 GB purgeable");
+  }
+
   // Foundation may be unavailable on a mount; preserve an honest raw-free fallback.
   await app.evaluate(({ ipcMain }) => {
     ipcMain.removeHandler("diskhound:get-disk-space");

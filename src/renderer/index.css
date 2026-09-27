@@ -7363,6 +7363,9 @@ button, input, select, textarea { font: inherit; }
   .drive-pills {
     max-width: 50vw;
   }
+  .drive-pill-purgeable {
+    display: none;
+  }
 }
 
 /* Very small windows (e.g. side-by-side on a 1080p display). Drop
@@ -9661,4 +9664,3 @@ body.system-widget-body #app {
   .dev-summary-actions { margin-left: 0; }
   .dev-select-bar { padding-left: 12px; padding-right: 12px; }
 }
-

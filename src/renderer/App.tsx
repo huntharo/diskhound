@@ -17,7 +17,7 @@ import {
 } from "../shared/contracts";
 import { duplicateGroupReclaimable } from "../shared/duplicateReclaim";
 import { formatScanRoot } from "../shared/pathUtils";
-import { formatDriveSpace, driveUsedPercent } from "./lib/driveSpace";
+import { formatDriveSpace, driveSpaceLabel, driveUsedPercent } from "./lib/driveSpace";
 import { formatBytes } from "./lib/format";
 import { useSizeUnitBase } from "./lib/sizeUnitSettings";
 import { clearDeletedPaths } from "./lib/deletedPaths";
@@ -1480,7 +1480,12 @@ function DrivePill({ drive, active, scanning, scanPercent, onScan }: {
       <span className="drive-pill-free">
         {scanning && scanPercent !== null
           ? `${scanPercent}%`
-          : formatDriveSpace(drive)}
+          : <>
+              {formatBytes(drive.availableBytes ?? drive.freeBytes)} {driveSpaceLabel(drive)}
+              {drive.availableBytes !== undefined && drive.purgeableBytes !== undefined && (
+                <span className="drive-pill-purgeable"> · {formatBytes(drive.purgeableBytes)} purgeable</span>
+              )}
+            </>}
       </span>
     </button>
   );
