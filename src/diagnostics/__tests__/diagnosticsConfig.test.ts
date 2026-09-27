@@ -18,7 +18,7 @@ describe("diagnostics settings", () => {
     const config = resolveDiagnosticsConfig(defaults(), {});
     expect(config.hotCpu.enabled).toBe(false);
     expect(config.heap).toMatchObject({
-      enabled: false, snapshots: false, gateBytes: 1200 * MB, watchBytes: 0, snapshotMaxBytes: 512 * MB,
+      enabled: false, snapshots: false, gateBytes: 1200 * MB, watchBytes: 0,
     });
     expect(config.envOverrides).toEqual([]);
   });
@@ -53,13 +53,12 @@ describe("diagnostics settings", () => {
       DISKHOUND_HEAP_GATE_MB: "200",
       DISKHOUND_HEAP_SNAPSHOTS: "true",
       DISKHOUND_HEAP_SNAPSHOT_GAP_MS: "2000",
-      DISKHOUND_HEAP_SNAPSHOT_MAX_MB: "700",
       DISKHOUND_HEAP_MAX_GATES_PER_DAY: "garbage",
     });
     expect(config.hotCpu).toMatchObject({ enabled: true, thresholdPercent: 5, recordingWindowMs: 5_000 });
     expect(config.heap).toMatchObject({
       enabled: true, snapshots: true, gateBytes: 200 * MB, watchBytes: 0, snapshotGapMs: 2_000,
-      snapshotMaxBytes: 700 * MB, maxGatesPerDay: 1,
+      maxGatesPerDay: 1,
     });
     expect(config.envOverrides).toEqual([
       "DISKHOUND_HOT_CPU_PROFILING=1",
@@ -68,7 +67,6 @@ describe("diagnostics settings", () => {
       "DISKHOUND_HEAP_GATE_MB=200",
       "DISKHOUND_HEAP_SNAPSHOTS=true",
       "DISKHOUND_HEAP_SNAPSHOT_GAP_MS=2000",
-      "DISKHOUND_HEAP_SNAPSHOT_MAX_MB=700",
     ]);
   });
 

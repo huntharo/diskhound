@@ -27,7 +27,7 @@ const HOUR_OF_TICKS = 720;
  * v8.writeHeapSnapshot writes from C++, outside node:fs, so the harness
  * can't see it. The stand-in writes through node:fs so each snapshot
  * counts as the one file it is, with a 1 MB body in place of the real
- * 1.5–2.3x the heap (up to ~1.2 GB at the 512 MB snapshot ceiling).
+ * 1.5–2.3x the heap in the earlier measurements; actual size varies.
  */
 const SNAPSHOT_STAND_IN_BYTES = 1024 * 1024;
 
@@ -125,7 +125,7 @@ describe("heap monitor disk writes", () => {
   });
 
   it("adds two snapshot files 20 s apart when snapshots are on", async () => {
-    // Snapshots stop at 512 MB, so they need a lower gate.
+    // Keep the fixture small; snapshot size is represented by the stand-in.
     const { run, monitor, measure } = await launch({ snapshots: true, gateBytes: 400 * 1024 * 1024, watchBytes: 300 * 1024 * 1024 });
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     await run(350);
@@ -136,7 +136,7 @@ describe("heap monitor disk writes", () => {
     });
     expectIoBudget({
       scenario: "heap-gate-snapshot-pair",
-      note: "a 400 MB gate with snapshots on: the gate capture plus snapshots A and B (1 file each, written by V8 outside node:fs; a 1 MB stand-in here), each with a session.json rewrite, events, a sync crash.log line before V8 blocks and a buffered one after. Measured on Electron 40.6, a snapshot is 1.5-2.3x the heap and blocks main 17-50 ms/MB: up to ~0.9 GB and ~20 s each at 400 MB, up to ~2.4 GB per pair at the 512 MB ceiling. At most 1 pair per app version per day; the 6 GB retention cap keeps two. Off by default, opt-in behind that warning",
+      note: "a 400 MB fixture threshold with snapshots on: gate capture plus A and B (1 file each via V8; a 1 MB stand-in here), each with a manifest, events and crash.log writes. Off by default: 0/day. Enabled: at most 1 pair per app version/day at any threshold. Actual snapshot bytes vary; extrapolating the previously observed 1.5-2.3x heap size gives ~3.5-5.4 GiB/day at the default 1200 MB threshold, ~9-13.8 GiB/day at the maximum 3072 MB, plus the allocation profile. No size veto; retention excludes live sessions",
       io,
     });
   });
@@ -199,7 +199,7 @@ describe("heap monitor disk writes", () => {
     expect(result.ok).toBe(true);
     expectIoBudget({
       scenario: "heap-manual-snapshot",
-      note: "Settings > Take heap snapshot, per click: the session folder, 1 snapshot file (V8 writes it; a 1 MB stand-in here, 1.5-2.3x the heap for real, refused above 512 MB), events, session.json, a sync crash.log line before V8 blocks and a buffered one after",
+      note: "Settings > Take heap snapshot, per click: session folder, 1 snapshot file (V8; 1 MB stand-in here), events, manifest and two crash.log writes. No automatic daily writes; manual frequency is user-controlled at all settings. At one capture/day and the previously observed 1.5-2.3x ratio, ~1.8-2.7 GiB/day for a 1200 MB heap; actual size varies and there is no size veto",
       io,
     });
   });

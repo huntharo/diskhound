@@ -46,14 +46,6 @@ export function readMainHeap(capturedAtMs = Date.now()): HeapReading {
   };
 }
 
-export interface SnapshotHeadroom {
-  ok: boolean;
-  reason: string;
-  cageUsedBytes: number;
-  neededBytes: number;
-  budgetBytes: number;
-}
-
 const mb = (bytes: number) => `${Math.round(bytes / MB).toLocaleString("en-US")} MB`;
 
 function describeWorkers(count: number, bytes: number): string {
@@ -65,52 +57,6 @@ function duration(ms: number): string {
   if (seconds < 120) return `${seconds} s`;
   const minutes = Math.round(seconds / 60);
   return minutes < 120 ? `${minutes} min` : `${Math.round(minutes / 60)} h`;
-}
-
-/**
- * Can main take a heap snapshot without taking the app down?
- *
- * Two limits, both of which end the process with no log line:
- *
- * - `maxMainBytes`: V8's snapshot generator itself crashed Electron 40
- *   at ~600 MB of a folder-tree-shaped heap (see HEAP_DEFAULTS), so no
- *   snapshot above 512 MB by default.
- * - The cage: a snapshot needs about the main heap's size again, from
- *   the same pointer-compression cage the workers use. So main +
- *   workers + main again must stay under `fraction` of the limit. A
- *   worker that doesn't answer the fresh reading counts as unknown, which fails.
- */
-export function checkSnapshotHeadroom(
-  main: HeapReading,
-  workers: readonly WorkerHeapReading[],
-  fraction: number,
-  maxMainBytes = Number.POSITIVE_INFINITY,
-): SnapshotHeadroom {
-  const workerBytes = workers.reduce((sum, worker) => sum + (worker.usedBytes ?? 0), 0);
-  const cageUsedBytes = main.usedBytes + workerBytes;
-  const neededBytes = cageUsedBytes + main.usedBytes;
-  const budgetBytes = main.limitBytes * fraction;
-  const base = { cageUsedBytes, neededBytes, budgetBytes };
-  if (main.usedBytes > maxMainBytes) {
-    return {
-      ...base,
-      ok: false,
-      reason: `main heap ${mb(main.usedBytes)} is over the ${mb(maxMainBytes)} snapshot ceiling (Electron 40 crashed writing one at ~600 MB)`,
-    };
-  }
-  const silent = workers.filter((worker) => worker.usedBytes === null);
-  if (silent.length > 0) {
-    return {
-      ...base,
-      ok: false,
-      reason: `worker ${silent.map((worker) => worker.label).join(", ")} did not report its heap, so the cage's free space is unknown`,
-    };
-  }
-  const sum = `main ${mb(main.usedBytes)} + ${describeWorkers(workers.length, workerBytes)} + ~${mb(main.usedBytes)} for the snapshot`;
-  const limit = `${Math.round(fraction * 100)}% of the ${mb(main.limitBytes)} heap limit`;
-  return neededBytes < budgetBytes
-    ? { ...base, ok: true, reason: `${sum} fits under ${limit}` }
-    : { ...base, ok: false, reason: `${sum} would exceed ${limit}` };
 }
 
 /** Gate captures so far today, per app version (`heap-gate-state.json`). */
@@ -177,18 +123,16 @@ function observeMajorGc(onMajorGc: () => void): () => void {
  *    sampling heap profiler runs, so the profile saved later shows
  *    which code allocated what the heap holds.
  * 2. At `gateBytes` (1.2 GB) it saves that profile as a .heapprofile,
- *    then, with snapshots on, writes snapshot A if checkSnapshotHeadroom
- *    allows it and snapshot B `snapshotGapMs` (20 s) later if it still
- *    does, for a DevTools comparison. At most `maxGatesPerDay` per app
- *    version. Snapshots stop at 512 MB, so they need a lower gate.
+ *    then, with snapshots on, writes snapshot A and snapshot B
+ *    `snapshotGapMs` (20 s) later for a DevTools comparison. At most
+ *    `maxGatesPerDay` per app version.
  *
  * Whether or not the gate is on, a main + workers heap past
  * `nearLimitFraction` of the limit writes one crash.log breadcrumb,
  * and a running sampling profile is saved synchronously next to it:
  * V8's out-of-memory abort skips every JS handler, so this is the last
- * chance to record anything. Heap snapshots near the limit are never
- * attempted (Node's --heapsnapshot-near-heap-limit would need room the
- * shared cage doesn't have).
+ * chance to record anything. The near-limit hook itself never starts
+ * a full heap snapshot.
  */
 export class HeapMonitor {
   private config: HeapGateConfig;
@@ -431,7 +375,7 @@ export class HeapMonitor {
     if (this.liveWorkerCount() === 0) return [];
     const readings = await this.readWorkerHeaps(WORKER_READ_TIMEOUT_MS);
     this.workers = this.mergeWorkers(readings);
-    // Cached values are useful for display, but cannot establish headroom.
+    // Keep unknown readings in capture metadata; cached values are display-only.
     return readings;
   }
 
@@ -600,7 +544,7 @@ export class HeapMonitor {
     if (!this.automaticSnapshotsEnabled()) return;
     const first = await this.takeSnapshot(`${prefix}-a`, "gate snapshot A", true);
     if (!first.path || !this.automaticSnapshotsEnabled()) return;
-    // B only if the cage still has room then, so the pair can be diffed.
+    // B lets DevTools compare how the heap changed after the trigger.
     const timer = setTimeout(() => {
       this.snapshotBTimer = null;
       if (!this.automaticSnapshotsEnabled()) return;
@@ -620,32 +564,12 @@ export class HeapMonitor {
     return !this.stopped && this.config.enabled && this.config.snapshots;
   }
 
-  private async skipSnapshot(label: string, reading: HeapReading, headroom: SnapshotHeadroom): Promise<{ message: string }> {
-    const message = `${label} skipped: ${headroom.reason}`;
-    this.recordEvent("snapshot-skipped", { label, reason: headroom.reason, usedBytes: reading.usedBytes });
-    if (this.session.exists) await this.session.commit();
-    this.note("heap-snapshot", message);
-    return { message };
-  }
-
   private async takeSnapshot(basename: string, label: string, automatic = false): Promise<{ message: string; path?: string }> {
-    const workers = await this.freshWorkers();
     if (automatic && !this.automaticSnapshotsEnabled()) return { message: `${label} cancelled` };
-    let reading = this.readHeap(this.now());
-    let headroom = checkSnapshotHeadroom(
-      reading,
-      workers,
-      this.config.headroomFraction,
-      this.config.snapshotMaxBytes,
-    );
-    if (!headroom.ok) return this.skipSnapshot(label, reading, headroom);
     await this.session.prepare();
     if (automatic && !this.automaticSnapshotsEnabled()) return { message: `${label} cancelled` };
-    // Main can grow while workers respond or the directory is prepared.
-    // No more awaits between this final admission check and the V8 write.
-    reading = this.readHeap(this.now());
-    headroom = checkSnapshotHeadroom(reading, workers, this.config.headroomFraction, this.config.snapshotMaxBytes);
-    if (!headroom.ok) return this.skipSnapshot(label, reading, headroom);
+    // Like PwrAgnt/PwrGit, attempt requested captures without a heap-size veto.
+    const reading = this.readHeap(this.now());
     const filename = `${basename}.heapsnapshot`;
     const filePath = this.session.artifactPath(filename);
     // On disk first: V8 blocks the main thread while it writes, and a
@@ -668,10 +592,10 @@ export class HeapMonitor {
     const summary = `${label} at ${mb(reading.usedBytes)} heap: ${mb(bytes)} file, main thread paused ${(pauseMs / 1000).toFixed(1)} s`;
     this.recordEvent("snapshot-written", { label, filename, bytes, pauseMs, usedBytes: reading.usedBytes });
     await this.session.commit({
-      artifacts: [{ filename, kind: "heapsnapshot", bytes, capturedAt: new Date(this.now()).toISOString(), summary, detail: { pauseMs, usedBytes: reading.usedBytes, headroom: headroom.reason } }],
+      artifacts: [{ filename, kind: "heapsnapshot", bytes, capturedAt: new Date(this.now()).toISOString(), summary, detail: { pauseMs, usedBytes: reading.usedBytes } }],
       samples: this.takeUnflushedSamples(),
     });
-    this.note("heap-snapshot", `saved ${filePath} (${mb(bytes)}); main thread paused ${pauseMs} ms; ${headroom.reason}`);
+    this.note("heap-snapshot", `saved ${filePath} (${mb(bytes)}); main thread paused ${pauseMs} ms`);
     await this.onCapture?.({ path: filePath, kind: "heapsnapshot", bytes, summary });
     return { message: summary, path: filePath };
   }
