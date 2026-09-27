@@ -13,8 +13,10 @@ bun run test:e2e -- --grep restart    # extra args go to playwright test
 ```
 
 `build:e2e` does four things:
-1. It runs Electron's own installer. `bun install` skips it, because
-   `trustedDependencies` in package.json lists only blake2.
+1. It runs Electron's own installer. `bun install` runs that script
+   too, because `electron` is in `trustedDependencies`. This step
+   still runs `install.js` so a checkout that installed before that
+   trust gets a binary.
 2. It builds the debug scanner.
 3. It builds the renderer.
 4. It builds main.
