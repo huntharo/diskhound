@@ -68,18 +68,90 @@ describe("packaged scan workers", () => {
   it("loads the bundled delete worker and removes a tree", async () => {
     const worker = Path.join(repoRoot, "dist-electron", "scan", "permanentDeleteWorker.cjs");
     if (!FS.existsSync(worker)) return;
+    // Run outside the checkout so node_modules cannot hide missing packaged
+    // dependencies in the unpacked deletion worker.
+    const isolatedWorker = Path.join(tempDir, "permanentDeleteWorker.cjs");
+    await FSP.copyFile(worker, isolatedWorker);
     const tree = Path.join(tempDir, "node_modules");
     await FSP.mkdir(tree);
     await FSP.writeFile(Path.join(tree, "lock"), "x");
     const seen: string[] = [];
+    let itemsDeleted = 0;
+    const percentages: Array<number | null> = [];
     await runPermanentDeleteWorker(tree, {
-      workerPath: worker,
+      workerPath: isolatedWorker,
+      expectedFiles: 1,
       onProgress: (progress) => {
         seen.push(progress.path);
+        percentages.push(progress.percent);
+        itemsDeleted = progress.itemsDeleted;
       },
     });
     expect(FS.existsSync(tree)).toBe(false);
     expect(seen[0]).toBe(Path.resolve(tree));
     expect(seen.length).toBeGreaterThanOrEqual(2);
+    expect(itemsDeleted).toBe(2);
+    expect(percentages).toContain(0);
+    expect(percentages.at(-1)).toBe(100);
   });
+
+  it("preserves filesystem error codes for the Windows elevation decision", async () => {
+    const worker = Path.join(tempDir, "denied.cjs");
+    await FSP.writeFile(worker, `
+      const { parentPort } = require('node:worker_threads');
+      parentPort.on('message', request => parentPort.postMessage({
+        type: 'error', requestId: request.requestId, message: 'denied', code: 'EACCES'
+      }));
+    `);
+    await expect(runPermanentDeleteWorker(tempDir, { workerPath: worker }))
+      .rejects.toMatchObject({ message: "denied", code: "EACCES" });
+  });
+
+  it.each([0, 23])("rejects a worker exit with code %s before a result", async (code) => {
+    const worker = Path.join(tempDir, "early-exit.cjs");
+    await FSP.writeFile(worker, `
+      const { parentPort } = require('node:worker_threads');
+      parentPort.once('message', () => process.exit(${code}));
+    `);
+    await expect(runPermanentDeleteWorker(tempDir, { workerPath: worker }))
+      .rejects.toThrow(`exited with code ${code}`);
+  });
+
+  it("rejects an uncaught worker exception", async () => {
+    const worker = Path.join(tempDir, "crash.cjs");
+    await FSP.writeFile(worker, `
+      const { parentPort } = require('node:worker_threads');
+      parentPort.once('message', () => { throw new Error('worker crashed'); });
+    `);
+    await expect(runPermanentDeleteWorker(tempDir, { workerPath: worker }))
+      .rejects.toThrow("worker crashed");
+  });
+
+
+  it("waits for worker completion before rejecting a failed progress listener", async () => {
+    const worker = Path.join(tempDir, "progress.cjs");
+    const marker = Path.join(tempDir, "completed");
+    await FSP.writeFile(worker, `
+      const { parentPort } = require('node:worker_threads');
+      const fs = require('node:fs');
+      parentPort.once('message', request => {
+        const message = { type: 'progress', requestId: request.requestId, progress: {} };
+        parentPort.postMessage(message);
+        parentPort.postMessage(message);
+        setTimeout(() => {
+          fs.writeFileSync(request.targetPath, 'worker finished');
+          parentPort.postMessage({ type: 'result', requestId: request.requestId });
+        }, 20);
+      });
+    `);
+    const failure = new Error("listener failed");
+    let calls = 0;
+    await expect(runPermanentDeleteWorker(marker, {
+      workerPath: worker,
+      onProgress() { calls++; throw failure; },
+    })).rejects.toBe(failure);
+    expect(calls).toBe(1);
+    expect(await FSP.readFile(marker, "utf8")).toBe("worker finished");
+  });
+
 });

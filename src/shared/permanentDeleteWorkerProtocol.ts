@@ -4,6 +4,7 @@ export interface PermanentDeleteWorkerRequest {
   type: "delete";
   requestId: string;
   targetPath: string;
+  expectedFiles?: number;
 }
 
 export type PermanentDeleteWorkerResponse =
@@ -20,4 +21,5 @@ export type PermanentDeleteWorkerResponse =
       type: "error";
       requestId: string;
       message: string;
+      code?: string;
     };

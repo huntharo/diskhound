@@ -10,6 +10,11 @@ const shared = {
   // resolves it from node_modules/blake2/ at load time (which is
   // app.asar.unpacked/node_modules/blake2/ once electron-builder runs).
   external: ["electron", "electron-updater", "blake2"],
+  // Unpacked workers must not depend on this package being resolvable from
+  // app.asar.unpacked/node_modules. Include its JS dependencies in the bundle.
+  noExternal: ["@shutterstock/p-map-iterable"],
+  // tsdown treats unacknowledged bundled dependencies as errors in CI.
+  inlineOnly: ["@shutterstock/p-map-iterable", "aggregate-error", "clean-stack", "indent-string"],
 };
 
 // Rolldown only allows this on a single entry. Shared chunks from a
