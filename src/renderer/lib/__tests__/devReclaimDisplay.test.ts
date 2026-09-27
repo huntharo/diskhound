@@ -57,7 +57,7 @@ describe("Overview Dev Artifacts tile", () => {
     expect(display?.title).toMatch(/clone measurements are unavailable/i);
   });
 
-  it("qualifies the range if some trees have no clone measurements", () => {
+  it("excludes unmeasured trees from the reclaimable range", () => {
     setSizeUnitPreference("decimal");
     const display = overviewDevTileDisplay([
       artifact(100 * GB, {
@@ -71,8 +71,35 @@ describe("Overview Dev Artifacts tile", () => {
       }),
       artifact(25 * GB),
     ]);
-    expect(display?.value).toBe("35.0–45.0 GB");
-    expect(display?.title).toMatch(/some trees had no clone measurements/i);
+    expect(display).toMatchObject({
+      value: "10.0–20.0 GB",
+      label: "measured trees reclaimable",
+      listedBytes: 125 * GB,
+      freesBytes: 10 * GB,
+      freesAtMostBytes: 20 * GB,
+    });
+    expect(display?.secondary).toMatch(/25.*GB unmeasured.*125 GB listed/i);
+    expect(display?.title).toMatch(/measured trees.*10.*GB.*20.*GB/i);
+    expect(display?.title).toMatch(/25.*GB.*unmeasured.*excluded/i);
+  });
+
+  it("keeps a mixed report listed when measured trees have no meaningful clone adjustment", () => {
+    setSizeUnitPreference("decimal");
+    const display = overviewDevTileDisplay([
+      artifact(100 * GB, {
+        cloneSize: 0,
+        clonePrivateSize: 0,
+        cloneInternalSize: 0,
+        cloneSharedSize: 0,
+        cloneSharedBlocks: 0,
+        sharedRoots: 0,
+        sharedWith: [],
+      }),
+      artifact(25 * GB),
+    ]);
+    expect(display).toMatchObject({ value: "125 GB", label: "dev artifacts listed" });
+    expect(display?.title).toMatch(/25.*GB.*unmeasured/i);
+    expect(display?.title).not.toMatch(/deleting every listed tree frees/i);
   });
 
   it("does not promote a negligible clone adjustment or an empty report", () => {

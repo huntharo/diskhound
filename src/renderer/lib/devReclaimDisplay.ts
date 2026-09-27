@@ -20,33 +20,53 @@ export function devReclaimDisplay(sharing: SharingSummary) {
   };
 }
 
-/** Overview leads with what deleting all listed trees may free, when measured. */
+/** Overview leads with reclaimable bytes only for trees with clone measurements. */
 export function overviewDevTileDisplay(
   artifacts: ReadonlyArray<Pick<DevArtifact, "path" | "size" | "clone">>,
 ) {
   if (artifacts.length === 0) return null;
   const sharing = summarizeDevSharing(artifacts);
   if (sharing.totalBytes <= 0) return null;
-  const reclaim = devReclaimDisplay(sharing);
+  const hasUnmeasured = sharing.measuredTrees < artifacts.length;
+  const unmeasuredBytes = hasUnmeasured
+    ? artifacts.reduce((sum, artifact) => sum + (artifact.clone ? 0 : artifact.size), 0)
+    : 0;
+  // summarizeDevSharing includes unmeasured trees at their full listed size.
+  // Remove those assumed bytes before presenting a reclaimable range.
+  const measuredSharing = hasUnmeasured ? {
+    ...sharing,
+    totalBytes: sharing.totalBytes - unmeasuredBytes,
+    freesBytes: sharing.freesBytes - unmeasuredBytes,
+    freesAtMostBytes: sharing.freesAtMostBytes - unmeasuredBytes,
+  } : sharing;
+  const reclaim = devReclaimDisplay(measuredSharing);
   const listed = formatBytes(sharing.totalBytes);
-  const unmeasured = sharing.measuredTrees < artifacts.length
-    ? " Some trees had no clone measurements; their listed sizes are included in this estimate."
+  const unmeasured = hasUnmeasured
+    ? ` ${formatBytes(unmeasuredBytes)} of listed bytes belong to unmeasured trees.`
     : "";
   return {
-    value: reclaim.value,
-    label: reclaim.cloneAwareTotal ? "dev artifacts reclaimable" : "dev artifacts listed",
-    secondary: reclaim.cloneAwareTotal ? `${listed} listed` : null,
+    value: reclaim.cloneAwareTotal ? reclaim.value : listed,
+    label: reclaim.cloneAwareTotal
+      ? hasUnmeasured ? "measured trees reclaimable" : "dev artifacts reclaimable"
+      : "dev artifacts listed",
+    secondary: reclaim.cloneAwareTotal
+      ? hasUnmeasured ? `${formatBytes(unmeasuredBytes)} unmeasured · ${listed} listed` : `${listed} listed`
+      : null,
     title: reclaim.cloneAwareTotal
-      ? `Open Dev Artifacts. Deleting every listed tree frees about ${formatBytes(sharing.freesBytes)}`
+      ? `Open Dev Artifacts. Deleting ${hasUnmeasured ? "the measured trees" : "every listed tree"} frees about ${formatBytes(measuredSharing.freesBytes)}`
         + (reclaim.reclaimIsRange
-          ? `, up to ${formatBytes(sharing.freesAtMostBytes)} if no copy of their shared clones is left elsewhere`
+          ? `, up to ${formatBytes(measuredSharing.freesAtMostBytes)} if no copy of their shared clones is left elsewhere`
           : "")
-        + `. ${listed} listed. Local snapshots can delay the release of those blocks.${unmeasured}`
+        + `. ${listed} listed.${unmeasured}`
+        + (hasUnmeasured ? " Those bytes are excluded from this estimate." : "")
+        + " Local snapshots can delay the release of those blocks."
       : `Open Dev Artifacts. ${listed} listed on this scan; listed size does not guarantee that deletion frees that much.`
         + (sharing.measuredTrees === 0 ? " Clone measurements are unavailable for this scan." : "")
+        + unmeasured
+        + (hasUnmeasured ? " Their reclaimable bytes are unknown." : "")
         + " Local snapshots can delay the release of those blocks.",
     listedBytes: sharing.totalBytes,
-    freesBytes: sharing.freesBytes,
-    freesAtMostBytes: sharing.freesAtMostBytes,
+    freesBytes: measuredSharing.freesBytes,
+    freesAtMostBytes: measuredSharing.freesAtMostBytes,
   };
 }
