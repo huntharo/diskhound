@@ -353,6 +353,8 @@ fn cache_tool_kind(tool: &str) -> Option<Kind> {
     match tool {
         "pip" | "uv" => Some(Kind::Python),
         "go-build" => Some(Kind::GoModule),
+        "composer" => Some(Kind::PackageCache),
+        "zig" => Some(Kind::CompilerCache),
         "coursier" => Some(Kind::Jvm),
         "ccache" | "sccache" | "mozilla.sccache" | "vscode-cpptools" => Some(Kind::CompilerCache),
         "yarn" | "pnpm" | "electron" | "electron-builder" | "ms-playwright" | "cypress"
@@ -361,11 +363,113 @@ fn cache_tool_kind(tool: &str) -> Option<Kind> {
     }
 }
 
+// Fixed-width structural checks, matching TypeScript. No filesystem probes.
+fn language_layout(parts: &[&str], i: usize, lower: &str) -> Option<(usize, Kind)> {
+    if !matches!(
+        lower,
+        "library"
+            | "appdata"
+            | ".cache"
+            | ".pub-cache"
+            | ".dart_tool"
+            | ".composer"
+            | ".gem"
+            | "vendor"
+            | ".hex"
+            | "_build"
+            | ".stack-work"
+            | "dist-newstyle"
+    ) {
+        return None;
+    }
+    let at = |offset: usize, value: &str| {
+        parts
+            .get(i + offset)
+            .is_some_and(|s| s.eq_ignore_ascii_case(value))
+    };
+    let next = parts
+        .get(i + 1)
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    if lower == "library" && next == "developer" && at(2, "xcode") && at(3, "deriveddata") {
+        return Some((i + 4, Kind::CompilerCache));
+    }
+    if matches!(
+        (lower, next.as_str()),
+        (".pub-cache", "hosted")
+            | (".composer", "cache")
+            | (".gem", "specs")
+            | (".hex", "packages")
+    ) {
+        return Some((i + 2, Kind::PackageCache));
+    }
+    if lower == ".pub-cache" && next == "git" && at(2, "cache") {
+        return Some((i + 3, Kind::PackageCache));
+    }
+    if lower == "appdata" && next == "local" && at(2, "pub") && at(3, "cache") && at(4, "hosted") {
+        return Some((i + 5, Kind::PackageCache));
+    }
+    if lower == "appdata"
+        && next == "local"
+        && at(2, "composer")
+        && (at(3, "files") || at(3, "repo") || at(3, "vcs"))
+    {
+        return Some((i + 4, Kind::PackageCache));
+    }
+    if lower == ".cache" && next == "gem" && (at(2, "specs") || at(2, "gems")) {
+        return Some((i + 3, Kind::PackageCache));
+    }
+    let ruby = if lower == ".gem" && next == "ruby" {
+        Some(i + 1)
+    } else if lower == "vendor" && next == "bundle" && at(2, "ruby") {
+        Some(i + 2)
+    } else {
+        None
+    };
+    if let Some(ruby) = ruby {
+        if parts
+            .get(ruby + 1)
+            .is_some_and(|s| numeric_version(s, 3, 3))
+            && parts
+                .get(ruby + 2)
+                .is_some_and(|s| s.eq_ignore_ascii_case("cache"))
+        {
+            return Some((ruby + 3, Kind::PackageCache));
+        }
+    }
+    if matches!(
+        (lower, next.as_str()),
+        (".dart_tool", "flutter_build")
+            | (".stack-work", "dist")
+            | ("dist-newstyle", "build")
+            | ("dist-newstyle", "cache")
+    ) {
+        return Some((i + 2, Kind::CompilerCache));
+    }
+    if lower == "_build"
+        && matches!(next.as_str(), "dev" | "test" | "prod" | "shared")
+        && at(2, "lib")
+        && at(4, "ebin")
+        && parts.get(i + 3).is_some_and(|name| {
+            name.as_bytes()
+                .first()
+                .is_some_and(|b| b.is_ascii_alphabetic())
+                && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        })
+    {
+        return Some((i + 5, Kind::CompilerCache));
+    }
+    None
+}
+
 fn classify(path: &str) -> Option<(String, Kind)> {
     let parts = split_segments(path);
     for i in 0..parts.len() {
         crate::work::step();
         let lower = parts[i].to_ascii_lowercase();
+        if let Some((end, kind)) = language_layout(&parts, i, &lower) {
+            return Some((join_segments(path, &parts, end), kind));
+        }
         if matches!(
             lower.as_str(),
             ".cache" | "library" | ".local" | "appdata" | ".npm"
@@ -678,6 +782,7 @@ fn mapped_kind(lower: &str) -> Option<Kind> {
         ".next" | ".nuxt" | ".turbo" | ".parcel-cache" | ".svelte-kit" => Kind::JsBuild,
         "__pycache__" | ".mypy_cache" | ".pytest_cache" | ".ruff_cache" => Kind::Python,
         "cmakefiles" => Kind::CmakeBuild,
+        ".zig-cache" => Kind::CompilerCache,
         ".worktrees" => Kind::Worktree,
         "diagoutputdir" | "rdclientautotrace" => Kind::DiagLogs,
         _ => return None,
@@ -759,6 +864,9 @@ mod tests {
                 assert!(classify("/mono/target/aarch64-apple-darwin/debug/build/crate-0123456789abcdef/out/lib.a").is_some());
                 assert!(classify("/Users/dev/Library/Caches/electron/download.zip").is_some());
                 assert!(classify("/home/dev/.local/share/NuGet/http-cache/package.dat").is_some());
+                assert!(classify("/project/vendor/bundle/ruby/3.4.0/cache/a.gem").is_some());
+                assert!(classify("/project/_build/dev/lib/my_app/ebin/Elixir.Main.beam").is_some());
+                assert!(classify("/Users/dev/AppData/Local/Pub/Cache/hosted/pkg/lib.dart").is_some());
             }
             crate::work::take()
         };

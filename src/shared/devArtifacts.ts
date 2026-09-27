@@ -13,7 +13,7 @@ export const DEV_KIND_LABEL: Record<DevArtifactKind, string> = {
   "go-module": "Go module & build caches",
   jvm: "Gradle / JVM (Java, Maven, Scala / sbt)",
   dotnet: "NuGet / .NET",
-  "compiler-cache": "Compiler caches",
+  "compiler-cache": "Compiler & native build caches",
   "cmake-build": "CMake build trees",
   terraform: "Terraform providers",
   "diag-logs": "RDP / diag traces",
@@ -54,6 +54,7 @@ const SEGMENT_KIND: Record<string, DevArtifactKind> = {
   ".pytest_cache": "python",
   ".ruff_cache": "python",
   cmakefiles: "cmake-build",
+  ".zig-cache": "compiler-cache",
   ".worktrees": "worktree",
   diagoutputdir: "diag-logs",
   rdclientautotrace: "diag-logs",
@@ -67,6 +68,8 @@ const SEGMENT_KIND: Record<string, DevArtifactKind> = {
 export const ARTIFACT_SEGMENT_NAMES: ReadonlySet<string> = new Set([
   ...Object.keys(SEGMENT_KIND),
   "target", "library", "appdata", ".npm", ".local",
+  ".pub-cache", ".dart_tool", ".composer", ".gem", "vendor",
+  ".hex", "_build", ".stack-work", "dist-newstyle",
   ".yarn", ".bun", ".output", ".vercel", ".netlify",
   ".venv", "venv", ".tox", ".gradle", ".m2", ".nuget",
   "ccache", "sccache", "mozilla.sccache", "obj",
@@ -107,6 +110,7 @@ function joinSegments(original: string, count: number): string {
 // Only documented cache namespaces. A repository named pip/electron/uv is not evidence.
 const CACHE_TOOL_KIND: Readonly<Record<string, DevArtifactKind>> = {
   pip: "python", uv: "python", "go-build": "go-module", coursier: "jvm",
+  composer: "package-cache", zig: "compiler-cache",
   ccache: "compiler-cache", sccache: "compiler-cache", "mozilla.sccache": "compiler-cache",
   "vscode-cpptools": "compiler-cache",
   yarn: "package-cache", pnpm: "package-cache", electron: "package-cache",
@@ -131,6 +135,50 @@ export function classifyArtifactPath(filePath: string): { root: string; kind: De
 
     const next = lowerArtifactName(parts[i + 1] ?? "");
     const after = lowerArtifactName(parts[i + 2] ?? "");
+
+    // Language-specific generated/download layouts. Never classify a
+    // generic vendor, deps, _build, .build or tool home as a whole.
+    if (lower === "library" && next === "developer" && after === "xcode"
+      && lowerArtifactName(parts[i + 3] ?? "") === "deriveddata") {
+      return { root: joinSegments(filePath, i + 4), kind: "compiler-cache" };
+    }
+    if ((lower === ".pub-cache" && next === "hosted")
+      || (lower === ".composer" && next === "cache")
+      || (lower === ".gem" && next === "specs")
+      || (lower === ".hex" && next === "packages")) {
+      return { root: joinSegments(filePath, i + 2), kind: "package-cache" };
+    }
+    if (lower === ".pub-cache" && next === "git" && after === "cache") {
+      return { root: joinSegments(filePath, i + 3), kind: "package-cache" };
+    }
+    if (lower === "appdata" && next === "local" && after === "pub"
+      && lowerArtifactName(parts[i + 3] ?? "") === "cache"
+      && lowerArtifactName(parts[i + 4] ?? "") === "hosted") {
+      return { root: joinSegments(filePath, i + 5), kind: "package-cache" };
+    }
+    if (lower === "appdata" && next === "local" && after === "composer"
+      && /^(?:files|repo|vcs)$/.test(lowerArtifactName(parts[i + 3] ?? ""))) {
+      return { root: joinSegments(filePath, i + 4), kind: "package-cache" };
+    }
+    if (lower === ".cache" && next === "gem" && /^(?:specs|gems)$/.test(after)) {
+      return { root: joinSegments(filePath, i + 3), kind: "package-cache" };
+    }
+    const ruby = lower === ".gem" && next === "ruby" ? i + 1
+      : lower === "vendor" && next === "bundle" && after === "ruby" ? i + 2 : -1;
+    if (ruby >= 0 && /^[0-9]+\.[0-9]+\.[0-9]+$/.test(parts[ruby + 1] ?? "")
+      && lowerArtifactName(parts[ruby + 2] ?? "") === "cache") {
+      return { root: joinSegments(filePath, ruby + 3), kind: "package-cache" };
+    }
+    if ((lower === ".dart_tool" && next === "flutter_build")
+      || (lower === ".stack-work" && next === "dist")
+      || (lower === "dist-newstyle" && /^(?:build|cache)$/.test(next))) {
+      return { root: joinSegments(filePath, i + 2), kind: "compiler-cache" };
+    }
+    if (lower === "_build" && /^(?:dev|test|prod|shared)$/.test(next) && after === "lib"
+      && /^[a-z][a-z0-9_]*$/.test(lowerArtifactName(parts[i + 3] ?? ""))
+      && lowerArtifactName(parts[i + 4] ?? "") === "ebin") {
+      return { root: joinSegments(filePath, i + 5), kind: "compiler-cache" };
+    }
 
     const cacheTool = lower === ".cache" ? i + 1
       : lower === "library" && next === "caches" ? i + 2 : -1;

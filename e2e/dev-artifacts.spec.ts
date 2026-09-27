@@ -139,6 +139,16 @@ test("keeps tool configuration out of native and folder-tree cache reports", asy
     [".local/share/NuGet/http-cache/a.dat", ".local/share/NuGet/http-cache", "dotnet"],
     [".cache/pip/http-v2/a", ".cache/pip", "python"],
     [".npm/_cacache/content-v2/a", ".npm/_cacache", "package-cache"],
+    ["vendor/bundle/ruby/3.4.0/cache/a.gem", "vendor/bundle/ruby/3.4.0/cache", "package-cache"],
+    [".cache/composer/files/a.zip", ".cache/composer", "package-cache"],
+    ["AppData/Local/Pub/Cache/hosted/pkg/lib.dart", "AppData/Local/Pub/Cache/hosted", "package-cache"],
+    [".dart_tool/flutter_build/hash/app", ".dart_tool/flutter_build", "compiler-cache"],
+    ["Library/Developer/Xcode/DerivedData/project/Build/a.o", "Library/Developer/Xcode/DerivedData", "compiler-cache"],
+    ["_build/dev/lib/my_app/ebin/Elixir.Main.beam", "_build/dev/lib/my_app/ebin", "compiler-cache"],
+    [".hex/packages/hexpm/pkg.tar", ".hex/packages", "package-cache"],
+    [".stack-work/dist/arch/ghc/build/a.o", ".stack-work/dist", "compiler-cache"],
+    ["dist-newstyle/build/arch/ghc/a.o", "dist-newstyle/build", "compiler-cache"],
+    [".zig-cache/o/hash/a.o", ".zig-cache", "compiler-cache"],
     [".bun/install/cache/pkg/a.js", ".bun/install/cache", "package-cache"],
     [".gradle/caches/modules/a.jar", ".gradle/caches", "jvm"],
     [".m2/repository/org/a.jar", ".m2/repository", "jvm"],
@@ -159,6 +169,10 @@ test("keeps tool configuration out of native and folder-tree cache reports", asy
     "Library/Caches/unknown-tool/my-data", ".npm/_npx/user-script.js",
     ".tart/vms/work/disk.img", ".codex/worktrees/branch/src/main.ts",
     ".vscode/extensions/tool/dist/main.js", "Library/Application Support/electron/settings.json",
+    "vendor/cache/vendored-fork.rb", "vendor/composer/installed.php", ".composer/auth.json",
+    "vendor/bundle/ruby/3.4.0/gems/edited/source.rb", ".dart_tool/package_config.json",
+    "Library/Developer/Xcode/Archives/release.xcarchive/app", "_build/dev/lib/my_app/priv/data",
+    ".hex/hex.config", ".stack-work/source/Main.hs", "dist-newstyle/src/Main.hs", "zig-out/bin/app",
   ]) writeFile(root, file.split("/"), SMALL_BYTES);
 
   const first = await launch();
