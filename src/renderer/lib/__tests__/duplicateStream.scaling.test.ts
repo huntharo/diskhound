@@ -65,6 +65,35 @@ function stream(count: number, sortMode: DuplicateSortMode) {
 
 describe("duplicate group streaming scaling", () => {
   for (const sortMode of ["wasted", "copies", "size"] as DuplicateSortMode[]) {
+    it(`scales an incoming batch and the displayed limit together (${sortMode})`, () => {
+      function appendBatch(count: number, limit: number) {
+        // Every incoming group beats the existing page; include ties among
+        // arrivals to verify the stable ordering through selection and merge.
+        const groups = Array.from({ length: limit }, (_, i) => countReads({
+          ...group(i), size: 1, reclaimableBytes: 1, files: group(i).files.slice(0, 2),
+        }));
+        const dismissed = new Set<string>();
+        const previous = updateDuplicateGroupWindow(null, groups, sortMode, dismissed, limit);
+        const before = previous.shown.slice();
+        groups.push(...Array.from({ length: count }, (_, i) => countReads({
+          ...group(limit + i),
+          size: 10 + Math.floor(i / 2),
+          reclaimableBytes: 10 + Math.floor(i / 2),
+          files: Array.from({ length: 3 + Math.floor(i / 100) }, () => group(0).files[0]!),
+        })));
+        const measured = measureOpsSync(() =>
+          updateDuplicateGroupWindow(previous, groups, sortMode, dismissed, limit));
+        expect(measured.result.shown).toEqual([...groups].sort(compareDuplicateGroups(sortMode)).slice(0, limit));
+        expect(previous.shown).toEqual(before);
+        return measured.ops;
+      }
+      // One event costs O(new log limit + limit). Across events, emitting
+      // each displayed page also costs the sum of those page lengths.
+      expectNearLinear(`duplicate batch and page ${sortMode}`, appendBatch(500, 200), appendBatch(4_000, 1_600), {
+        maxTotal: 4_000 * 200,
+      });
+    });
+
     it(`does work per new group, not per group so far (${sortMode})`, () => {
       const small = stream(500, sortMode);
       const large = stream(4_000, sortMode);
@@ -88,6 +117,21 @@ describe("duplicate group streaming results", () => {
       expect(window.visibleCount).toBe(1_234);
       expect(window.visibleWasted).toBe(analysis.totalWastedBytes);
     }
+  });
+
+  it("keeps earlier ties and ignores dismissed arrivals during a merge", () => {
+    const groups = [group(0), group(1)];
+    const dismissed = new Set(["hidden"]);
+    const previous = updateDuplicateGroupWindow(null, groups, "size", dismissed, 3);
+    groups.push({ ...group(1), hash: "tie" }, { ...group(2), hash: "hidden", size: 999_999 }, group(3));
+    const next = updateDuplicateGroupWindow(previous, groups, "size", dismissed, 3);
+    const visible = groups.filter((g) => !dismissed.has(g.hash));
+    expect(next.shown.map((g) => g.hash)).toEqual(
+      visible.sort(compareDuplicateGroups("size")).slice(0, 3).map((g) => g.hash),
+    );
+    expect(next.visibleCount).toBe(4);
+    expect(next.visibleWasted).toBe(visible.reduce((sum, g) => sum + duplicateGroupReclaimable(g), 0));
+    expect(previous.shown.map((g) => g.hash)).toEqual(["h1", "h0"]);
   });
 
   it("copies instead of appending twice when an updater runs again on the same state", () => {

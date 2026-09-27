@@ -96,8 +96,8 @@ export interface DuplicateGroupWindow {
 
 /**
  * Bring `prev` up to date with `groups`. When only new groups were
- * appended since `prev` (a streaming progress event), each is placed into
- * the shown page by binary search: O(new × log limit + limit), whatever
+ * appended since `prev` (a streaming progress event), select the best new
+ * groups and merge the page once: O(new × log limit + limit), whatever
  * the total. Anything else (a new array, sort, dismissal or page size)
  * rebuilds from every group.
  */
@@ -118,23 +118,33 @@ export function updateDuplicateGroupWindow(
     && groups.length >= prev.seen
   ) {
     if (groups.length === prev.seen) return prev;
-    let shown = prev.shown;
-    let copied = false;
+    const incoming = new TopK<DuplicateGroup>(limit, compare);
     let { visibleCount, visibleWasted } = prev;
     for (let i = prev.seen; i < groups.length; i += 1) {
       const group = groups[i]!;
       if (dismissed.has(group.hash)) continue;
       visibleCount += 1;
       visibleWasted += duplicateGroupReclaimable(group);
-      // After every group it ties with: they arrived first.
-      const at = upperBound(shown, group, compare);
-      if (at >= limit) continue;
-      if (!copied) {
-        shown = shown.slice();
-        copied = true;
+      // Existing groups win ties, so groups behind a full page cannot enter.
+      if (prev.shown.length >= limit
+        && (limit <= 0 || compare(group, prev.shown[prev.shown.length - 1]!) >= 0)) continue;
+      incoming.offer(group);
+    }
+    let shown = prev.shown;
+    if (incoming.size > 0) {
+      const added = incoming.sorted();
+      shown = [];
+      let oldAt = 0;
+      let newAt = 0;
+      while (shown.length < incoming.limit && (oldAt < prev.shown.length || newAt < added.length)) {
+        // Existing groups arrived first and win ties in the stable sort.
+        if (oldAt < prev.shown.length
+          && (newAt >= added.length || compare(prev.shown[oldAt]!, added[newAt]!) <= 0)) {
+          shown.push(prev.shown[oldAt++]!);
+        } else {
+          shown.push(added[newAt++]!);
+        }
       }
-      shown.splice(at, 0, group);
-      if (shown.length > limit) shown.pop();
     }
     return { ...prev, seen: groups.length, shown, visibleCount, visibleWasted };
   }
@@ -158,16 +168,4 @@ export function updateDuplicateGroupWindow(
     visibleCount,
     visibleWasted,
   };
-}
-
-/** First index in sorted `items` whose item sorts after `item`. */
-function upperBound<T>(items: readonly T[], item: T, compare: (a: T, b: T) => number): number {
-  let lo = 0;
-  let hi = items.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    if (compare(items[mid]!, item) <= 0) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
 }
