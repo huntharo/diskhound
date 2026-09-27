@@ -704,6 +704,16 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     </button>
   ) : null;
 
+  const classificationNotice = report?.classificationNeedsFullScan ? (
+    <div className="dev-sharing-note" role="status">
+      <strong>Build artifact totals are incomplete.</strong>{" "}
+      Some folders in this saved scan were classified by name alone and are now excluded.
+      Missing Rust or JVM rows do not mean those build outputs are absent.
+      Run a full scan to classify them again; “Rescan trees” only refreshes the listed folders.
+      {scanButton}
+    </div>
+  ) : null;
+
   if (!root) {
     return (
       <div className="dev-view">
@@ -782,8 +792,8 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
       <div className="dev-view">
         <div className="empty-view">
           <span className="scan-root-chip">{rootLabel}</span>
-          <span>No developer artifacts left on this scan.</span>
-          <span className="empty-view-sub">Looks for worktrees, package trees, Rust targets, venvs, compiler caches, and DiagOutputDir RDP traces on this scan. Switch drives in the header to see another root.</span>
+          <span>{report?.classificationNeedsFullScan ? "This saved scan needs a full rescan." : "No developer artifacts left on this scan."}</span>
+          {classificationNotice ?? <span className="empty-view-sub">Looks for worktrees, package trees, Rust targets, JVM output, venvs, compiler caches, and DiagOutputDir RDP traces on this scan. Switch drives in the header to see another root.</span>}
           {report ? (
             <button
               className="action-btn"
@@ -858,6 +868,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
         </div>
       </div>
 
+      {classificationNotice}
       {(showSharedNote || devSnapshots.length > 0) && (
         <div className="dev-sharing-note" role="note">
           {showSharedNote && (

@@ -455,6 +455,7 @@ describe("mixed-language evidence", () => {
       const acc = createDevAcc();
       for (const path of ordered) noteDevFile(acc, path, 100, false);
       const report = reportFromSidecar(sidecarFromAcc(acc, "/mono"));
+      expect(report.classificationNeedsFullScan).toBeUndefined();
       expect(report.totalBytes).toBe(300);
       expect(report.totalFiles).toBe(3);
       expect(report.artifacts).toEqual([
@@ -465,7 +466,7 @@ describe("mixed-language evidence", () => {
   });
 
   it("rejects legacy guesses in both reports and rescan plans", async () => {
-    const { reportFromSidecar, planRescanTargets } = await import("../devArtifactSidecar");
+    const { reportFromSidecar, planRescanTargets, sidecarFromReport, compactDevArtifactSidecar, rescanDevArtifactSidecar, dropSidecarRoots } = await import("../devArtifactSidecar");
     const sidecar = {
       version: 1 as const, rootPath: "/mono", generatedAt: 1, projects: ["/mono"],
       roots: [
@@ -475,7 +476,17 @@ describe("mixed-language evidence", () => {
         { path: "/mono/web/.next", kind: "js-build" as const, size: 20, files: 1 },
       ],
     };
-    expect(reportFromSidecar(sidecar).totalBytes).toBe(20);
+    const report = reportFromSidecar(sidecar);
+    expect(report.totalBytes).toBe(20);
+    expect(report.classificationNeedsFullScan).toBe(true);
     expect(planRescanTargets(sidecar)).toEqual(["/mono/web/.next"]);
+    // Neither deleting a visible row nor refreshing its size discovers
+    // the excluded output, so both must preserve the incomplete notice.
+    const roundTrip = compactDevArtifactSidecar(sidecarFromReport(report));
+    expect(reportFromSidecar(roundTrip).classificationNeedsFullScan).toBe(true);
+    const deleted = dropSidecarRoots(roundTrip, ["/mono/web/.next"]);
+    expect(reportFromSidecar(deleted)).toMatchObject({ artifacts: [], classificationNeedsFullScan: true });
+    const refreshed = await rescanDevArtifactSidecar({ ...sidecar, rootPath: tempDir });
+    expect(reportFromSidecar(refreshed).classificationNeedsFullScan).toBe(true);
   });
 });
