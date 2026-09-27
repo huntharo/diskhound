@@ -55,9 +55,13 @@ export async function initDiskMonitor(dataDir: string): Promise<void> {
   try {
     const raw = await FS.readFile(Path.join(dataDir, BASELINE_FILE), "utf8");
     const state = JSON.parse(raw) as PersistedState;
-    previousDriveMap = new Map(Object.entries(state.previousDrives ?? {}));
+    previousDriveMap = new Map(Object.entries(state.previousDrives ?? {}).filter(
+      ([drive]) => process.platform !== "darwin" || !isTimeMachineMount(drive),
+    ));
     lastFullScanAt = state.lastFullScanAt ?? null;
-    lastDrives = Array.isArray(state.lastDrives) ? state.lastDrives : [];
+    lastDrives = Array.isArray(state.lastDrives) ? state.lastDrives.filter(
+      ({ drive }) => process.platform !== "darwin" || !isTimeMachineMount(drive),
+    ) : [];
     lastDfDrives = lastDrives;
     lastDeltas = Array.isArray(state.lastDeltas) ? state.lastDeltas : [];
     lastCheckedAt =
@@ -625,6 +629,16 @@ function isAtOrUnder(root: string, path: string): boolean {
   return path === root || (path.startsWith(root) && path.charCodeAt(root.length) === 0x2f);
 }
 
+/** Backup snapshots are restore points, not independent volumes to scan.
+ * Match reserved mount trees, never a user-chosen disk name or `.backup` suffix.
+ * Used for both fresh df results and caches saved by older app versions.
+ */
+function isTimeMachineMount(mount: string): boolean {
+  return isAtOrUnder("/Volumes/.timemachine", mount)
+    || isAtOrUnder("/Volumes/com.apple.TimeMachine.localsnapshots", mount)
+    || mount.includes("/.MobileBackups");
+}
+
 function isMacUserStorage(filesystem: string, mount: string): boolean {
   if (!mount || mount === "/dev") return false;
   // Root is the correct scan target on modern APFS Macs; the paired
@@ -632,7 +646,7 @@ function isMacUserStorage(filesystem: string, mount: string): boolean {
   // users two cards for what Finder presents as one startup disk.
   if (mount === "/") return true;
   if (MAC_SYSTEM_MOUNT_ROOTS.some((root) => isAtOrUnder(root, mount))) return false;
-  if (mount.includes("/.MobileBackups")) return false;
+  if (isTimeMachineMount(mount)) return false;
   // External disks, disk images the user opened, and SMB/NFS shares
   // are normally presented here.
   if (mount.startsWith("/Volumes/")) return true;

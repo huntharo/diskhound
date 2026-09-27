@@ -7006,7 +7006,7 @@ button, input, select, textarea { font: inherit; }
   position: absolute;
   inset: 0;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   background: radial-gradient(ellipse at 50% 30%, rgba(245,158,11,0.04) 0%, transparent 60%),
               var(--bg);
@@ -7016,6 +7016,8 @@ button, input, select, textarea { font: inherit; }
 }
 
 .picker-card {
+  /* Center short lists; overflowing lists start at the scrollable top. */
+  margin-block: auto;
   width: 100%;
   max-width: 520px;
   background: var(--bg-raised);
