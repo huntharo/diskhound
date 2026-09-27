@@ -6,7 +6,7 @@ import * as Path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AffinityApplyResult } from "../../affinityRuleEngine";
-import { expectIoBudget, measureFsIo } from "../../test/ioBudget";
+import { expectIoBudget, measureFsIo, settleFsIo } from "../../test/ioBudget";
 import { createAffinityEnforcer, type AffinityEnforcer } from "../affinityEnforcer";
 import { defaultSettings, type AffinityRule, type ProcessInfo } from "../contracts";
 import { createSettingsStore } from "../settingsStore";
@@ -104,7 +104,13 @@ async function pollForAnHour(enforcer: AffinityEnforcer, target: { pid: number; 
   const processes = [proc(target), proc({ pid: 1200, name: "explorer.exe" }), proc({ pid: 7788, name: "svchost.exe" })];
   const poll = setInterval(() => void enforcer.maybeEnforce(processes), POLL_MS);
   try {
-    await vi.advanceTimersByTimeAsync(HOUR);
+    // Fake timers do not await real filesystem work. Advancing the
+    // entire hour at once can overlap saves 15 simulated minutes apart
+    // and let an older write finish last on a busy CI runner.
+    for (let elapsed = 0; elapsed < HOUR; elapsed += POLL_MS) {
+      await vi.advanceTimersByTimeAsync(POLL_MS);
+      await settleFsIo();
+    }
   } finally {
     clearInterval(poll);
   }
