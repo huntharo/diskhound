@@ -15,6 +15,7 @@ import {
   type ScanSnapshot,
   type UpdateStatus,
 } from "../shared/contracts";
+import { platformTerminology } from "../shared/platformTerminology";
 import { formatScanRoot } from "../shared/pathUtils";
 import { formatDriveSpace, driveSpaceLabel, driveUsedPercent } from "./lib/driveSpace";
 import { formatBytes } from "./lib/format";
@@ -1168,7 +1169,7 @@ export function App() {
                 setSearchOpen(!searchOpen);
                 if (searchOpen) setSearchQuery("");
               }}
-              title="Search the scan index (Ctrl+F)"
+              title={`Search the scan index (${platformTerminology(nativeApi.platform).modifier}+F)}`}
             >
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
                 <circle cx="6" cy="6" r="4" />
@@ -1183,7 +1184,7 @@ export function App() {
              *  use for PiP. The previous icon (rect with content
              *  rows) read as "settings panel" / "document" rather
              *  than "detach to floating monitor." */}
-            <button className="header-icon-btn" onClick={() => void nativeApi.openSystemWidget()} title="Open system widget (Ctrl+Shift+W)">
+            <button className="header-icon-btn" onClick={() => void nativeApi.openSystemWidget()} title={`Open system widget (${platformTerminology(nativeApi.platform).modifier}+Shift+W)}`}>
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round">
                 <rect x="1.5" y="2.5" width="11" height="9" rx="1.4" />
                 <rect x="6.5" y="6.5" width="5" height="4" rx="0.8" fill="currentColor" stroke="none" />

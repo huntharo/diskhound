@@ -517,7 +517,7 @@ export function MemoryView() {
               type="button"
               className={`memory-cpu-scale-btn ${cpuScale === "overall" ? "active" : ""}`}
               aria-pressed={cpuScale === "overall"}
-              title="Overall — % of total system CPU. Idle machine ≈ 0% across the board. Matches Task Manager."
+              title="Overall — % of total system CPU. Idle machine ≈ 0% across the board."
               onClick={() => setCpuScale("overall")}
             >
               Overall

@@ -8,6 +8,7 @@ import type {
   ScanSnapshot,
   StorageAccountingReport,
 } from "../../shared/contracts";
+import { platformTerminology } from "../../shared/platformTerminology";
 import {
   DEV_KIND_LABEL,
   DEV_KIND_SHORT,
@@ -126,7 +127,7 @@ function permanentDeleteConfirm(
   return (
     `${label}\n\n` +
     `${formatCount(trees)} trees · ${formatBytes(bytes)}\n${note}\n` +
-    `This permanently deletes the trees from disk. It cannot be undone and does not go to the Recycle Bin. Protected folders are skipped.`
+    `This permanently deletes the trees from disk. It cannot be undone and does not go to the ${platformTerminology(nativeApi.platform).trash}. Protected folders are skipped.`
   );
 }
 
@@ -570,7 +571,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
               elevateRemaining = window.confirm(
                 `${artifact.path}\n\n` +
                 `Admin rights needed to delete this tree. Windows will show a UAC prompt for this tree and any later trees that need admin.\n\n` +
-                `The files are permanently deleted — they do not go to the Recycle Bin.\n\nContinue?`,
+                `The files are permanently deleted — they do not go to the ${platformTerminology(nativeApi.platform).trash}.\n\nContinue?`,
               );
             }
             if (!elevateRemaining) {
@@ -1037,7 +1038,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
               type="button"
               className="dev-select-bar-delete"
               disabled={bulkBusy}
-              title="Permanently delete selected trees. Cannot be undone. Not Recycle Bin."
+              title={`Permanently delete selected trees. Cannot be undone. Skips ${platformTerminology(nativeApi.platform).trash}.`}
               onClick={() => void deleteMany(selectedVisible.map((a) => a.path), "Delete selected trees permanently?")}
             >
               Delete selected
@@ -1075,7 +1076,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
               type="button"
               className="dev-select-bar-quiet"
               disabled={remaining.length === 0 || bulkBusy}
-              title="Permanently delete every listed tree. Cannot be undone. Not Recycle Bin."
+              title={`Permanently delete every listed tree. Cannot be undone. Skips ${platformTerminology(nativeApi.platform).trash}.`}
               onClick={() => void deleteMany(remaining.map((a) => a.path), "Delete all listed developer trees permanently?")}
             >
               Delete all
@@ -1173,7 +1174,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                     <button
                       className="action-btn warn"
                       disabled={bulkBusy || busyPaths.has(artifact.path)}
-                      title="Permanently delete this tree. Cannot be undone. Not Recycle Bin."
+                      title={`Permanently delete this tree. Cannot be undone. Skips ${platformTerminology(nativeApi.platform).trash}.`}
                       onClick={() => void deleteOne(artifact.path)}
                     >
                       {busyPaths.has(artifact.path) ? "Deleting…" : "Delete"}

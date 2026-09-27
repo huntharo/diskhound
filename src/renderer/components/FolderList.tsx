@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 
 import { FOLDER_CHILDREN_MAX_DIRS, type ScanFileRecord, type ScanSnapshot } from "../../shared/contracts";
+import { platformTerminology } from "../../shared/platformTerminology";
 import { protectedFolderDisplayName } from "../../shared/pathProtection";
 import type { ExcludedFolderActionBlocker } from "../../shared/pathProtection";
 import { formatScanRoot } from "../../shared/pathUtils";
@@ -351,7 +352,7 @@ export function FolderList({ snapshot, onStartScan, otherScannedRoots = [] }: Pr
         <button
           className="folder-open-btn"
           onClick={() => void runAction(currentPath, () => nativeApi.openPath(currentPath))}
-          title="Open in Explorer"
+          title={`Show in ${platformTerminology(nativeApi.platform).fileManager}`}
         >
           <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
             <path d="M1.5 3.5V11.5C1.5 12.05 1.95 12.5 2.5 12.5H11.5C12.05 12.5 12.5 12.05 12.5 11.5V5.5C12.5 4.95 12.05 4.5 11.5 4.5H7L5.5 2.5H2.5C1.95 2.5 1.5 2.95 1.5 3.5Z" />

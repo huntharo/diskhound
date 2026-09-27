@@ -8,6 +8,7 @@ import {
   type MonitoringSnapshot,
   type UpdateStatus,
 } from "../../shared/contracts";
+import { platformTerminology } from "../../shared/platformTerminology";
 import { resolveSizeUnitBase } from "../../shared/sizeUnits";
 import { formatDriveSpace, driveUsedPercent } from "../lib/driveSpace";
 import { formatBytes } from "../lib/format";
@@ -358,7 +359,7 @@ function ProtectedFoldersSection({
     <div className="settings-section">
       <div className="settings-section-title">Protected Folders</div>
       <div className="settings-section-note">
-        These folders are still scanned and counted in totals. DiskHound hides stricter system folders from the Folders tab by default, keeps useful buckets like ProgramData and Recycle Bin visible, and blocks Trash, Delete, and Easy Move for anything inside them.
+        These folders are still scanned and counted in totals. DiskHound hides stricter system folders from the Folders tab by default, keeps useful storage categories visible, and blocks Trash, Delete, and Easy Move for anything inside them.
       </div>
       <ToggleRow
         label="Hide protected folders in Folders"
@@ -901,7 +902,7 @@ function CrashLogRow() {
           <button className="action-btn" onClick={() => void toggle()}>
             {expanded ? "Hide" : loading ? "Loading…" : "View"}
           </button>
-          <button className="action-btn" onClick={reveal} title="Open the DiskHound data folder in Explorer / Finder">
+          <button className="action-btn" onClick={reveal} title={`Show the DiskHound data folder in ${platformTerminology(nativeApi.platform).fileManager}`}>
             Open folder
           </button>
         </div>

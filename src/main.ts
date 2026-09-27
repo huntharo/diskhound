@@ -50,6 +50,7 @@ import {
   type UpdateStatus,
   type WorkerToMainMessage,
 } from "./shared/contracts";
+import { platformTerminology } from "./shared/platformTerminology";
 import {
   checkDiskDeltas,
   flushDiskMonitor,
@@ -2021,7 +2022,7 @@ void (async () => {
       await FS.lstat(resolved);
     } catch {
       writeCrashLog("trash", `missing path=${resolved}`);
-      return { ok: false, message: "Nothing at this path to move to the Recycle Bin." };
+      return { ok: false, message: `Nothing at this path to move to the ${platformTerminology(process.platform).trash}.` };
     }
     try {
       await shell.trashItem(resolved);
@@ -2032,10 +2033,10 @@ void (async () => {
     }
     try {
       await FS.lstat(resolved);
-      writeCrashLog("trash", `noop path=${resolved} still on disk after Recycle Bin`);
+      writeCrashLog("trash", `noop path=${resolved} still on disk after trashItem`);
       return {
         ok: false,
-        message: "The Recycle Bin did not take this folder — it is still on disk.",
+        message: `The ${platformTerminology(process.platform).trash} did not take this folder — it is still on disk.`,
       };
     } catch {
       writeCrashLog("trash", `ok path=${resolved}`);
