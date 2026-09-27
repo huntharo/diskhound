@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { expect, test, type AppHandle } from "./fixtures/electron-app";
@@ -92,4 +92,37 @@ test("finds Terraform providers from the folder tree when the scan has no Dev si
   if (restored.rootPath === null) throw new Error("scan has no root path");
   expect(restored.rootPath).toBe(scanned.rootPath);
   await expectTerraformRow(second, restored.rootPath, false);
+});
+
+
+test("marks old build classifications incomplete without relabeling Gradle as Scala", async ({ launch }, testInfo) => {
+  const root = testInfo.outputPath("dev");
+  writeFile(root, ["Cargo.toml"], SMALL_BYTES);
+  writeFile(root, ["target", "debug", "deps", "libapp.rlib"], PROVIDER_BYTES);
+  writeFile(root, [".gradle", "caches", "example.bin"], SMALL_BYTES);
+  const first = await launch();
+  await scanFolderFromPicker(first, root);
+  await openTab(first.page, "Dev Artifacts");
+  await expect(first.page.locator('.dev-kind-cell-label', { hasText: /^Rust target$/ })).toBeVisible();
+  await expect(first.page.getByText("Build artifact totals are incomplete.", { exact: true })).toHaveCount(0);
+  await first.close();
+
+  // Emulate a saved sidecar from before the evidence-based rules.
+  const indexDir = join(first.userDataDir, "scan-indexes");
+  const sidecars = readdirSync(indexDir).filter((name) => name.endsWith(".dev-artifacts.json"));
+  expect(sidecars.length).toBeGreaterThan(0);
+  for (const name of sidecars) {
+    const path = join(indexDir, name);
+    const saved = JSON.parse(readFileSync(path, "utf8"));
+    for (const row of saved.roots) {
+      if (row.kind === "rust-target") row.path = join(root, "target");
+    }
+    writeFileSync(path, JSON.stringify(saved));
+  }
+  const second = await launch({ dataDir: first.dataDir });
+  await waitForScanComplete(second.page);
+  await openTab(second.page, "Dev Artifacts");
+  await expect(second.page.getByText("Build artifact totals are incomplete.", { exact: true })).toBeVisible();
+  await expect(second.page.locator('.dev-kind-cell-label', { hasText: /^JVM$/ })).toBeVisible();
+  await expect(second.page.locator('.dev-kind-cell-label', { hasText: /^Rust target$/ })).toHaveCount(0);
 });

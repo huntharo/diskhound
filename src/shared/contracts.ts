@@ -687,6 +687,8 @@ export interface DevArtifactReport {
   rootPath: string;
   /** Trees removed this scan. Stops scan hotspots from putting them back. */
   droppedPaths?: string[];
+  /** Saved build roots lack the evidence required by current classification rules. */
+  classificationNeedsFullScan?: boolean;
 }
 
 /** Live progress for `rescanDevArtifacts`. Not a full drive scan. */

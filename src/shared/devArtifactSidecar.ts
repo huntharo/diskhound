@@ -30,6 +30,8 @@ export interface DevArtifactSidecar {
   projects: string[];
   /** Paths the user deleted. Kept so a tab switch or hotspot merge cannot resurrect them. */
   droppedPaths?: string[];
+  /** Keep the incomplete-report notice through size-only refreshes and deletions. */
+  classificationNeedsFullScan?: boolean;
 }
 
 /** Lowercase file names that mark their folder as a project. */
@@ -242,8 +244,13 @@ function keepArtifact(rec: DevArtifactRootRec): boolean {
 
 /** Keep the largest trees and only the projects that own them. */
 export function compactDevArtifactSidecar(sidecar: DevArtifactSidecar): DevArtifactSidecar {
+  let classificationNeedsFullScan = sidecar.classificationNeedsFullScan;
   const roots = sidecar.roots
-    .filter((rec) => rec.size > 0)
+    .filter((rec) => {
+      if (rec.size <= 0) return false;
+      if (!keepArtifact(rec)) classificationNeedsFullScan = true;
+      return true;
+    })
     .sort((a, b) => b.size - a.size || a.path.localeCompare(b.path));
   const kept = roots.length > DEV_SIDECAR_ROOT_CAP
     ? roots.slice(0, DEV_SIDECAR_ROOT_CAP)
@@ -263,6 +270,7 @@ export function compactDevArtifactSidecar(sidecar: DevArtifactSidecar): DevArtif
     version: 1,
     rootPath: sidecar.rootPath,
     generatedAt: sidecar.generatedAt,
+    ...(classificationNeedsFullScan ? { classificationNeedsFullScan: true } : {}),
     roots: kept,
     projects: keptProjects,
     droppedPaths: sidecar.droppedPaths?.length ? sidecar.droppedPaths : undefined,
@@ -319,6 +327,7 @@ export function sidecarFromReport(report: DevArtifactReport): DevArtifactSidecar
     })),
     projects,
     droppedPaths: report.droppedPaths?.length ? report.droppedPaths : undefined,
+    ...(report.classificationNeedsFullScan ? { classificationNeedsFullScan: true } : {}),
   };
 }
 
@@ -366,6 +375,7 @@ export function reportFromSidecar(
     generatedAt: current.generatedAt,
     rootPath: current.rootPath,
     droppedPaths: current.droppedPaths,
+    ...(current.classificationNeedsFullScan ? { classificationNeedsFullScan: true } : {}),
   };
 }
 
@@ -610,7 +620,11 @@ export async function rescanDevArtifactSidecar(
     acc.projects.add(project);
   }
   const targets = planRescanTargets(sidecar, discoverDiagLogRoots(sidecar.rootPath));
-  const kindByPath = new Map(sidecar.roots.map((r) => [pathKey(r.path), r.kind]));
+  let classificationNeedsFullScan = sidecar.classificationNeedsFullScan;
+  const kindByPath = new Map(sidecar.roots.map((r) => {
+    if (!keepArtifact(r)) classificationNeedsFullScan = true;
+    return [pathKey(r.path), r.kind];
+  }));
   const started = Date.now();
   let filesSoFar = 0;
   let bytesSoFar = 0;
@@ -654,6 +668,7 @@ export async function rescanDevArtifactSidecar(
 
   emit(targets.length, targets[targets.length - 1] ?? sidecar.rootPath, true);
   const next = carryCloneInfo(sidecarFromAcc(acc, sidecar.rootPath), sidecar);
+  if (classificationNeedsFullScan) next.classificationNeedsFullScan = true;
   if (!sidecar.droppedPaths?.length) return next;
   return { ...next, droppedPaths: sidecar.droppedPaths };
 }
