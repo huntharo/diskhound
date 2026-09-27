@@ -28,7 +28,7 @@ import {
 import {
   FILE_CATEGORY_CHIPS,
   fileMatchesCategory,
-  filteredExtensionBuckets,
+  overviewExtensionInventory,
   type FileCategoryFilter,
 } from "../lib/fileQuickFilters";
 import { nativeApi } from "../nativeApi";
@@ -257,12 +257,12 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
     return files;
   }, [sourceFilesRaw, recentOn, recentWindow, typeFilter]);
 
-  const visibleExtensions = useMemo(() => {
-    if (typeFilter === "all") return snapshot.topExtensions;
-    // Path-aware categories cannot use global extension totals: camera
-    // photos and a VM disk can both be .raw. Summarize this filtered view.
-    return filteredExtensionBuckets(sourceFiles);
-  }, [snapshot.topExtensions, typeFilter, sourceFiles]);
+  const extensionInventory = useMemo(
+    () => overviewExtensionInventory(snapshot.topExtensions, sourceFiles, typeFilter),
+    [snapshot.topExtensions, typeFilter, sourceFiles],
+  );
+  const visibleExtensions = extensionInventory.buckets;
+  const sampledExtensions = extensionInventory.scope === "sample";
 
   const treemapComposition = useMemo(
     () => buildTreemapComposition(sourceFiles),
@@ -704,12 +704,12 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
               <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.6">
                 <path d="M7 2L3 5L7 8" />
               </svg>
-              <span className="ext-sidebar-collapsed-label">Extensions</span>
+              <span className="ext-sidebar-collapsed-label">{sampledExtensions ? "Extensions · sample" : "Extensions"}</span>
             </button>
           ) : (
             <>
               <div className="ext-sidebar-header">
-                <span>Extensions</span>
+                <span>{sampledExtensions ? "Extensions · sample" : "Extensions"}</span>
                 <button
                   className="ext-sidebar-toggle"
                   onClick={() => setExtSidebarCollapsed(true)}
@@ -722,10 +722,16 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
                   </svg>
                 </button>
               </div>
+              {sampledExtensions && (
+                <p className="file-category-note" role="note">
+                  Totals from the loaded file sample only. Smaller files may be missing.
+                  Choose All for scan-wide extension totals.
+                </p>
+              )}
               <div className="ext-sidebar-list">
                 {visibleExtensions.length === 0 ? (
                   <div className="empty-view" style={{ height: "100%" }}>
-                    <span>{snapshot.topExtensions.length === 0 ? "No data yet" : "No extensions in this filter"}</span>
+                    <span>{sampledExtensions ? "No matching extensions in the loaded sample" : snapshot.topExtensions.length === 0 ? "No data yet" : "No extensions in this filter"}</span>
                   </div>
                 ) : (
                   visibleExtensions.map((b) => (
