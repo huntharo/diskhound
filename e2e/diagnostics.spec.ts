@@ -101,13 +101,21 @@ test("saves an allocation profile when the main heap passes the gate", async ({ 
 });
 
 test("takes a heap snapshot from Settings and deletes it", async ({ launch }) => {
-  const handle = await launch();
+  const handle = await launch({
+    settings: { diagnostics: { heapDiagnostics: true, heapSnapshots: true, heapGateMb: 1800 } },
+  });
   const { page } = handle;
   page.on("dialog", (dialog) => void dialog.accept());
   await page.locator('button[title="Settings"]').click();
   const section = page.locator(".settings-section", { has: page.locator(".settings-section-title", { hasText: "Diagnostics" }) });
   await section.scrollIntoViewIfNeeded();
   await expect(section.getByText("Nothing captured yet.")).toBeVisible();
+  const threshold = section.locator(".setting-row", { hasText: "Heap capture threshold (MB)" }).getByRole("spinbutton");
+  await expect(threshold).toHaveValue("1800");
+  await threshold.fill("2000");
+  await threshold.blur();
+  await expect.poll(async () => (await diagnosticsStatus(handle)).heap.gateBytes).toBe(2000 * 1024 * 1024);
+  await expect(section.getByText(/snapshots will be skipped/)).toHaveCount(0);
 
   await section.getByRole("button", { name: "Take heap snapshot" }).click();
   const row = section.locator(".diagnostics-session");
