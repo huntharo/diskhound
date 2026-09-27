@@ -39,7 +39,7 @@ function write(rel: string, bytes: number): string {
 const occupancy = (path: string) => FS.statSync(path).blocks * 512;
 
 describe("scanWorker prune plan", () => {
-  it("removes pre-change iCloud records before an unchanged ancestor is inherited", async () => {
+  it.skipIf(process.platform === "win32")("removes pre-change iCloud records before an unchanged ancestor is inherited", async () => {
     const indexPath = at("old-index.ndjson.gz");
     const root = "/Users/me";
     const cloud = `${root}/Library/Mobile Documents`;
