@@ -1,3 +1,4 @@
+import { DockerView } from "./components/DockerView";
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { owningDrive, rootKeyFor } from "./lib/driveMatch";
 
@@ -55,6 +56,7 @@ const TABS: { id: AppView; label: string; key: string }[] = [
   { id: "easyMove", label: "Easy Move", key: "7" },
   { id: "memory", label: "Processes", key: "8" },
   { id: "diskIo", label: "Disk I/O", key: "9" },
+  { id: "docker", label: "Docker", key: "" },
   { id: "settings", label: "Settings", key: "0" },
 ];
 
@@ -1279,7 +1281,7 @@ export function App() {
 
         {/* ── Main View ── */}
         <div className="view-container">
-          {showPicker === null ? <StartupSplash /> : showPicker && view !== "memory" && view !== "diskIo" && view !== "settings" ? (
+          {showPicker === null ? <StartupSplash /> : showPicker && view !== "docker" && view !== "memory" && view !== "diskIo" && view !== "settings" ? (
             <DiskPicker
               onScanDrive={handleScanDrive}
               onScanFolder={handleScanFolder}
@@ -1338,6 +1340,7 @@ export function App() {
               {view === "easyMove" && <ErrorBoundary name="Easy Move"><EasyMoveView /></ErrorBoundary>}
               {view === "memory" && <ErrorBoundary name="Processes"><MemoryView /></ErrorBoundary>}
               {view === "diskIo" && <ErrorBoundary name="Disk I/O"><DiskIoView /></ErrorBoundary>}
+              {view === "docker" && <ErrorBoundary name="Docker"><DockerView /></ErrorBoundary>}
               {view === "settings" && <ErrorBoundary name="Settings"><SettingsView /></ErrorBoundary>}
             </>
           )}

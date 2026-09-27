@@ -39,6 +39,9 @@ const NAVIGATE_VIEW_CHANNEL = "diskhound:navigate-view";
 
 const api: DiskhoundNativeApi = {
   platform,
+  getDockerInventory: () => ipcRenderer.invoke("diskhound:docker-inventory"),
+  cancelDockerInventory: () => ipcRenderer.invoke("diskhound:docker-cancel"),
+  removeDockerImage: (id) => ipcRenderer.invoke("diskhound:docker-remove-image", id),
 
   // Scan
   pickRootPath: () => ipcRenderer.invoke("diskhound:pick-root"),
