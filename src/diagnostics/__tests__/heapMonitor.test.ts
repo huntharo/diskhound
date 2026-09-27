@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { WorkerHeapReading } from "../../shared/workerHeapRegistry";
 import { HEAP_DEFAULTS, type HeapGateConfig } from "../diagnosticsConfig";
-import { checkSnapshotHeadroom, HeapMonitor } from "../heapMonitor";
+import { HeapMonitor } from "../heapMonitor";
 import {
   fakeInspector,
   deferred,
@@ -21,7 +21,7 @@ import {
 const cleanups: Array<() => Promise<void>> = [];
 const monitors: HeapMonitor[] = [];
 
-/** Snapshots need a gate under the 512 MB ceiling. */
+/** A low threshold for exercising the capture lifecycle. */
 const SNAPSHOT_GATE: Partial<HeapGateConfig> = { snapshots: true, gateBytes: 400 * MB, watchBytes: 300 * MB };
 
 afterEach(async () => {
@@ -94,39 +94,6 @@ async function fixture(options: {
   const logged = (tag: string) => log.mock.calls.filter(([name]) => name === tag).map(([, message]) => message as string);
   return { root, heap, clock, inspector, calls, snapshots, writeHeapSnapshot, readWorkerHeaps, gcHooks, log, logged, afterBlockingCapture, session, monitor, run };
 }
-
-describe("checkSnapshotHeadroom", () => {
-  const worker = (usedMb: number | null, label = "folder-tree"): WorkerHeapReading =>
-    ({ label, threadId: 7, usedBytes: usedMb === null ? null : usedMb * MB, limitBytes: 4096 * MB });
-
-  it("refuses above the snapshot ceiling, whatever the headroom", () => {
-    const result = checkSnapshotHeadroom(heapReading(600), [], 0.9, 512 * MB);
-    expect(result.ok).toBe(false);
-    expect(result.reason).toBe("main heap 600 MB is over the 512 MB snapshot ceiling (Electron 40 crashed writing one at ~600 MB)");
-    expect(checkSnapshotHeadroom(heapReading(500), [], 0.9, 512 * MB).ok).toBe(true);
-  });
-
-  it("needs main × 2 under 90% of the 4 GB limit with no workers", () => {
-    expect(checkSnapshotHeadroom(heapReading(1200), [], 0.9).ok).toBe(true);
-    // 0.9 × 4,096 MB = 3,686.4 MB
-    expect(checkSnapshotHeadroom(heapReading(1844), [], 0.9).ok).toBe(false);
-    expect(checkSnapshotHeadroom(heapReading(1843), [], 0.9).ok).toBe(true);
-  });
-
-  it("counts worker heaps, which share the cage", () => {
-    const result = checkSnapshotHeadroom(heapReading(1200), [worker(1300)], 0.9);
-    expect(result).toMatchObject({ ok: false, cageUsedBytes: 2500 * MB, neededBytes: 3700 * MB });
-    expect(result.reason).toBe(
-      "main 1,200 MB + 1 worker 1,300 MB + ~1,200 MB for the snapshot would exceed 90% of the 4,096 MB heap limit",
-    );
-  });
-
-  it("fails when a worker's heap is unknown", () => {
-    const result = checkSnapshotHeadroom(heapReading(300), [worker(null, "dev-artifacts")], 0.9);
-    expect(result.ok).toBe(false);
-    expect(result.reason).toContain("worker dev-artifacts did not report its heap");
-  });
-});
 
 describe("HeapMonitor", () => {
   it("stays quiet below the watch mark: no profiler, no files", async () => {
@@ -232,45 +199,22 @@ describe("HeapMonitor", () => {
     expect(lines[0]).toBe(`writing ${pathA} at 420 MB heap; if DiskHound exits before the next line, the snapshot killed it`);
     const writing = f.log.mock.calls.filter(([tag, message]) => tag === "heap-snapshot" && String(message).startsWith("writing "));
     expect(writing.map(([, , options]) => options)).toEqual([{ sync: true }, { sync: true }]);
-    expect(lines[1]).toMatch(new RegExp(`^saved ${pathA.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")} \\(0 MB\\); main thread paused 6200 ms; main 420 MB`));
+    expect(lines[1]).toMatch(new RegExp(`^saved ${pathA.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")} \\(0 MB\\); main thread paused 6200 ms`));
     expect(f.monitor.status().state).toBe("capped");
   });
 
-  it("skips snapshots above the ceiling at the default 1.2 GB gate, and says why", async () => {
-    const f = await fixture({ config: { snapshots: true } });
-    await f.run(950, 1250);
-    expect(f.writeHeapSnapshot).not.toHaveBeenCalled();
-    expect(f.monitor.hasPendingSnapshot()).toBe(false);
-    expect(f.logged("heap-snapshot")).toEqual([
-      "gate snapshot A skipped: main heap 1,250 MB is over the 512 MB snapshot ceiling (Electron 40 crashed writing one at ~600 MB)",
-    ]);
-    // The allocation profile needs no headroom.
-    expect(existsSync(f.session.artifactPath("main-gate-0001.heapprofile"))).toBe(true);
-    expect(f.monitor.status().lastEvent).toContain("gate snapshot A skipped");
-  });
-
-  it("skips B when the cage has filled within the 20 s", async () => {
-    const f = await fixture({ config: SNAPSHOT_GATE });
+  it.each([1200, 1800, 3072])("attempts the snapshot pair at a %i MB threshold without a size or headroom veto", async (gateMb) => {
+    const f = await fixture({ config: { snapshots: true, gateBytes: gateMb * MB } });
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    await f.run(350, 420);
-    f.heap.workers = [{ label: "folder-tree", threadId: 3, usedBytes: 2900 * MB, limitBytes: 4096 * MB }];
+    f.heap.workers = [{ label: "scan", threadId: 1, usedBytes: 2200 * MB, limitBytes: 4096 * MB }];
+    await f.run(950, gateMb + 20);
+    expect(f.snapshots).toEqual(["main-gate-0001-a.heapsnapshot"]);
+    expect(f.monitor.hasPendingSnapshot()).toBe(true);
+    f.heap.usedMb = gateMb + 100;
+    f.heap.workers = [{ label: "scan", threadId: 1, usedBytes: null, limitBytes: null, error: "timeout" }];
     await vi.advanceTimersByTimeAsync(20_000);
     await f.monitor.whenIdle();
-    expect(f.snapshots).toEqual(["main-gate-0001-a.heapsnapshot"]);
-    expect(f.logged("heap-snapshot").at(-1)).toBe(
-      "gate snapshot B skipped: main 420 MB + 1 worker 2,900 MB + ~420 MB for the snapshot would exceed 90% of the 4,096 MB heap limit",
-    );
-  });
-
-  it("skips B when the heap has grown past the ceiling within the 20 s", async () => {
-    const f = await fixture({ config: SNAPSHOT_GATE });
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    await f.run(350, 420);
-    f.heap.usedMb = 700;
-    await vi.advanceTimersByTimeAsync(20_000);
-    await f.monitor.whenIdle();
-    expect(f.snapshots).toEqual(["main-gate-0001-a.heapsnapshot"]);
-    expect(f.logged("heap-snapshot").at(-1)).toMatch(/^gate snapshot B skipped: main heap 700 MB is over the 512 MB snapshot ceiling/);
+    expect(f.snapshots).toEqual(["main-gate-0001-a.heapsnapshot", "main-gate-0001-b.heapsnapshot"]);
   });
 
   it.each([{ enabled: false }, { snapshots: false }])("cancels pending B when settings change to %j", async (config) => {
@@ -287,25 +231,16 @@ describe("HeapMonitor", () => {
     expect(f.snapshots).toEqual(["main-gate-0001-a.heapsnapshot"]);
   });
 
-  it.each(["workers", "directory"])("cancels B if disabled while waiting for %s", async (stage) => {
+  it("cancels B if disabled while preparing its directory", async () => {
     const f = await fixture({ config: SNAPSHOT_GATE });
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     await f.run(350, 420);
     const entered = deferred();
     const resume = deferred();
-    if (stage === "workers") {
-      f.heap.workers = [{ label: "scan", threadId: 1, usedBytes: 100 * MB, limitBytes: 4096 * MB }];
-      f.readWorkerHeaps.mockImplementationOnce(async () => {
-        entered.resolve();
-        await resume.promise;
-        return f.heap.workers;
-      });
-    } else {
-      vi.spyOn(f.session, "prepare").mockImplementationOnce(async () => {
-        entered.resolve();
-        await resume.promise;
-      });
-    }
+    vi.spyOn(f.session, "prepare").mockImplementationOnce(async () => {
+      entered.resolve();
+      await resume.promise;
+    });
     await vi.advanceTimersByTimeAsync(20_000);
     await entered.promise;
     f.monitor.reconfigure(heapConfig({ ...SNAPSHOT_GATE, snapshots: false }));
@@ -314,49 +249,28 @@ describe("HeapMonitor", () => {
     expect(f.snapshots).toEqual(["main-gate-0001-a.heapsnapshot"]);
   });
 
-  it("keeps a worker's cached heap for display but refuses a snapshot when it stops answering", async () => {
-    const f = await fixture({ config: { enabled: false } });
-    f.heap.workers = [{ label: "scan", threadId: 1, usedBytes: 100 * MB, limitBytes: 4096 * MB }];
-    await f.run(400);
-    f.heap.workers = [{ label: "scan", threadId: 1, usedBytes: null, limitBytes: null, error: "timeout" }];
-    const result = await f.monitor.captureManualSnapshot();
-    expect(result.ok).toBe(false);
-    expect(result.message).toContain("worker scan did not report its heap");
-    expect(f.monitor.status().workers).toEqual([{ label: "scan", usedBytes: 100 * MB }]);
-    expect(f.writeHeapSnapshot).not.toHaveBeenCalled();
-  });
-
-  it.each(["workers", "directory"])("rechecks the main heap after waiting for %s", async (stage) => {
+  it("records the current main heap after directory preparation", async () => {
     const f = await fixture({ config: { enabled: false } });
     await f.run(400);
     const entered = deferred();
     const resume = deferred();
-    if (stage === "workers") {
-      f.heap.workers = [{ label: "scan", threadId: 1, usedBytes: 100 * MB, limitBytes: 4096 * MB }];
-      f.readWorkerHeaps.mockImplementationOnce(async () => {
-        entered.resolve();
-        await resume.promise;
-        return f.heap.workers;
-      });
-    } else {
-      const prepare = f.session.prepare.bind(f.session);
-      vi.spyOn(f.session, "prepare").mockImplementationOnce(async () => {
-        await prepare();
-        entered.resolve();
-        await resume.promise;
-      });
-    }
+    const prepare = f.session.prepare.bind(f.session);
+    vi.spyOn(f.session, "prepare").mockImplementationOnce(async () => {
+      await prepare();
+      entered.resolve();
+      await resume.promise;
+    });
     const capture = f.monitor.captureManualSnapshot();
     await entered.promise;
-    f.heap.usedMb = 650;
+    f.heap.usedMb = 1800;
     resume.resolve();
     const result = await capture;
-    expect(result.ok).toBe(false);
-    expect(result.message).toContain("main heap 650 MB is over the 512 MB snapshot ceiling");
-    expect(f.writeHeapSnapshot).not.toHaveBeenCalled();
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("at 1,800 MB heap");
+    expect(f.writeHeapSnapshot).toHaveBeenCalledOnce();
   });
 
-  it("notes worker heaps at the gate and refuses a snapshot when one doesn't report", async () => {
+  it("notes unknown worker heaps at the threshold without blocking snapshots", async () => {
     const f = await fixture({ config: SNAPSHOT_GATE });
     f.heap.workers = [
       { label: "scan", threadId: 1, usedBytes: 180 * MB, limitBytes: 4096 * MB },
@@ -364,9 +278,7 @@ describe("HeapMonitor", () => {
     ];
     await f.run(350, 420);
     expect(f.logged("heap-gate")[0]).toContain("(scan 180 MB, dev-artifacts ?)");
-    expect(f.logged("heap-snapshot")).toEqual([
-      "gate snapshot A skipped: worker dev-artifacts did not report its heap, so the cage's free space is unknown",
-    ]);
+    expect(f.snapshots).toEqual(["main-gate-0001-a.heapsnapshot"]);
     const events = (await FS.readFile(f.session.artifactPath("events.ndjson"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     expect(events.find((event) => event.type === "gate-triggered").detail.workers).toEqual([
       { label: "scan", threadId: 1, usedBytes: 180 * MB },
@@ -459,16 +371,16 @@ describe("HeapMonitor", () => {
     expect(f.gcHooks.off).toBe(1);
   });
 
-  it("takes a manual snapshot on request, unless the heap lacks headroom", async () => {
+  it("takes manual snapshots even above the former ceiling and half the heap limit", async () => {
     const f = await fixture({ config: { enabled: false } });
     await f.run(400);
     const taken = await f.monitor.captureManualSnapshot();
     expect(taken).toMatchObject({ ok: true, path: f.session.artifactPath("main-manual-0001.heapsnapshot") });
-    f.heap.usedMb = 600;
-    const refused = await f.monitor.captureManualSnapshot();
-    expect(refused.ok).toBe(false);
-    expect(refused.message).toMatch(/^manual snapshot skipped: main heap 600 MB is over the 512 MB snapshot ceiling/);
-    expect(f.snapshots).toEqual(["main-manual-0001.heapsnapshot"]);
+    f.heap.usedMb = 3000;
+    const second = await f.monitor.captureManualSnapshot();
+    expect(second.ok).toBe(true);
+    expect(second.message).toContain("at 3,000 MB heap");
+    expect(f.snapshots).toEqual(["main-manual-0001.heapsnapshot", "main-manual-0002.heapsnapshot"]);
   });
 
   it("describes the cage for the [memory] crash.log line", async () => {

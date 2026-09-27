@@ -561,10 +561,8 @@ export interface DiagnosticsSettings {
   heapDiagnostics: boolean;
   /**
    * Also write two full .heapsnapshot files at the gate, 20 s apart,
-   * to diff in DevTools. Each is 1.5–2.3x the heap and blocks the main
-   * process 17–50 ms per MB. Skipped above 512 MB, where Electron 40's
-   * snapshot generator crashed the app, and when the 4 GB heap cage
-   * main shares with its workers lacks room.
+   * to diff in DevTools. Captures pause the main process and can use
+   * substantial memory and disk space.
    */
   heapSnapshots: boolean;
   /** Main-process used heap, in MB, that fires the gate. */
@@ -572,8 +570,6 @@ export interface DiagnosticsSettings {
 }
 
 export const HEAP_GATE_MB_DEFAULT = 1200;
-/** Keep in step with HEAP_DEFAULTS.snapshotMaxBytes in src/diagnostics. */
-export const HEAP_SNAPSHOT_MAX_MB = 512;
 export const HEAP_GATE_MB_MIN = 128;
 export const HEAP_GATE_MB_MAX = 3072;
 export const HOT_CPU_THRESHOLD_PERCENT_DEFAULT = 50;
@@ -1851,7 +1847,6 @@ export function defaultSettings(): AppSettings {
       heapDiagnostics: false,
       heapSnapshots: false,
       // ~30% of Electron's 4 GB cage, for the allocation profile.
-      // Snapshots stop at HEAP_SNAPSHOT_MAX_MB, so they need a lower gate.
       heapGateMb: HEAP_GATE_MB_DEFAULT,
     },
     recentScans: [],

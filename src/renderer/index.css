@@ -4369,7 +4369,6 @@ button, input, select, textarea { font: inherit; }
 }
 .diagnostics-status .perf-status { margin-top: 0; }
 .diagnostics-last-event { padding: 0 12px; }
-.diagnostics-gate-warning { margin: 4px 0 8px; }
 /* Full-width rows; .setting-row's align-items would center them. */
 .diagnostics-captures { align-items: stretch; }
 .diagnostics-sessions {

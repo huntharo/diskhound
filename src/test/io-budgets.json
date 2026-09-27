@@ -502,7 +502,7 @@
     "observedBytesWritten": 1660381
   },
   "heap-gate-snapshot-pair": {
-    "note": "a 400 MB gate with snapshots on: the gate capture plus snapshots A and B (1 file each, written by V8 outside node:fs; a 1 MB stand-in here), each with a session.json rewrite, events, a sync crash.log line before V8 blocks and a buffered one after. Measured on Electron 40.6, a snapshot is 1.5-2.3x the heap and blocks main 17-50 ms/MB: up to ~0.9 GB and ~20 s each at 400 MB, up to ~2.4 GB per pair at the 512 MB ceiling. At most 1 pair per app version per day; the 6 GB retention cap keeps two. Off by default, opt-in behind that warning",
+    "note": "a 400 MB fixture threshold with snapshots on: gate capture plus A and B (1 file each via V8; a 1 MB stand-in here), each with a manifest, events and crash.log writes. Off by default: 0/day. Enabled: at most 1 pair per app version/day at any threshold. Actual snapshot bytes vary; extrapolating the previously observed 1.5-2.3x heap size gives ~3.5-5.4 GiB/day at the default 1200 MB threshold, ~9-13.8 GiB/day at the maximum 3072 MB, plus the allocation profile. No size veto; retention excludes live sessions",
     "writeFile": 7,
     "appendFile": 8,
     "rename": 0,
@@ -519,7 +519,7 @@
     "existsSync": 0,
     "createReadStream": 0,
     "open": 0,
-    "observedBytesWritten": 3761644
+    "observedBytesWritten": 3761083
   },
   "heap-gate-watching-hour": {
     "note": "gate on, sampling, heap under the 1.2 GB gate for an hour: 0 writes (the sampling heap profile stays in V8) and 1 read of heap-gate-state.json per launch",
@@ -542,7 +542,7 @@
     "observedBytesWritten": 0
   },
   "heap-manual-snapshot": {
-    "note": "Settings > Take heap snapshot, per click: the session folder, 1 snapshot file (V8 writes it; a 1 MB stand-in here, 1.5-2.3x the heap for real, refused above 512 MB), events, session.json, a sync crash.log line before V8 blocks and a buffered one after",
+    "note": "Settings > Take heap snapshot, per click: session folder, 1 snapshot file (V8; 1 MB stand-in here), events, manifest and two crash.log writes. No automatic daily writes; manual frequency is user-controlled at all settings. At one capture/day and the previously observed 1.5-2.3x ratio, ~1.8-2.7 GiB/day for a 1200 MB heap; actual size varies and there is no size veto",
     "writeFile": 2,
     "appendFile": 4,
     "rename": 0,
@@ -559,7 +559,7 @@
     "existsSync": 0,
     "createReadStream": 0,
     "open": 0,
-    "observedBytesWritten": 1050381
+    "observedBytesWritten": 1050161
   },
   "heap-monitor-idle-hour": {
     "note": "gate off (the default), 720 samples at 5 s: 0 writes; readings stay in a 120-entry ring in memory",

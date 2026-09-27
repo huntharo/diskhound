@@ -47,7 +47,6 @@ export function heapConfig(overrides: Partial<HeapGateConfig> = {}): HeapGateCon
   return {
     ...HEAP_DEFAULTS,
     enabled: true,
-    snapshotMaxBytes: HEAP_DEFAULTS.snapshotMaxBytes,
     snapshots: false,
     gateBytes,
     // A watch mark at 75% of the gate, to exercise it; the default is 0.

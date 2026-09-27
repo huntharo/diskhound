@@ -31,18 +31,6 @@ export const HEAP_DEFAULTS = {
   // workload (within run-to-run noise) and held a ~580 KB profile.
   watchFraction: 0,
   snapshotGapMs: 20_000,
-  // A snapshot needs about the main heap's size again, inside the one
-  // cage main and its workers share. Take one only while
-  // (cage used + main used) stays under this fraction of the limit.
-  headroomFraction: 0.9,
-  // Measured on Electron 40.6 with a folder-tree-shaped heap (a Map of
-  // path strings to small records): v8.writeHeapSnapshot finished at
-  // 556 MB and killed the process with SIGTRAP inside TakeHeapSnapshot
-  // at 602 MB, leaving an empty file and no crash.log line. Snapshots
-  // above this are skipped. The main thread blocked 35–50 ms per MB and
-  // the file was ~2.3x the heap; DiskHound's own heap after a scan took
-  // 17 ms per MB and 1.55x.
-  snapshotMaxBytes: 512 * MB,
   maxGatesPerDay: 1,
   cooldownMs: 10 * 60_000,
   // Crash-log breadcrumb when main nears the limit: V8's OOM abort
@@ -71,9 +59,6 @@ export interface HeapGateConfig {
   gateBytes: number;
   watchBytes: number;
   snapshotGapMs: number;
-  headroomFraction: number;
-  /** No snapshot above this much main heap, whatever the headroom. */
-  snapshotMaxBytes: number;
   maxGatesPerDay: number;
   cooldownMs: number;
   nearLimitFraction: number;
@@ -145,8 +130,6 @@ export function resolveDiagnosticsConfig(
     gateBytes,
     watchBytes: Math.min(gateBytes, watchMb !== undefined ? watchMb * MB : gateBytes * HEAP_DEFAULTS.watchFraction),
     snapshotGapMs: nonNegative("DISKHOUND_HEAP_SNAPSHOT_GAP_MS") ?? HEAP_DEFAULTS.snapshotGapMs,
-    headroomFraction: HEAP_DEFAULTS.headroomFraction,
-    snapshotMaxBytes: (positive("DISKHOUND_HEAP_SNAPSHOT_MAX_MB") ?? HEAP_DEFAULTS.snapshotMaxBytes / MB) * MB,
     maxGatesPerDay: Math.round(positive("DISKHOUND_HEAP_MAX_GATES_PER_DAY") ?? HEAP_DEFAULTS.maxGatesPerDay),
     cooldownMs: nonNegative("DISKHOUND_HEAP_COOLDOWN_MS") ?? HEAP_DEFAULTS.cooldownMs,
     nearLimitFraction: HEAP_DEFAULTS.nearLimitFraction,

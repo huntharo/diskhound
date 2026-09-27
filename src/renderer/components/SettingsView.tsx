@@ -4,7 +4,6 @@ import {
   defaultSettings,
   HEAP_GATE_MB_MAX,
   HEAP_GATE_MB_MIN,
-  HEAP_SNAPSHOT_MAX_MB,
   normalizeAppSettings,
   type AppSettings,
   type DiagnosticsSettings,
@@ -653,10 +652,8 @@ function DiagnosticsSection({
     const used = status ? ` (about ${formatMb(status.heap.usedBytes)} now)` : "";
     const ok = confirm(
       "Write a heap snapshot of DiskHound's main process?\n\n"
-      + `The file is 1.5 to 2.3 times the heap${used}, and DiskHound freezes while V8 writes it, `
-      + "up to about 20 s at 500 MB. "
-      + `It is skipped above ${HEAP_SNAPSHOT_MAX_MB} MB, where writing one has crashed DiskHound, `
-      + "or if the heap lacks room to build one.",
+      + `DiskHound pauses while the snapshot is written${used}. `
+      + "Large snapshots can use substantial memory and disk space.",
     );
     if (!ok) return;
     setBusy("snapshot");
@@ -696,9 +693,6 @@ function DiagnosticsSection({
   };
 
   const heap = status?.heap;
-  const limitMb = heap ? Math.round(heap.limitBytes / MB) : 4096;
-  const snapshotsAboveCeiling = diagnostics.heapDiagnostics && diagnostics.heapSnapshots
-    && diagnostics.heapGateMb > HEAP_SNAPSHOT_MAX_MB;
   const sessions = status?.sessions.filter((session) => session.artifacts.length > 0) ?? [];
   const workerBytes = heap?.workers.reduce((sum, worker) => sum + (worker.usedBytes ?? 0), 0) ?? 0;
 
@@ -731,13 +725,13 @@ function DiagnosticsSection({
       />
       <ToggleRow
         label="Heap diagnostics"
-        desc="Runs V8's sampling heap profiler on the main process, at no measurable cost. When the heap passes the gate, saves its allocation profile (.heapprofile, under a few MB), which shows the code that allocated what the heap holds. At most once a day."
+        desc="Records sampled memory allocations in the main process. When memory use reaches the capture threshold, saves an allocation profile (.heapprofile) showing which code allocated it. At most once a day."
         value={diagnostics.heapDiagnostics}
         onChange={(v) => update({ heapDiagnostics: v })}
       />
       <NumberRow
-        label="Heap gate (MB)"
-        desc={`DiskHound's main process and its workers share ${limitMb.toLocaleString()} MB of heap. The allocation profile works at any gate; snapshots need one at or below ${HEAP_SNAPSHOT_MAX_MB} MB.`}
+        label="Heap capture threshold (MB)"
+        desc="Main-process memory use that triggers an allocation profile and, if enabled below, full heap snapshots."
         value={diagnostics.heapGateMb}
         min={HEAP_GATE_MB_MIN}
         max={HEAP_GATE_MB_MAX}
@@ -745,22 +739,12 @@ function DiagnosticsSection({
         onChange={(v) => update({ heapGateMb: v })}
       />
       <ToggleRow
-        label="Full heap snapshots at the gate"
-        desc={`Also writes two .heapsnapshot files 20 s apart, to compare in DevTools. Each is 1.5 to 2.3 times the heap, up to about 1 GB at a 450 MB heap, and DiskHound freezes while V8 writes it, up to about 20 s at 500 MB. Skipped above ${HEAP_SNAPSHOT_MAX_MB} MB, where writing one has crashed DiskHound, or when the heap lacks room for one.`}
+        label="Full heap snapshots at the threshold"
+        desc="Also saves two .heapsnapshot files 20 seconds apart for comparison in DevTools. DiskHound pauses during each capture; large snapshots can use substantial memory and disk space."
         value={diagnostics.heapDiagnostics && diagnostics.heapSnapshots}
         disabled={!diagnostics.heapDiagnostics}
         onChange={(v) => update({ heapSnapshots: v })}
       />
-      {snapshotsAboveCeiling && (
-        <div className="perf-status perf-status-warn diagnostics-gate-warning">
-          <span className="perf-status-dot" />
-          <span>
-            At a {diagnostics.heapGateMb.toLocaleString()} MB gate the snapshots will be skipped. Lower the gate
-            to {HEAP_SNAPSHOT_MAX_MB} MB or less to get them; the allocation profile is saved either way.
-          </span>
-        </div>
-      )}
-
       {status && heap && (
         <div className="diagnostics-status">
           <div className={`perf-status perf-status-${status.hotCpu.state === "failed" ? "warn" : "ok"}`}>
