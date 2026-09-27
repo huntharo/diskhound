@@ -895,17 +895,17 @@
     "kind": null
   },
   {
-    "path": "/mono/.worKtrees/feature/a",
+    "path": "/mono/.wor\u212atrees/feature/a",
     "root": null,
     "kind": null
   },
   {
-    "path": "/mono/CMaKeFiles/a.o",
+    "path": "/mono/CMa\u212aeFiles/a.o",
     "root": null,
     "kind": null
   },
   {
-    "path": "/mono/go/pkg/mod/example.com/pacKage@v1.2.3/a.go",
+    "path": "/mono/go/pkg/mod/example.com/pac\u212aage@v1.2.3/a.go",
     "root": null,
     "kind": null
   },
@@ -973,5 +973,425 @@
     "path": "/mono/obj/Debug/net9.0-ios18.0/a.dll",
     "root": "/mono/obj/Debug/net9.0-ios18.0",
     "kind": "dotnet"
+  },
+  {
+    "path": "/home/dev/.yarn/berry/cache/data.bin",
+    "root": "/home/dev/.yarn/berry/cache",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/home/dev/.yarn/berry/metadata/state.json",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/debug/build/webrtc-sys-53d1d4d2126137c6/out/lib.a",
+    "root": "/mono/target/debug/build/webrtc-sys-53d1d4d2126137c6",
+    "kind": "rust-target"
+  },
+  {
+    "path": "/mono/target/aarch64-apple-darwin/release/build/crate_2-0123456789abcdef/data.bin",
+    "root": "/mono/target/aarch64-apple-darwin/release/build/crate_2-0123456789abcdef",
+    "kind": "rust-target"
+  },
+  {
+    "path": "/mono/target/debug/build",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/debug/build/source/main.rs",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/debug/build/crate-0123456789abcdeg/out/file",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/debug/build/crate-12345678/out/file",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/notes/build/crate-0123456789abcdef/out/file",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.cache/pip/data.bin",
+    "root": "/home/dev/.cache/pip",
+    "kind": "python"
+  },
+  {
+    "path": "/Users/dev/Library/Caches/pip/data.bin",
+    "root": "/Users/dev/Library/Caches/pip",
+    "kind": "python"
+  },
+  {
+    "path": "/projects/pip/src/index.ts",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/Library/Application Support/pip/settings.json",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.cache/uv/data.bin",
+    "root": "/home/dev/.cache/uv",
+    "kind": "python"
+  },
+  {
+    "path": "/Users/dev/Library/Caches/uv/data.bin",
+    "root": "/Users/dev/Library/Caches/uv",
+    "kind": "python"
+  },
+  {
+    "path": "/projects/uv/src/index.ts",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/Library/Application Support/uv/settings.json",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.cache/go-build/data.bin",
+    "root": "/home/dev/.cache/go-build",
+    "kind": "go-module"
+  },
+  {
+    "path": "/Users/dev/Library/Caches/go-build/data.bin",
+    "root": "/Users/dev/Library/Caches/go-build",
+    "kind": "go-module"
+  },
+  {
+    "path": "/projects/go-build/src/index.ts",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/Library/Application Support/go-build/settings.json",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.cache/Coursier/data.bin",
+    "root": "/home/dev/.cache/Coursier",
+    "kind": "jvm"
+  },
+  {
+    "path": "/Users/dev/Library/Caches/Coursier/data.bin",
+    "root": "/Users/dev/Library/Caches/Coursier",
+    "kind": "jvm"
+  },
+  {
+    "path": "/projects/Coursier/src/index.ts",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/Library/Application Support/Coursier/settings.json",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.cache/vscode-cpptools/data.bin",
+    "root": "/home/dev/.cache/vscode-cpptools",
+    "kind": "compiler-cache"
+  },
+  {
+    "path": "/Users/dev/Library/Caches/vscode-cpptools/data.bin",
+    "root": "/Users/dev/Library/Caches/vscode-cpptools",
+    "kind": "compiler-cache"
+  },
+  {
+    "path": "/projects/vscode-cpptools/src/index.ts",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/Library/Application Support/vscode-cpptools/settings.json",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.cache/electron/data.bin",
+    "root": "/home/dev/.cache/electron",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/Users/dev/Library/Caches/electron/data.bin",
+    "root": "/Users/dev/Library/Caches/electron",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/projects/electron/src/index.ts",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/Library/Application Support/electron/settings.json",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.cache/electron-builder/data.bin",
+    "root": "/home/dev/.cache/electron-builder",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/Users/dev/Library/Caches/electron-builder/data.bin",
+    "root": "/Users/dev/Library/Caches/electron-builder",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/projects/electron-builder/src/index.ts",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/Library/Application Support/electron-builder/settings.json",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.cache/ms-playwright/data.bin",
+    "root": "/home/dev/.cache/ms-playwright",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/Users/dev/Library/Caches/ms-playwright/data.bin",
+    "root": "/Users/dev/Library/Caches/ms-playwright",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/projects/ms-playwright/src/index.ts",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/Library/Application Support/ms-playwright/settings.json",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.cache/Cypress/data.bin",
+    "root": "/home/dev/.cache/Cypress",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/Users/dev/Library/Caches/Cypress/data.bin",
+    "root": "/Users/dev/Library/Caches/Cypress",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/projects/Cypress/src/index.ts",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/Library/Application Support/Cypress/settings.json",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.cache/Homebrew/data.bin",
+    "root": "/home/dev/.cache/Homebrew",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/Users/dev/Library/Caches/Homebrew/data.bin",
+    "root": "/Users/dev/Library/Caches/Homebrew",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/projects/Homebrew/src/index.ts",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/Library/Application Support/Homebrew/settings.json",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.cache/puppeteer/data.bin",
+    "root": "/home/dev/.cache/puppeteer",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/Users/dev/Library/Caches/puppeteer/data.bin",
+    "root": "/Users/dev/Library/Caches/puppeteer",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/projects/puppeteer/src/index.ts",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/Library/Application Support/puppeteer/settings.json",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.cache/node-gyp/data.bin",
+    "root": "/home/dev/.cache/node-gyp",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/Users/dev/Library/Caches/node-gyp/data.bin",
+    "root": "/Users/dev/Library/Caches/node-gyp",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/projects/node-gyp/src/index.ts",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/Library/Application Support/node-gyp/settings.json",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.cache/org.swift.swiftpm/data.bin",
+    "root": "/home/dev/.cache/org.swift.swiftpm",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/Users/dev/Library/Caches/org.swift.swiftpm/data.bin",
+    "root": "/Users/dev/Library/Caches/org.swift.swiftpm",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/projects/org.swift.swiftpm/src/index.ts",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/Library/Application Support/org.swift.swiftpm/settings.json",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.npm/_cacache/data.bin",
+    "root": "/home/dev/.npm/_cacache",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/home/dev/.npm/config.json",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.npm/_npx/custom/src/main.ts",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.local/share/NuGet/http-cache/data.bin",
+    "root": "/home/dev/.local/share/NuGet/http-cache",
+    "kind": "dotnet"
+  },
+  {
+    "path": "/home/dev/.local/share/NuGet/v3-cache/data.bin",
+    "root": "/home/dev/.local/share/NuGet/v3-cache",
+    "kind": "dotnet"
+  },
+  {
+    "path": "/home/dev/.local/share/NuGet/plugins-cache/data.bin",
+    "root": "/home/dev/.local/share/NuGet/plugins-cache",
+    "kind": "dotnet"
+  },
+  {
+    "path": "/home/dev/.local/share/NuGet/NuGet.Config",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/AppData/Local/NuGet/http-cache/data.bin",
+    "root": "/Users/dev/AppData/Local/NuGet/http-cache",
+    "kind": "dotnet"
+  },
+  {
+    "path": "/Users/dev/AppData/Local/NuGet/v3-cache/data.bin",
+    "root": "/Users/dev/AppData/Local/NuGet/v3-cache",
+    "kind": "dotnet"
+  },
+  {
+    "path": "/Users/dev/AppData/Local/NuGet/plugins-cache/data.bin",
+    "root": "/Users/dev/AppData/Local/NuGet/plugins-cache",
+    "kind": "dotnet"
+  },
+  {
+    "path": "/Users/dev/AppData/Local/NuGet/NuGet.Config",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/.tart/vms/work/disk.img",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/Library/Containers/com.docker.docker/Data/vms/0/Docker.raw",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/.codex/worktrees/a/project/src/main.ts",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/project/.git/objects/pack/a.pack",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/Pictures/Photos Library.photoslibrary/database/Photos.sqlite",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Applications/Editor.app/Contents/Resources/app/dist/main.js",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/.vscode/extensions/tool/dist/main.js",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/Library/Caches/unknown-tool/precious.txt",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/Library/Caches/pip-backup/source.py",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.cache/__proto__/source",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.cache/constructor/source",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.npm/_npx/abc/node_modules/pkg/index.js",
+    "root": "/home/dev/.npm/_npx/abc/node_modules",
+    "kind": "node-modules"
   }
 ]

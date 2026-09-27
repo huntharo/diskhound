@@ -664,6 +664,18 @@ fn go_module_version(name: &str) -> bool {
         })
 }
 
+fn cache_tool_kind(tool: &str) -> Option<Kind> {
+    match tool {
+        "pip" | "uv" => Some(Kind::Python),
+        "go-build" => Some(Kind::GoModule),
+        "coursier" => Some(Kind::Jvm),
+        "ccache" | "sccache" | "mozilla.sccache" | "vscode-cpptools" => Some(Kind::CompilerCache),
+        "yarn" | "pnpm" | "electron" | "electron-builder" | "ms-playwright" | "cypress"
+        | "homebrew" | "puppeteer" | "node-gyp" | "org.swift.swiftpm" => Some(Kind::PackageCache),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 fn classify(path: &str) -> Option<(String, Kind)> {
     let parts = split_segments(path);
@@ -675,6 +687,51 @@ fn classify_parts(parts: &[&str], start: usize) -> Option<(usize, Kind)> {
     for i in start..parts.len() {
         crate::work::step();
         let lower = parts[i].to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            ".cache" | "library" | ".local" | "appdata" | ".npm"
+        ) {
+            let next = parts
+                .get(i + 1)
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_default();
+            let after = parts
+                .get(i + 2)
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_default();
+            let cache_tool = if lower == ".cache" {
+                Some(i + 1)
+            } else if lower == "library" && next == "caches" {
+                Some(i + 2)
+            } else {
+                None
+            };
+            if let Some(tool) = cache_tool {
+                if let Some(kind) = parts
+                    .get(tool)
+                    .and_then(|s| cache_tool_kind(&s.to_ascii_lowercase()))
+                {
+                    return Some((tool + 1, kind));
+                }
+            }
+            if ((lower == ".local" && next == "share") || (lower == "appdata" && next == "local"))
+                && after == "nuget"
+                && parts.get(i + 3).is_some_and(|s| {
+                    matches!(
+                        s.to_ascii_lowercase().as_str(),
+                        "http-cache" | "v3-cache" | "plugins-cache"
+                    )
+                })
+            {
+                return Some((i + 4, Kind::Dotnet));
+            }
+            if lower == ".npm" {
+                if next == "_cacache" {
+                    return Some((i + 2, Kind::PackageCache));
+                }
+                continue;
+            }
+        }
         if matches!(
             lower.as_str(),
             ".yarn"
@@ -701,6 +758,9 @@ fn classify_parts(parts: &[&str], start: usize) -> Option<(usize, Kind)> {
             // Only generated/cache children, not whole tool homes.
             match lower.as_str() {
                 ".yarn" => {
+                    if next == "berry" && after == "cache" {
+                        return Some((i + 3, Kind::PackageCache));
+                    }
                     return matches!(next.as_str(), "cache" | "unplugged")
                         .then(|| (i + 2, Kind::PackageCache));
                 }
@@ -834,6 +894,26 @@ fn classify_parts(parts: &[&str], start: usize) -> Option<(usize, Kind)> {
                 )
             }) {
                 return Some((profile + 2, Kind::RustTarget));
+            }
+            if parts.get(profile).is_some_and(|s| {
+                s.eq_ignore_ascii_case("debug") || s.eq_ignore_ascii_case("release")
+            }) && parts
+                .get(profile + 1)
+                .is_some_and(|s| s.eq_ignore_ascii_case("build"))
+                && parts.get(profile + 2).is_some_and(|s| {
+                    s.rsplit_once('-').is_some_and(|(name, hash)| {
+                        !name.is_empty()
+                            && (name.as_bytes()[0].is_ascii_alphanumeric()
+                                || name.as_bytes()[0] == b'_')
+                            && name
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                            && hash.len() == 16
+                            && hash.bytes().all(|b| b.is_ascii_hexdigit())
+                    })
+                })
+            {
+                return Some((profile + 3, Kind::RustTarget));
             }
             continue;
         }
@@ -1003,6 +1083,9 @@ mod tests {
                 assert!(
                     classify("/go/pkg/mod/example.com/team/module/v2@v2.0.0/file.go").is_some()
                 );
+                assert!(classify("/mono/target/aarch64-apple-darwin/debug/build/crate-0123456789abcdef/out/lib.a").is_some());
+                assert!(classify("/Users/dev/Library/Caches/electron/download.zip").is_some());
+                assert!(classify("/home/dev/.local/share/NuGet/http-cache/package.dat").is_some());
             }
             crate::work::take()
         };
