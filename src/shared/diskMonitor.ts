@@ -423,9 +423,21 @@ async function getMacDiskSpace(): Promise<DiskSpaceInfo[] | null> {
   //   Filesystem  1024-blocks  Used  Available  Capacity  Mounted on
   const stdout = await runDf(["-P", "-k"]);
   if (stdout === null) return null;
-  return Promise.all(parseMacDfOutput(stdout, Date.now()).map(async (drive) =>
-    withMacAvailableSpace(drive, await getVolumeStorageAccounting(drive.drive)),
-  ));
+  return enrichMacDiskSpace(parseMacDfOutput(stdout, Date.now()));
+}
+
+const MAC_ACCOUNTING_WAIT_MS = 1_000;
+
+/** Accounting is optional: a stuck mount must not withhold df's healthy rows. */
+export function enrichMacDiskSpace(
+  drives: DiskSpaceInfo[],
+  readAccounting: (volumePath: string) => Promise<StorageAccountingReport> = getVolumeStorageAccounting,
+): Promise<DiskSpaceInfo[]> {
+  return Promise.all(drives.map((drive) => settleBy(
+    readAccounting(drive.drive).then((report) => withMacAvailableSpace(drive, report), () => drive),
+    MAC_ACCOUNTING_WAIT_MS,
+    drive,
+  )));
 }
 
 /** Keep df's raw free/used counters stable for monitoring and old baselines. */

@@ -4,7 +4,7 @@ import * as OS from "node:os";
 import * as Path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { expectIoBudget, measureFsIo } from "../../test/ioBudget";
-import { __resetDiskMonitorForTests, checkDiskDeltas, initDiskMonitor, withMacAvailableSpace } from "../diskMonitor";
+import { __resetDiskMonitorForTests, checkDiskDeltas, enrichMacDiskSpace, initDiskMonitor } from "../diskMonitor";
 import { getVolumeStorageAccounting } from "../macStorageAccounting";
 
 vi.mock("node:fs", async (importOriginal) =>
@@ -32,8 +32,8 @@ it.each([60, 1])("writes nothing during 10-second macOS display polling with %i-
     ? JSON.stringify({ ...capacity, NSURLVolumeAvailableCapacityForImportantUsageKey: 200e9 + Date.now() * 100_000 }) : null);
   let polls = 0;
   const timer = setInterval(async () => {
-    const report = await getVolumeStorageAccounting(drive.drive, {}, { platform: "darwin", run, exists: () => false });
-    const reading = withMacAvailableSpace(drive, report);
+    const [reading] = await enrichMacDiskSpace([drive], (mount) =>
+      getVolumeStorageAccounting(mount, {}, { platform: "darwin", run, exists: () => false }));
     if (++polls % (interval * 6) === 0) {
       expect((await checkDiskDeltas(async () => [reading])).deltas).toEqual([]);
     }

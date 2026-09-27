@@ -445,13 +445,14 @@ const CACHE_TTL_MS = 60_000;
  * that started this recently already began after the delete, so share it.
  */
 const FRESH_REUSE_MS = 1_000;
-const cache = new Map<string, { at: number; report: Promise<StorageAccountingReport> }>();
+const cache = new Map<string, { at: number; pending: boolean; report: Promise<StorageAccountingReport> }>();
 
 /**
  * Cached entry point for IPC. Concurrent callers for the same volume
- * share one in-flight collection; `fresh` only accepts a collection that
- * started within the last second (used right after a delete, when the
- * snapshot list and free space just changed).
+ * share one in-flight collection, even beyond the cache TTL: execFile's
+ * timeout sends SIGTERM but a stuck subprocess may not exit. Never start
+ * replacements until that collection settles. Once settled, `fresh` only
+ * accepts a collection started within the last second (used after a delete).
  */
 export function getStorageAccounting(
   targetPath: string,
@@ -471,11 +472,13 @@ export function getVolumeStorageAccounting(
   const now = deps.now ?? Date.now;
   const hit = cache.get(key);
   const maxAge = opts.fresh ? FRESH_REUSE_MS : CACHE_TTL_MS;
-  if (hit && now() - hit.at < maxAge) return hit.report;
+  if (hit && (hit.pending || now() - hit.at < maxAge)) return hit.report;
   const report = collectStorageAccounting(volumePath, { ...deps, volumePath }).catch(() =>
     unsupportedStorageAccountingReport(normalizePlatform(deps.platform ?? process.platform), key),
   );
-  cache.set(key, { at: now(), report });
+  const entry = { at: now(), pending: true, report };
+  cache.set(key, entry);
+  void report.then(() => { entry.pending = false; });
   return report;
 }
 

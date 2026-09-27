@@ -3,7 +3,7 @@ import * as Path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
-  __resetDiskMonitorForTests, checkDiskDeltas, getDiskDeltaHistory, withMacAvailableSpace,
+  __resetDiskMonitorForTests, checkDiskDeltas, enrichMacDiskSpace, getDiskDeltaHistory, withMacAvailableSpace,
 } from "../diskMonitor";
 import {
   buildStorageAccountingReport, getStorageAccounting, getVolumeStorageAccounting,
@@ -21,7 +21,7 @@ const drive = {
   usedBytes: 1_883_165_736_960, usedPercent: 94.4, timestamp: 50,
 };
 
-afterEach(() => { __resetDiskMonitorForTests(); vi.restoreAllMocks(); });
+afterEach(() => { __resetDiskMonitorForTests(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("macOS Available mapping", () => {
   it("maps the Foundation fixture without changing df counters or subtracting samples taken at different times", () => {
@@ -57,6 +57,64 @@ describe("macOS Available mapping", () => {
 });
 
 describe("shared storage accounting cache", () => {
+  it("bounds drive enrichment and retains a stalled collection past both timeout and cache expiry", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    let finishCapacity!: (value: string | null) => void;
+    const stalledCapacity = new Promise<string | null>((resolve) => { finishCapacity = resolve; });
+    // Models a command that outlives execFile's SIGTERM: its callback has
+    // not fired, even after the 8 s command timeout and 60 s cache TTL.
+    const run = vi.fn((command: string) => command.endsWith("osascript")
+      ? stalledCapacity : Promise.resolve(null));
+    const deps: StorageAccountingDeps = { platform: "darwin", run, exists: () => false };
+    const stalled = { ...drive, drive: "/Volumes/Stalled capacity" };
+    const first = getVolumeStorageAccounting(stalled.drive, {}, deps);
+    const readAccounting = (mount: string) => mount === drive.drive
+      ? Promise.resolve(report) : getVolumeStorageAccounting(mount, {}, deps);
+    let settled = false;
+    const result = enrichMacDiskSpace([drive, stalled], readAccounting).then((rows) => {
+      settled = true;
+      return rows;
+    });
+    await vi.advanceTimersByTimeAsync(999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const rows = await result;
+    expect(rows).toEqual([withMacAvailableSpace(drive, report), stalled]);
+    expect(rows[1]).toBe(stalled);
+
+    await vi.advanceTimersByTimeAsync(61_000);
+    expect(getVolumeStorageAccounting(stalled.drive, {}, deps)).toBe(first);
+    expect(getVolumeStorageAccounting(stalled.drive, { fresh: true }, deps)).toBe(first);
+    const latestRaw = { ...stalled, freeBytes: stalled.freeBytes + 5e9, timestamp: Date.now() };
+    const poll = enrichMacDiskSpace([drive, latestRaw], readAccounting);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect((await poll)[1]).toBe(latestRaw);
+    expect(run).toHaveBeenCalledTimes(5);
+
+    // The late result must not mutate an already-returned raw reading.
+    finishCapacity(capacityJson);
+    await first;
+    expect(rows[1]).not.toHaveProperty("availableBytes");
+    const recovered = getVolumeStorageAccounting(stalled.drive, {}, deps);
+    expect(recovered).not.toBe(first);
+    await recovered;
+    expect(run).toHaveBeenCalledTimes(10);
+    expect((await enrichMacDiskSpace([latestRaw], readAccounting))[0]).toMatchObject({
+      ...latestRaw, availableBytes: 181_609_421_575, purgeableBytes: 68_940_589_831,
+    });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("falls back immediately when enrichment rejects, without holding healthy drives", async () => {
+    vi.useFakeTimers();
+    const failed = { ...drive, drive: "/Volumes/Failed capacity" };
+    const rows = await enrichMacDiskSpace([drive, failed], (mount) => mount === drive.drive
+      ? Promise.resolve(report) : Promise.reject(new Error("capacity unavailable")));
+    expect(rows).toEqual([withMacAvailableSpace(drive, report), failed]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("coalesces polls and card requests, refreshes once per minute, and permits a fresh check after deletion", async () => {
     vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
     let time = Date.now();
