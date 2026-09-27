@@ -11,7 +11,7 @@ import {
 } from "../../shared/devArtifacts";
 import { inFlightDeleteBytes } from "../../shared/deleteProgress";
 import { formatScanRoot, normPath } from "../../shared/pathUtils";
-import { artifactHeadline, artifactTail } from "../lib/devArtifactDisplay";
+import { artifactDeltaLabel, artifactHeadline, artifactTail } from "../lib/devArtifactDisplay";
 import {
   effectiveDevSort,
   groupDevArtifacts,
@@ -906,7 +906,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                       {` · ${formatCount(artifact.fileCount)} files`}
                       {artifact.deltaBytes != null && artifact.deltaBytes !== 0 ? (
                         <span className={artifact.deltaBytes > 0 ? "dev-delta-up" : "dev-delta-down"}>
-                          {` · ${artifact.deltaBytes > 0 ? "+" : ""}${formatBytes(artifact.deltaBytes)} since last scan`}
+                          {` · ${artifactDeltaLabel(artifact.deltaBytes)}`}
                         </span>
                       ) : null}
                     </div>
