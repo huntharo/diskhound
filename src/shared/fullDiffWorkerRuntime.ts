@@ -17,6 +17,7 @@ import type {
   FullDiffWorkerResponse,
   SortedIndex,
 } from "./fullDiffWorkerProtocol";
+import { TopK } from "./topK";
 
 // The full diff compares two scan indexes, each a gzipped NDJSON file
 // of every file on the drive (20M lines on a full 2 TB disk), without
@@ -556,59 +557,22 @@ async function safeFileSize(filePath: string): Promise<number | null> {
   }
 }
 
-function createTopChangeAccumulator(limit: number): {
+/**
+ * The `limit` changes with the largest |deltaBytes|. Equal deltas keep
+ * the order they were added (merge order, i.e. by path), like the stable
+ * sort in `diffIndexes`.
+ */
+export function createTopChangeAccumulator(limit: number): {
   add: (change: FullFileChange) => void;
   toSortedArray: () => FullFileChange[];
 } {
-  const cappedLimit = Math.max(0, Math.floor(limit));
-  // Kept sorted ASCENDING by |deltaBytes| — index 0 is the smallest,
-  // so dropping the loser after overflow is O(1) at the head via shift
-  // (Array shift is O(n) in theory but V8 tiny-array shifts stay cheap).
-  //
-  // Using a sorted-insertion strategy instead of Array.sort() on every
-  // add: a full sort is O(n log n) and was the dominant cost on diffs
-  // with millions of changes; a binary insert is O(log n) compare +
-  // O(n) splice, so asymptotically the same per-insert in the worst
-  // case but with far lower constants and no wasted comparisons over
-  // the already-sorted prefix.
-  const changes: FullFileChange[] = [];
-
-  const absDelta = (c: FullFileChange) => Math.abs(c.deltaBytes);
-
+  const top = new TopK<FullFileChange>(limit, (a, b) => Math.abs(b.deltaBytes) - Math.abs(a.deltaBytes));
   return {
     add(change) {
-      if (cappedLimit === 0) {
-        return;
-      }
-
-      const target = absDelta(change);
-
-      // Fast reject: once we're at capacity, anything smaller than the
-      // current smallest top-K entry can be dropped without any work.
-      if (changes.length === cappedLimit && target <= absDelta(changes[0]!)) {
-        return;
-      }
-
-      // Binary search for insertion point (ascending by |delta|).
-      let lo = 0;
-      let hi = changes.length;
-      while (lo < hi) {
-        const mid = (lo + hi) >>> 1;
-        if (absDelta(changes[mid]!) <= target) lo = mid + 1;
-        else hi = mid;
-      }
-      changes.splice(lo, 0, change);
-      if (changes.length > cappedLimit) {
-        changes.shift();
-      }
+      top.offer(change);
     },
     toSortedArray() {
-      // Caller wants descending by |delta|. Clone + reverse beats
-      // re-sorting because the internal array is already sorted
-      // ascending.
-      const out = changes.slice();
-      out.reverse();
-      return out;
+      return top.sorted();
     },
   };
 }
