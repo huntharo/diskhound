@@ -133,10 +133,21 @@ test.describe("APFS clones", () => {
       cloneDuplicateBytes: DATA_BYTES,
     });
 
+    const primary = handle.page.locator(".metrics-strip .metric").filter({
+      has: handle.page.locator(".metric-label", { hasText: "scanned file bytes" }),
+    });
+    await expect(primary).toContainText("4.5 MB");
+    await expect(primary).toHaveAttribute("title", /Shared clone blocks count for each file/);
+    const adjusted = handle.page.locator(".metrics-strip .metric").filter({
+      has: handle.page.locator(".metric-label", { hasText: "after known clone repeats" }),
+    });
+    await expect(adjusted).toContainText("≈ 2.4 MB");
+    await expect(adjusted).toHaveAttribute("title", /not physical disk usage/);
+
     const card = handle.page.getByRole("region", { name: "Space macOS is holding back" });
     await expect(card).toBeVisible();
     await expect(card.locator(".storage-card-col").nth(1)).toContainText("4.2 MB in 2 cloned files");
-    await expect(card).toContainText("The 4.5 MB total counts 2.1 MB of it more than once");
+    await expect(card).toContainText("The 4.5 MB scanned file bytes count 2.1 MB of known full clones more than once");
   });
 
   test("Dev Artifacts marks node_modules trees cloned from each other", async ({ launch }, testInfo) => {
