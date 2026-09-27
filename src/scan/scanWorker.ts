@@ -23,7 +23,7 @@ import {
   sidecarFromAcc,
   writeDevArtifactSidecar,
 } from "../shared/devArtifactSidecar";
-import { loadScanPrunePlan, skipReason } from "../shared/scanPrune";
+import { isICloudDrivePath, loadScanPrunePlan, skipReason } from "../shared/scanPrune";
 
 /**
  * Parsed baseline state used by the Phase-1 smart-rescan optimization. For
@@ -193,7 +193,7 @@ export async function runScan(
   let inheritedDirs = 0;
   if (input.baselineIndex && existsSync(input.baselineIndex)) {
     try {
-      baseline = await loadBaseline(input.baselineIndex);
+      baseline = await loadBaseline(input.baselineIndex, prunePlan.pruneICloudDrive);
     } catch {
       baseline = null;
     }
@@ -688,7 +688,7 @@ function rollupExtension(
  * skip optimization (it's not available until a v0.2.5+ scan writes the
  * new format, which happens automatically on the next scan).
  */
-async function loadBaseline(filePath: string): Promise<Baseline> {
+export async function loadBaseline(filePath: string, pruneICloudDrive = false): Promise<Baseline> {
   const dirMtimes = new Map<string, number>();
   const filesByParent = new Map<string, BaselineFileRecord[]>();
   let extraLinks = 0;
@@ -711,6 +711,9 @@ async function loadBaseline(filePath: string): Promise<Baseline> {
     if (!rec || typeof rec.p !== "string") continue;
 
     const normalized = Path.resolve(rec.p);
+    // Older indexes can contain Mobile Documents records. Drop them before
+    // an unchanged ancestor inherits the subtree into the new scan.
+    if (pruneICloudDrive && isICloudDrivePath(normalized)) continue;
     if (rec.t === "d") {
       if (typeof rec.m === "number") {
         dirMtimes.set(normalized, rec.m);

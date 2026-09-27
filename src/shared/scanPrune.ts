@@ -78,21 +78,17 @@ function isAtOrUnder(root: string, path: string): boolean {
   return path === root || isUnder(root, path);
 }
 
+const MAC_MOBILE_DOCUMENTS_PATH = /^\/(?:System\/Volumes\/Data\/)?Users\/[^/]+\/Library\/Mobile Documents(?=\/|$)/i;
+
 /** The part below a user's Mobile Documents directory, through either Data-volume name. */
 function mobileDocumentsSuffix(path: string): string | null {
-  const belowUsers = path.startsWith("/Users/")
-    ? path.slice("/Users/".length)
-    : path.startsWith("/System/Volumes/Data/Users/")
-      ? path.slice("/System/Volumes/Data/Users/".length)
-      : null;
-  if (belowUsers === null) return null;
-  const slash = belowUsers.indexOf("/");
-  if (slash <= 0) return null;
-  const belowHome = belowUsers.slice(slash + 1);
-  const prefix = "Library/Mobile Documents";
-  if (!belowHome.startsWith(prefix)) return null;
-  const suffix = belowHome.slice(prefix.length);
-  return suffix === "" || suffix.startsWith("/") ? suffix : null;
+  const match = MAC_MOBILE_DOCUMENTS_PATH.exec(path);
+  return match ? path.slice(match[0].length) : null;
+}
+
+/** Whether an old index record belongs to a directory excluded by the macOS iCloud rule. */
+export function isICloudDrivePath(path: string): boolean {
+  return mobileDocumentsSuffix(path) !== null;
 }
 
 /** Each line of /usr/share/firmlinks is `<path on />\t<path relative to the Data volume>`. */

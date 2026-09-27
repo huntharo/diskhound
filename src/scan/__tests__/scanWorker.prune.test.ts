@@ -1,12 +1,12 @@
 import * as FS from "node:fs";
 import * as OS from "node:os";
 import * as Path from "node:path";
-import { gunzipSync } from "node:zlib";
+import { gunzipSync, gzipSync } from "node:zlib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ScanSnapshot } from "../../shared/contracts";
 import type { ScanPrunePlan } from "../../shared/scanPrune";
-import { runScan } from "../scanWorker";
+import { inheritSubtree, loadBaseline, runScan } from "../scanWorker";
 
 const prune = vi.hoisted(() => ({ plan: null as ScanPrunePlan | null }));
 
@@ -39,6 +39,32 @@ function write(rel: string, bytes: number): string {
 const occupancy = (path: string) => FS.statSync(path).blocks * 512;
 
 describe("scanWorker prune plan", () => {
+  it("removes pre-change iCloud records before an unchanged ancestor is inherited", async () => {
+    const indexPath = at("old-index.ndjson.gz");
+    const root = "/Users/me";
+    const cloud = `${root}/Library/Mobile Documents`;
+    const kept = `${root}/Documents/keep.txt`;
+    const lines = [
+      { p: root, t: "d", m: 1 },
+      { p: `${root}/Library`, t: "d", m: 1 },
+      { p: cloud, t: "d", m: 1 },
+      { p: `${cloud}/com~apple~CloudDocs`, t: "d", m: 1 },
+      { p: `${cloud}/com~apple~CloudDocs/old.txt`, s: 4096, m: 1 },
+      { p: `${root}/Documents`, t: "d", m: 1 },
+      { p: kept, s: 2048, m: 1 },
+    ];
+    FS.writeFileSync(indexPath, gzipSync(lines.map((line) => JSON.stringify(line)).join("\n") + "\n"));
+
+    const baseline = await loadBaseline(indexPath, true);
+    expect(inheritSubtree(root, baseline).map((file) => file.path)).toEqual([kept]);
+    expect(baseline.dirMtimes.has(cloud)).toBe(false);
+    expect(baseline.dirMtimes.has(`${cloud}/com~apple~CloudDocs`)).toBe(false);
+    expect(baseline.dirMtimes.has(`${root}/Documents`)).toBe(true);
+
+    const explicit = await loadBaseline(indexPath, false);
+    expect(inheritSubtree(root, explicit).map((file) => file.path)).toContain(`${cloud}/com~apple~CloudDocs/old.txt`);
+  });
+
   // A small `/` on macOS: Users is the firmlinked name and Data/Users its
   // twin (a copy stands in for the firmlink), Data/.Spotlight-V100 is
   // Data-only, and Volumes/USB is another disk. bind stands in for a Linux

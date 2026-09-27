@@ -188,15 +188,20 @@ fn is_at_or_under(root: &str, path: &str) -> bool {
 /// The part below a user's Mobile Documents directory, for either name
 /// of the macOS Data volume. `Some("")` denotes the directory itself.
 fn mobile_documents_suffix(path: &str) -> Option<&str> {
-    let below_users = path
-        .strip_prefix("/Users/")
-        .or_else(|| path.strip_prefix("/System/Volumes/Data/Users/"))?;
+    let below_users = strip_prefix_ascii_case(path, "/Users/")
+        .or_else(|| strip_prefix_ascii_case(path, "/System/Volumes/Data/Users/"))?;
     let (user, below_home) = below_users.split_once('/')?;
     if user.is_empty() {
         return None;
     }
-    let suffix = below_home.strip_prefix("Library/Mobile Documents")?;
+    let suffix = strip_prefix_ascii_case(below_home, "Library/Mobile Documents")?;
     (suffix.is_empty() || suffix.starts_with('/')).then_some(suffix)
+}
+
+fn strip_prefix_ascii_case<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = path.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then_some(&path[prefix.len()..])
 }
 
 // ── macOS: firmlinks and the startup volume group ─────────────────────
@@ -846,6 +851,38 @@ mod tests {
         );
         let plan = mac_prune_plan(data_icloud, &mounts(), &firmlinks());
         assert_eq!(plan.skip_reason(data_icloud, true), None);
+    }
+
+    #[test]
+    fn mac_icloud_paths_match_case_insensitive_volume_spellings() {
+        let plan = mac_prune_plan("/users/me", &mounts(), &firmlinks());
+        assert_eq!(
+            plan.skip_reason("/users/me/library/mobile documents", true),
+            Some(Prune::ICloudDrive)
+        );
+        assert_eq!(
+            plan.skip_reason(
+                "/system/volumes/data/users/me/LIBRARY/Mobile Documents",
+                true
+            ),
+            Some(Prune::ICloudDrive)
+        );
+        let explicit = mac_prune_plan(
+            "/users/me/library/mobile documents",
+            &mounts(),
+            &firmlinks(),
+        );
+        assert_eq!(
+            explicit.skip_reason("/users/me/library/mobile documents", true),
+            None
+        );
+        assert_eq!(
+            explicit.skip_reason(
+                "/users/me/library/mobile documents/com~apple~CloudDocs",
+                true
+            ),
+            None
+        );
     }
 
     #[test]
