@@ -54,7 +54,21 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - uses: dtolnay/rust-toolchain@stable
+        if: runner.os == 'Windows'
+
+      - uses: Swatinem/rust-cache@v2
+        if: runner.os == 'Windows'
+        with:
+          workspaces: native/diskhound-native-scanner
+
+      - name: Build native scanner for USN integration
+        if: runner.os == 'Windows'
+        run: bun run build:native:debug
+
       - name: Test
+        env:
+          DISKHOUND_REQUIRE_USN_TESTS: ${{ runner.os == 'Windows' && '1' || '0' }}
         run: bun run test
 
   rust-check:
@@ -79,6 +93,8 @@ jobs:
       # OS-gated: the MFT and USN journal tests only build on Windows,
       # the mountinfo tests only on Linux.
       - name: Cargo test
+        env:
+          DISKHOUND_REQUIRE_USN_TESTS: ${{ runner.os == 'Windows' && '1' || '0' }}
         run: cargo test --manifest-path native/diskhound-native-scanner/Cargo.toml
 
       - name: Cargo build (release)

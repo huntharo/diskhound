@@ -29,6 +29,7 @@
     "start": "bun run scripts/start-electron.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:usn:windows": "bun run build:native:debug && vitest run src/__tests__/usnMonitor.windows.test.ts",
     "build:e2e": "node node_modules/electron/install.js && bun run build:native:debug && bun run build:renderer && bun run build:electron",
     "test:e2e": "bun run build:e2e && playwright test",
     "dist": "bun run build:native && bun run build && electron-builder --config electron-builder.yml"
