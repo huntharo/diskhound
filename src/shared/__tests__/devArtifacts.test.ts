@@ -1,3 +1,4 @@
+import ambiguousNames from "../../test/fixtures/devArtifactAmbiguousSegments.json";
 import cases from "../../test/fixtures/devArtifactClassification.json";
 import { describe, expect, it } from "vitest";
 
@@ -42,6 +43,7 @@ describe("classifyArtifactPath", () => {
             // UNC paths are normalized to backslashes by both classifiers.
             const root = prefix.startsWith("//") ? expectedRoot?.replaceAll("/", "\\") : expectedRoot;
             expect(classifyArtifactPath(path), path).toEqual(root ? { root, kind: fixture.kind } : null);
+            if (root) expect(classifyArtifactPath(root), root).toEqual({ root, kind: fixture.kind });
           }
         }
       }
@@ -54,7 +56,7 @@ describe("classifyArtifactPath", () => {
       seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
       return seed % n;
     };
-    const names = ["target", "build", "dist", "out", "debug", "release", "doc", "classes", "scala-source", "scala-3x", "deps-old"];
+    const names = ambiguousNames;
     for (let trial = 0; trial < 2_000; trial++) {
       const parts = Array.from({ length: 1 + random(24) }, () => names[random(names.length)]!);
       const path = `/mono/${parts.join("/")}/notes.txt`;
@@ -136,10 +138,8 @@ describe("classifyArtifactPath", () => {
     for (const name of ARTIFACT_SEGMENT_NAMES) {
       expect(name, name).toMatch(/^[\x21-\x7e]+$/);
       expect(name.toLowerCase(), name).toBe(name);
-      const inside = classifyArtifactPath(`/p/${name}/debug/deps/x`) ?? classifyArtifactPath(`/p/${name}/registry/x`)
-        ?? classifyArtifactPath(`/p/${name}/mod/x`) ?? classifyArtifactPath(`/p/${name}/ccache/x`)
-        ?? classifyArtifactPath(`/p/${name}/store/x`)
-        ?? classifyArtifactPath(`/p/${name}/providers/x`) ?? classifyArtifactPath(`/p/${name}/plugin-cache/x`);
+      const fixture = cases.find((c) => c.kind && c.path.toLowerCase().split("/").includes(name));
+      const inside = fixture ? classifyArtifactPath(fixture.path) : null;
       expect(inside, name).not.toBeNull();
     }
   });

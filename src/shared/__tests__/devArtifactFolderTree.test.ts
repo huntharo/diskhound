@@ -118,6 +118,24 @@ describe("sidecarFromFolderTreeFile", () => {
     }
   });
 
+  it("keeps five-segment Python roots and cache children, not whole tool homes", async () => {
+    const after = await expectSameAsLegacy([
+      line("/mono", [
+        ["/mono/.tox", 1000, 10], ["/mono/.yarn", 1000, 10], ["/mono/.gradle", 1000, 10],
+        ["/mono/.tox/py312/lib/python3.12/site-packages", 300, 3],
+        ["/mono/.yarn/cache", 200, 2], ["/mono/.yarn/patches", 100, 1],
+        ["/mono/.gradle/caches", 400, 4], ["/mono/.gradle/init.d", 100, 1],
+        ["/mono/obj/Release/net8.0", 500, 5], ["/mono/obj/models", 100, 1],
+      ]),
+    ].join("\n"), "/mono");
+    expect(after.roots.map((r) => [r.path, r.kind, r.size])).toEqual([
+      ["/mono/obj/Release/net8.0", "dotnet", 500],
+      ["/mono/.gradle/caches", "jvm", 400],
+      ["/mono/.tox/py312/lib/python3.12/site-packages", "python", 300],
+      ["/mono/.yarn/cache", "package-cache", 200],
+    ]);
+  });
+
   it("finds pnpm's global store from its folder row", async () => {
     const treePath = await writeTree([
       `${line("/Users/me/Library/pnpm", [["/Users/me/Library/pnpm/store", 30_000_000, 900]])}\n`,
@@ -170,7 +188,7 @@ describe("sidecarFromFolderTreeFile", () => {
         ["C:\\src\\half\ud800\\dist", 40, 4],
       ], [["cargo.TOML", 1, 1]]),
       line("C:\\src\\tab\there", [], [["pyproject.toml", 1, 1]]),
-      // Non-ASCII, including a Kelvin sign that lowercases to "k".
+      // Unicode paths are supported; lookalike reserved names are not.
       line("C:\\Users\\zoë\\app", [
         ["C:\\Users\\zoë\\app\\node_modules", 80, 8],
         ["C:\\Users\\zoë\\app\\.wor\u212Atrees", 30, 3],
@@ -178,7 +196,7 @@ describe("sidecarFromFolderTreeFile", () => {
         ["C:\\Users\\zoë\\app\\ñ\\out", 9, 1],
       ], [["PAC\u212AAGE.JSON", 1, 1]]),
       line("C:\\Users\\me\\.cargo", [["C:\\Users\\me\\.cargo\\registry", 500, 50], ["C:\\Users\\me\\.cargo\\bin", 5, 1]]),
-      line("C:\\Users\\me\\go\\pkg", [["C:\\Users\\me\\go\\pkg\\mod", 300, 30]]),
+      line("C:\\Users\\me\\go\\pkg", [["C:\\Users\\me\\go\\pkg\\mod\\cache\\download", 300, 30]]),
       line("C:\\Users\\me\\.cache", [["C:\\Users\\me\\.cache\\ccache", 200, 20], ["C:\\Users\\me\\.cache\\pip", 10, 1]]),
       line("C:\\Windows\\Temp", [["C:\\Windows\\Temp\\DiagOutputDir", 700, 70]]),
       line("C:\\src\\lib", [["C:\\src\\lib\\constructor", 90, 9], ["C:\\src\\lib\\toString", 80, 8]]),
@@ -186,13 +204,11 @@ describe("sidecarFromFolderTreeFile", () => {
     expect(after.roots.map((r) => r.path).sort()).toEqual([
       "C:\\Users\\me\\.cache\\ccache",
       "C:\\Users\\me\\.cargo\\registry",
-      "C:\\Users\\me\\go\\pkg\\mod",
-      "C:\\Users\\zoë\\app\\.wor\u212Atrees",
+      "C:\\Users\\me\\go\\pkg\\mod\\cache\\download",
       "C:\\Users\\zoë\\app\\node_modules",
       "C:\\Windows\\Temp\\DiagOutputDir",
       "C:\\src\\app\\node_modules",
       "C:\\src\\bell\u0007\\__pycache__",
-      "C:\\src\\tab\there\\.venv",
       "C:\\src\\we\"ird\\node_modules",
     ]);
     expect(after.roots.find((r) => r.path === "C:\\src\\app\\node_modules")?.size).toBe(420);
@@ -200,7 +216,6 @@ describe("sidecarFromFolderTreeFile", () => {
       "C:\\src\\app",
       "C:\\src\\we\"ird",
       "C:\\src\\tab\there",
-      "C:\\Users\\zoë\\app",
     ]);
   });
 
@@ -348,6 +363,8 @@ function syntheticTree(projects: number, packages: number, plain: number): strin
     lines.push(line(`${app}/target`, [[`${app}/target/debug`, 1_500, 15], [`${app}/target/release`, 400, 4]]));
     lines.push(line(`${app}/target/debug`, [[`${app}/target/debug/deps`, 1_500, 15]]));
     lines.push(line(`${app}/target/release`, [[`${app}/target/release/incremental`, 400, 4]]));
+    lines.push(line(`${app}/.tox/py312/lib/python3.12`, [[`${app}/.tox/py312/lib/python3.12/site-packages`, 200, 2]]));
+    lines.push(line(`${app}/go/pkg/mod/example.com/team/module`, [[`${app}/go/pkg/mod/example.com/team/module/v2@v2.0.0`, 100, 1]]));
     lines.push(line(
       `${app}/node_modules`,
       Array.from({ length: packages }, (_, j): Row => [`${app}/node_modules/pkg${j}`, 5, 2]),
@@ -374,14 +391,14 @@ describe("sidecarFromFolderTreeFile memory", () => {
     }
     for (const { plain, sidecar, stats } of runs) {
       expect(stats.rows, `rows at ${plain}`).toBeGreaterThan(plain * 4);
-      // node_modules and the two evidenced Cargo subtrees per app.
-      expect(stats.retainedRoots, `roots at ${plain}`).toBe(30);
+      // node_modules, two Cargo subtrees, Python packages and a Go module per app.
+      expect(stats.retainedRoots, `roots at ${plain}`).toBe(50);
       // The app folders. The 500 package.json folders in node_modules can't own a root.
       expect(stats.retainedProjects, `projects at ${plain}`).toBe(10);
-      // Four-segment prefilter: 6 candidate roots + 50 packages per app.
-      expect(stats.decodedRows, `decoded at ${plain}`).toBe(560);
+      // Six-segment prefilter: 8 candidate roots + 50 packages per app.
+      expect(stats.decodedRows, `decoded at ${plain}`).toBe(580);
       expect(stats.parsedLines).toBe(0);
-      expect(sidecar!.roots).toHaveLength(30);
+      expect(sidecar!.roots).toHaveLength(50);
     }
   });
 });
@@ -404,6 +421,6 @@ describe("sidecarFromFolderTreeFile scaling", () => {
       process.stdout.write(`dev artifacts classify: ${small} -> ${large} steps (${(large / small).toFixed(1)}x)\n`);
     }
     expect(large / small).toBeLessThanOrEqual(MAX_GROWTH);
-    expect(large).toBeLessThanOrEqual(120_000);
+    expect(large).toBeLessThanOrEqual(160_000);
   });
 });

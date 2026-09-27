@@ -707,8 +707,8 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
   const classificationNotice = report?.classificationNeedsFullScan ? (
     <div className="dev-sharing-note" role="status">
       <strong>Build artifact totals are incomplete.</strong>{" "}
-      Some folders in this saved scan were classified by name alone and are now excluded.
-      Missing Rust or JVM rows do not mean those build outputs are absent.
+      Older rules included ambiguous folders or whole tool directories. Those entries are now excluded.
+      Missing categories do not mean their output or caches are absent.
       Run a full scan to classify them again; “Rescan trees” only refreshes the listed folders.
       {scanButton}
     </div>

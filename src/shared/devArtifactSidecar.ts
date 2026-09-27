@@ -83,7 +83,7 @@ export interface DevArtifactsRescanProgress {
 }
 
 export function isProjectMarkerName(fileName: string): boolean {
-  return PROJECT_MARKERS.has(fileName.toLowerCase());
+  return /^[\x00-\x7f]*$/.test(fileName) && PROJECT_MARKERS.has(fileName.toLowerCase());
 }
 
 export function createDevAcc(): {
@@ -215,10 +215,9 @@ function nearestProject(artifactPath: string, projects: Map<string, string>): st
   }
 }
 
-// Old sidecars can carry guesses made from target/build/dist/out alone.
+// Old sidecars can include name-only guesses and whole tool homes.
 // Do not keep displaying or refreshing those guesses after rules change.
 function keepArtifact(rec: DevArtifactRootRec): boolean {
-  if (rec.kind !== "rust-target" && rec.kind !== "js-build") return true;
   const match = classifyArtifactPath(rec.path);
   return match?.kind === rec.kind && dirsEqual(match.root, rec.path);
 }

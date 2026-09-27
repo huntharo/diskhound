@@ -359,14 +359,7 @@ function cleanupCacheRoot(filePath: string): string | null {
       if (last && last !== "dist" && last !== "build" && last !== "out") return classified.root;
     }
   }
-  const parts = filePath.split(/[\\/]+/).filter(Boolean);
-  const idx = parts.findIndex((seg) => seg.toLowerCase() === "obj");
-  if (idx < 0) return null;
-  const sep = filePath.includes("\\") ? "\\" : "/";
-  if (/^[A-Za-z]:/.test(filePath)) return parts.slice(0, idx + 1).join(sep);
-  if (filePath.startsWith("/")) return "/" + parts.slice(0, idx + 1).join("/");
-  if (filePath.startsWith("\\\\")) return "\\\\" + parts.slice(0, idx + 1).join("\\");
-  return parts.slice(0, idx + 1).join(sep);
+  return null;
 }
 
 function emptyBucket(): { paths: string[]; size: number; files: number } {
