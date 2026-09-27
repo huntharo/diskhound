@@ -274,7 +274,6 @@ button, input, select, textarea { font: inherit; }
   outline: 1px solid var(--border-focus);
   outline-offset: -1px;
 }
-.file-row.focused .file-actions { opacity: 1; }
 .file-list-scroll:focus { outline: none; }
 
 /* ── Disclosure chevron (Disclosure.tsx) ──────
@@ -2894,10 +2893,10 @@ button, input, select, textarea { font: inherit; }
 .bulk-btn.danger { border-color: rgba(239,68,68,0.15); color: var(--red-dim); }
 .bulk-btn.danger:hover { background: var(--red-glow); color: var(--red); }
 
-/* Column header row */
+/* Column header row. Same tracks as .file-row. */
 .file-col-header {
   display: grid;
-  grid-template-columns: 28px 90px 18px 1fr 80px 64px auto;
+  grid-template-columns: 28px 90px 18px 1fr 80px 64px;
   align-items: center;
   gap: 8px;
   padding: 0 12px;
@@ -2924,7 +2923,6 @@ button, input, select, textarea { font: inherit; }
 }
 .file-col-btn:hover { color: var(--text-secondary); }
 .file-col-btn.active { color: var(--amber); }
-.file-actions-hdr { width: 1px; }
 
 .file-list-scroll {
   overflow-y: auto;
@@ -2933,15 +2931,19 @@ button, input, select, textarea { font: inherit; }
 
 .file-row {
   display: grid;
-  grid-template-columns: 28px 90px 18px 1fr 80px 64px auto;
+  grid-template-columns: 28px 90px 18px 1fr 80px 64px;
   align-items: center;
   gap: 8px;
   padding: 6px 12px;
   border-bottom: 1px solid rgba(255,255,255,0.02);
   transition: background 0.1s;
+  --hover-actions-bg: linear-gradient(var(--bg-row-hover), var(--bg-row-hover)), var(--bg);
 }
 .file-row:hover { background: var(--bg-row-hover); }
-.file-row.selected { background: var(--bg-row-selected); }
+.file-row.selected {
+  background: var(--bg-row-selected);
+  --hover-actions-bg: linear-gradient(var(--bg-row-selected), var(--bg-row-selected)), var(--bg);
+}
 .file-row.deleted,
 .duplicate-file-row.deleted,
 .changes-row.deleted,
@@ -3078,13 +3080,40 @@ button, input, select, textarea { font: inherit; }
   text-align: right;
 }
 
-.file-actions {
+/* ── Hover actions ──
+ * Row buttons that show only while the row is hovered or has keyboard
+ * focus (Largest Files, Duplicates, Changes). They float over the end
+ * of the row's name or path instead of holding a column of their own,
+ * which cut every name short even while the buttons were hidden. Each
+ * row sets --hover-actions-bg to its own background in that state,
+ * layered down to the opaque page, so the text under the buttons
+ * doesn't show through, and the mask fades it in from the left. The
+ * overlay spans the row's full height; the name and path are two lines
+ * and the buttons are one. */
+.hover-actions {
   display: flex;
+  align-items: center;
   gap: 4px;
+  padding-left: 24px;
+  background: var(--hover-actions-bg);
+  mask-image: linear-gradient(90deg, transparent, #000 24px);
   opacity: 0;
   transition: opacity 0.1s;
 }
-.file-row:hover .file-actions { opacity: 1; }
+
+/* Over the end of the name column. Both are placed in its cell: an
+ * auto-placed item skips an occupied cell, so the name would move right. */
+.file-row > .file-info,
+.file-actions {
+  grid-area: 1 / 4;
+}
+.file-actions {
+  justify-self: end;
+  align-self: stretch;
+}
+.file-row:is(:hover, .focused, :has(:focus-visible)) .file-actions { opacity: 1; }
+/* Every action is disabled on a deleted file; don't cover its name. */
+.file-row.deleted .file-actions { display: none; }
 
 .action-btn {
   height: 22px;
@@ -6094,26 +6123,17 @@ button, input, select, textarea { font: inherit; }
   color: var(--blue);
   font-weight: 600;
 }
-/* The actions float over the end of the path while the row is hovered,
- * so hidden buttons don't cut every path ~250px short. The background
- * repaints the hovered row's layers (page, group card, hover tint) so the
- * path doesn't show through, and the mask fades it in from the left. */
+/* A .hover-actions overlay at the row's end, which is the end of the
+ * path. The group card's --bg-row sits between the row and the page. */
 .duplicate-file-actions {
   position: absolute;
   top: 0;
   right: 12px;
   bottom: 0;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding-left: 24px;
-  background:
+  --hover-actions-bg:
     linear-gradient(var(--bg-row-hover), var(--bg-row-hover)),
     linear-gradient(var(--bg-row), var(--bg-row)),
     var(--bg);
-  mask-image: linear-gradient(90deg, transparent, #000 24px);
-  opacity: 0;
-  transition: opacity 0.1s;
 }
 .duplicate-file-row:hover .duplicate-file-actions,
 .duplicate-file-row:has(:focus-visible) .duplicate-file-actions { opacity: 1; }
@@ -6800,23 +6820,34 @@ button, input, select, textarea { font: inherit; }
   background: color-mix(in srgb, var(--bg-row) 80%, var(--red) 20%);
 }
 
+/* The sizes track is fixed so the delta column lines up from row to
+ * row; a directory's "(+N files)" wraps under its sizes. */
 .changes-row {
   display: grid;
-  grid-template-columns: 72px 18px 1fr 100px auto auto;
+  grid-template-columns: 72px 18px 1fr 100px 140px;
   align-items: center;
   gap: 10px;
   padding: 7px 14px;
   border-bottom: 1px solid rgba(255,255,255,0.02);
   transition: background 0.1s;
+  --hover-actions-bg: linear-gradient(var(--bg-row-hover), var(--bg-row-hover)), var(--bg);
 }
-.changes-row:hover { background: var(--bg-row-hover); }
+.changes-row:hover,
+.changes-row:has(:focus-visible) { background: var(--bg-row-hover); }
+/* A .hover-actions overlay over the end of the name and path column.
+ * Both are placed in its cell: an auto-placed item skips an occupied
+ * cell, so the name would move right. */
+.changes-row > .changes-row-info,
 .changes-row-actions {
-  display: flex;
-  gap: 4px;
-  opacity: 0;
-  transition: opacity 0.1s;
+  grid-area: 1 / 3;
 }
-.changes-row:hover .changes-row-actions { opacity: 1; }
+.changes-row-actions {
+  justify-self: end;
+  align-self: stretch;
+}
+.changes-row:is(:hover, :has(:focus-visible)) .changes-row-actions { opacity: 1; }
+/* Every action is disabled on a deleted file; don't cover its name. */
+.changes-row.deleted .changes-row-actions { display: none; }
 
 .changes-row-badge {
   font-family: var(--font-mono);
@@ -6890,8 +6921,9 @@ button, input, select, textarea { font: inherit; }
   font-size: 11px;
   color: var(--text-secondary);
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 4px;
+  gap: 0 4px;
   white-space: nowrap;
 }
 .changes-row-prev { color: var(--text-muted); }
@@ -7430,7 +7462,9 @@ button, input, select, textarea { font: inherit; }
   .search-bar::after {
     display: none;
   }
-  .file-row { grid-template-columns: 28px 80px 18px 1fr 60px auto; }
+  .file-col-header,
+  .file-row { grid-template-columns: 28px 80px 18px 1fr 60px; }
+  .file-col-header [data-field="age"],
   .file-age { display: none; }
   .cleanup-grid { grid-template-columns: 1fr; }
   .picker-card { max-width: 100%; padding: 20px; }

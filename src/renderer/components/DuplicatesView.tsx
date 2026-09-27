@@ -886,7 +886,7 @@ function GroupCard({ group, isExpanded, busy, confirmDelete, selectedPaths, find
                       {protectedBy && <span className="protected-path-badge" title={`Protected by ${protectedBy}`}>Protected</span>}
                     </span>
                   </div>
-                  <div className="duplicate-file-actions">
+                  <div className="duplicate-file-actions hover-actions">
                     <button className="action-btn" disabled={unavailableDisabled} onClick={() => onReveal(file.path)} title={deletedTitle}>Reveal</button>
                     <button className="action-btn" disabled={unavailableDisabled} onClick={() => onOpen(file.path)} title={deletedTitle}>Open</button>
                     <button className="action-btn warn" disabled={actionDisabled} onClick={() => onTrash(file.path)} title={deletedTitle ?? (protectedBy ? `Protected by ${protectedBy}` : undefined)}>Trash</button>
