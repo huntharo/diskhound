@@ -203,6 +203,7 @@ describe("sidecarFromFolderTreeFile", () => {
     ].join("\n") + "\n", "C:\\");
     expect(after.roots.map((r) => r.path).sort()).toEqual([
       "C:\\Users\\me\\.cache\\ccache",
+      "C:\\Users\\me\\.cache\\pip",
       "C:\\Users\\me\\.cargo\\registry",
       "C:\\Users\\me\\go\\pkg\\mod\\cache\\download",
       "C:\\Users\\zoë\\app\\node_modules",
@@ -363,6 +364,9 @@ function syntheticTree(projects: number, packages: number, plain: number): strin
     lines.push(line(`${app}/target`, [[`${app}/target/debug`, 1_500, 15], [`${app}/target/release`, 400, 4]]));
     lines.push(line(`${app}/target/debug`, [[`${app}/target/debug/deps`, 1_500, 15]]));
     lines.push(line(`${app}/target/release`, [[`${app}/target/release/incremental`, 400, 4]]));
+    lines.push(line(`${app}/target/aarch64-apple-darwin/release/build`, [[`${app}/target/aarch64-apple-darwin/release/build/crate-0123456789abcdef`, 300, 3]]));
+    lines.push(line(`${app}/Library/Caches`, [[`${app}/Library/Caches/electron`, 400, 4], [`${app}/Library/Caches/unknown`, 10, 1]]));
+    lines.push(line(`${app}/.local/share/NuGet`, [[`${app}/.local/share/NuGet/http-cache`, 500, 5]]));
     lines.push(line(`${app}/.tox/py312/lib/python3.12`, [[`${app}/.tox/py312/lib/python3.12/site-packages`, 200, 2]]));
     lines.push(line(`${app}/go/pkg/mod/example.com/team/module`, [[`${app}/go/pkg/mod/example.com/team/module/v2@v2.0.0`, 100, 1]]));
     lines.push(line(
@@ -391,14 +395,14 @@ describe("sidecarFromFolderTreeFile memory", () => {
     }
     for (const { plain, sidecar, stats } of runs) {
       expect(stats.rows, `rows at ${plain}`).toBeGreaterThan(plain * 4);
-      // node_modules, two Cargo subtrees, Python packages and a Go module per app.
-      expect(stats.retainedRoots, `roots at ${plain}`).toBe(50);
+      // Eight roots per app: dependencies, Cargo subtrees and tool caches.
+      expect(stats.retainedRoots, `roots at ${plain}`).toBe(80);
       // The app folders. The 500 package.json folders in node_modules can't own a root.
       expect(stats.retainedProjects, `projects at ${plain}`).toBe(10);
-      // Six-segment prefilter: 8 candidate roots + 50 packages per app.
-      expect(stats.decodedRows, `decoded at ${plain}`).toBe(580);
+      // Six-segment prefilter: 12 candidate roots + 50 packages per app.
+      expect(stats.decodedRows, `decoded at ${plain}`).toBe(620);
       expect(stats.parsedLines).toBe(0);
-      expect(sidecar!.roots).toHaveLength(50);
+      expect(sidecar!.roots).toHaveLength(80);
     }
   });
 });
