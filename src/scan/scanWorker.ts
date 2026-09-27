@@ -93,9 +93,9 @@ export async function runScan(
 ): Promise<void> {
   const rootPath = Path.resolve(input.rootPath);
   // Other disks mounted below rootPath, second copies through a Linux bind
-  // mount, and on macOS the Data-volume twins of firmlinked folders. Checked
-  // before we descend so a scan of `/` does not walk `/mnt/windows`,
-  // `/Volumes/USB`, a bind's source, or the Data volume twice.
+  // mount, and on macOS the Data-volume twins of firmlinked folders and
+  // iCloud Drive. Check before descending so a scan of `/` does not walk
+  // `/mnt/windows`, `/Volumes/USB`, a bind's source, or the Data volume twice.
   const prunePlan = await loadScanPrunePlan(rootPath);
   const skippedMounts = new Set<string>();
   const scanOptions = input.options;

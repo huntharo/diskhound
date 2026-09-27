@@ -1557,7 +1557,7 @@ fn scan_generic_with_plan(
 
     // Pseudo filesystems, other disks mounted under the root, second
     // copies through a Linux bind mount, and on macOS the Data-volume twins
-    // of firmlinked folders. See walk_prune.
+    // of firmlinked folders and iCloud Drive. See walk_prune.
     if !plan.other_mounts.is_empty()
         || !plan.duplicate_mounts.is_empty()
         || !plan.firmlink_twins.is_empty()

@@ -53,6 +53,7 @@ describe("scanWorker prune plan", () => {
       otherMounts: new Set([at("root/Volumes/USB")]),
       duplicateMounts: new Set([at("root/bind")]),
       firmlinkTwins: new Set([at("root/Data/Users")]),
+      pruneICloudDrive: false,
     };
     const indexOutput = at("out/index.ndjson.gz");
 
@@ -77,7 +78,7 @@ describe("scanWorker prune plan", () => {
 
   it("leaves skippedMounts off when nothing was left out", async () => {
     write("root/a.txt", 10);
-    prune.plan = { otherMounts: new Set(), duplicateMounts: new Set(), firmlinkTwins: new Set() };
+    prune.plan = { otherMounts: new Set(), duplicateMounts: new Set(), firmlinkTwins: new Set(), pruneICloudDrive: false };
     let snapshot: ScanSnapshot | null = null;
     await runScan({ rootPath: at("root"), options: {} }, (message) => {
       if (message.type === "done") snapshot = message.snapshot;
