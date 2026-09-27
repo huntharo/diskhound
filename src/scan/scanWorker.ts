@@ -141,7 +141,7 @@ export async function runScan(
     extraHardlink = false,
     linkId?: string,
   ) => {
-    noteDevFile(devAcc, path, size, extraHardlink);
+    noteDevFile(devAcc, path, size, extraHardlink, mtime);
     if (!indexGzip) return;
     try {
       // Key order matches the native writer (h, then i) so the fast-path

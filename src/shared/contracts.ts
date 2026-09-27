@@ -665,6 +665,8 @@ export interface DevArtifactCloneInfo {
 }
 
 export interface DevArtifact {
+  /** Latest file modification, Unix milliseconds. Missing/null means incomplete or legacy data. */
+  latestFileMtimeMs?: number | null;
   path: string;
   kind: DevArtifactKind;
   projectPath: string | null;
