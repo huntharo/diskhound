@@ -35,9 +35,9 @@ import {
  *
  * So it streams raw bytes the way folderTreeSidecarQuery.ts does, and
  * holds only artifact roots and the project folders that could own one.
- * A folder row becomes a string only when its last or second-to-last
- * path segment is a name `classifyArtifactPath` can start a match on,
- * because an artifact root always ends at or one past that segment.
+ * A folder row becomes a string only when one of its last four
+ * path segments is a name `classifyArtifactPath` can start a match on,
+ * because an artifact root always ends at most three past that segment.
  * Every other row is skipped where it lies.
  */
 
@@ -115,13 +115,13 @@ function isSeparator(b: number): boolean {
 }
 
 /**
- * Whether the last or second-to-last segment of a raw path names an
+ * Whether one of the last four segments of a raw path names an
  * artifact. Only for paths whose sole escape is `\\`, where every
  * backslash byte is part of a separator.
  */
 function tailNamesArtifact(buf: Buffer, start: number, end: number): boolean {
   let i = end;
-  for (let segment = 0; segment < 2; segment++) {
+  for (let segment = 0; segment < 4; segment++) {
     while (i > start && isSeparator(buf[i - 1]!)) i -= 1;
     const segmentEnd = i;
     while (i > start && !isSeparator(buf[i - 1]!)) i -= 1;

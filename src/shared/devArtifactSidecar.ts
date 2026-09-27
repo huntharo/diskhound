@@ -44,6 +44,10 @@ export interface DevArtifactSidecar {
 export const PROJECT_MARKERS: ReadonlySet<string> = new Set([
   "package.json",
   "cargo.toml",
+  "build.sbt",
+  "pom.xml",
+  "build.gradle",
+  "build.gradle.kts",
   "go.mod",
   "pyproject.toml",
   "composer.json",
@@ -236,12 +240,13 @@ function nearestProject(artifactPath: string, projects: Map<string, string>): st
   }
 }
 
-function keepArtifact(root: string, projects: Map<string, string>): boolean {
-  const last = basenameOf(root).toLowerCase();
-  if (last === "dist" || last === "build" || last === "out") {
-    return nearestProject(root, projects) !== null;
-  }
-  return true;
+// Old sidecars can carry guesses made from target/build/dist/out alone.
+// Do not keep displaying or refreshing those guesses after rules change.
+function keepArtifact(rec: DevArtifactRootRec): boolean {
+  if (rec.kind === "worktree" && rec.worktree) return true;
+  if (rec.kind !== "rust-target" && rec.kind !== "js-build") return true;
+  const match = classifyArtifactPath(rec.path, true);
+  return match?.kind === rec.kind && dirsEqual(match.root, rec.path);
 }
 
 /** Keep the largest trees and only the projects that own them. */
@@ -337,7 +342,7 @@ export function reportFromSidecar(
   const projects = projectLookup(current.projects);
   const artifacts: DevArtifact[] = [];
   for (const rec of current.roots) {
-    if (!keepArtifact(rec.path, projects)) continue;
+    if (!keepArtifact(rec)) continue;
     // A repo belongs to its checkout, marker file or not, and a linked
     // worktree to the main checkout its `.git` file points at.
     const projectPath = rec.kind === "git-repo"
@@ -588,6 +593,7 @@ export function planRescanTargets(
   const seen = new Set<string>();
   const targets: string[] = [];
   for (const rec of sidecar.roots) {
+    if (!keepArtifact(rec)) continue;
     const key = pathKey(rec.path);
     if (seen.has(key)) continue;
     seen.add(key);
