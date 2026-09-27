@@ -1,3 +1,4 @@
+import { VM_SPACE_NOTE } from "../../shared/fileCategories";
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import type { PathActionResult, ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
@@ -19,7 +20,7 @@ import {
 import { useConfirmPermanentDelete, useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
 import {
-  FILTER_EXTS,
+  fileMatchesCategory,
   QUICK_FILTERS,
   RECENT_WINDOWS,
   type QuickFilter,
@@ -131,7 +132,7 @@ export function FileList({ snapshot, initialFilter }: Props) {
     }
     const filtered = snapshot.largestFiles
       .filter((f) => !dismissed.has(f.path))
-      .filter((f) => quickFilter === "all" || FILTER_EXTS[quickFilter as Exclude<QuickFilter, "all" | "recent">]?.has(f.extension))
+      .filter((f) => fileMatchesCategory(f, quickFilter))
       .filter((f) => !query || `${f.path} ${f.extension}`.toLowerCase().includes(query));
     return [...filtered].sort(compareFn(sortField, sortDir));
   }, [snapshot.largestFiles, filterText, quickFilter, recentWindow, dismissed, sortField, sortDir]);
@@ -424,6 +425,8 @@ export function FileList({ snapshot, initialFilter }: Props) {
           </div>
         )}
       </div>
+
+      {quickFilter === "virtual-machines" && <p className="file-category-note">{VM_SPACE_NOTE}</p>}
 
       <div className="bulk-bar">
         {/* "X selected (of N matching)" — the parenthetical tells

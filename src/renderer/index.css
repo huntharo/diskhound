@@ -2760,6 +2760,13 @@ button, input, select, textarea { font: inherit; }
   overflow: hidden;
 }
 
+.file-category-note {
+  margin: 8px 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .file-toolbar {
   display: flex;
   align-items: center;

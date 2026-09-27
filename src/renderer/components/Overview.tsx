@@ -1,3 +1,4 @@
+import { VM_SPACE_NOTE } from "../../shared/fileCategories";
 import { Fragment } from "preact";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 
@@ -26,8 +27,8 @@ import {
 } from "../lib/treemap";
 import {
   FILE_CATEGORY_CHIPS,
-  FILTER_EXTS,
   fileMatchesCategory,
+  filteredExtensionBuckets,
   type FileCategoryFilter,
 } from "../lib/fileQuickFilters";
 import { nativeApi } from "../nativeApi";
@@ -258,9 +259,10 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
 
   const visibleExtensions = useMemo(() => {
     if (typeFilter === "all") return snapshot.topExtensions;
-    const allowed = FILTER_EXTS[typeFilter];
-    return snapshot.topExtensions.filter((bucket) => allowed.has(bucket.extension.toLowerCase()));
-  }, [snapshot.topExtensions, typeFilter]);
+    // Path-aware categories cannot use global extension totals: camera
+    // photos and a VM disk can both be .raw. Summarize this filtered view.
+    return filteredExtensionBuckets(sourceFiles);
+  }, [snapshot.topExtensions, typeFilter, sourceFiles]);
 
   const treemapComposition = useMemo(
     () => buildTreemapComposition(sourceFiles),
@@ -464,13 +466,15 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
                   type="button"
                   className={`chip ${typeFilter === chip.id ? "active" : ""}`}
                   aria-pressed={typeFilter === chip.id}
-                  title={chip.id === "all" ? "Show every file type" : `Show only ${chip.label.toLowerCase()}`}
+                  title={chip.title ?? (chip.id === "all" ? "Show every file type" : `Show only ${chip.label.toLowerCase()}`)}
                   onClick={() => setTypeFilter(chip.id)}
                 >
                   {chip.label}
                 </button>
               ))}
             </div>
+
+            {typeFilter === "virtual-machines" && <p className="file-category-note">{VM_SPACE_NOTE}</p>}
 
             {condensedMode && (
               <div className={`treemap-featured ${dominantExpanded ? "expanded" : "collapsed"}`}>
