@@ -38,7 +38,7 @@ import type { DiskhoundAgentBackend, FolderChildren, NavigateRequest, TrashOutco
 import { ConsentBroker, type ConsentWindow } from "./consentBroker";
 import { isInside } from "./paths";
 import type { SkillCatalog } from "./skills";
-import { agentTrashRefusal, canonicalPath, outermostPaths } from "./trashGuard";
+import { agentTrashRefusal, canonicalPath, configuredTrashGuard, outermostPaths } from "./trashGuard";
 
 const NAVIGATE_VIEW_CHANNEL = "diskhound:navigate-view";
 const PATHS_TRASHED_CHANNEL = "diskhound:paths-trashed";
@@ -272,6 +272,7 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
       // Resolve each path to its on-disk spelling so the protected-folder
       // check (a string compare in main) sees what would actually move.
       const keep = await keepFolders();
+      const protectedFolder = await configuredTrashGuard(deps.getSettings().scanning.excludedFolderPaths);
       const refused: TrashOutcome["results"] = [];
       const offered: string[] = [];
       for (const requested of request.paths) {
@@ -282,7 +283,7 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
           refused.push({ path: requested, ok: false, message: "Nothing exists at this path.", sizeBytes: null });
           continue;
         }
-        const why = agentTrashRefusal(target, keep);
+        const why = protectedFolder(requested, target) ?? agentTrashRefusal(target, keep);
         if (why) refused.push({ path: target, ok: false, message: `Refused: ${why}.`, sizeBytes: null });
         else offered.push(target);
       }
@@ -327,8 +328,11 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
         return { confirmed: false, results: [] };
       }
       const results: TrashOutcome["results"] = [...refused];
+      // Settings may have changed while the confirmation was open.
+      const currentProtection = await configuredTrashGuard(deps.getSettings().scanning.excludedFolderPaths);
       for (const [index, target] of targets.entries()) {
-        const result = await deps.trashPath(target);
+        const blocked = currentProtection(target, target);
+        const result = blocked ? { ok: false, message: blocked } : await deps.trashPath(target);
         results.push({ path: target, ok: result.ok, message: result.message, sizeBytes: sizes[index] ?? null });
       }
       const moved = results.filter((r) => r.ok);

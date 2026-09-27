@@ -68,6 +68,8 @@ export interface DiskhoundAgentBackend {
 }
 
 export interface FolderChildren {
+  /** Visible directories before the backend caps its result. */
+  visibleDirCount: number;
   dirs: { path: string; size: number; fileCount: number }[];
   files: ScanFileRecord[];
   totalSize: number;

@@ -5,6 +5,7 @@ import type { ShapeOutput, ZodRawShapeCompat } from "@modelcontextprotocol/sdk/s
 import type { CallToolResult, GetPromptResult, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
+import { duplicateGroupReclaimable, entryReclaimable } from "../shared/duplicateReclaim";
 import type { AppView, ScanHistoryEntry, ScanSnapshot } from "../shared/contracts";
 import { MCP_SERVER_NAME, type McpAgentCapability } from "../shared/agentAccess";
 import { normPath } from "../shared/pathUtils";
@@ -378,7 +379,7 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
         path: folderPath,
         totalBytes: children.totalSize,
         total: bytesText(children.totalSize),
-        folderCount: folders.length,
+        folderCount: children.visibleDirCount,
         fileCount: files.length,
         folders: folders.slice(0, input.limit).map((dir) => ({
           path: dir.path,
@@ -397,7 +398,7 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
               modifiedAt: new Date(file.modifiedAt).toISOString(),
             }))
           : [],
-        truncated: folders.length > input.limit || (input.includeFiles && files.length > input.limit),
+        truncated: children.visibleDirCount > Math.min(input.limit, folders.length) || (input.includeFiles && files.length > input.limit),
         hiddenByProtectedFolders:
           children.hiddenExcludedCount > 0
             ? { count: children.hiddenExcludedCount, bytes: children.hiddenExcludedBytes, size: bytesText(children.hiddenExcludedBytes) }
@@ -405,7 +406,7 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
       };
       const top = value.folders.slice(0, 6).map((dir) => `${dir.name} ${dir.size}`).join(", ");
       const summary =
-        `${folderPath}: ${value.total} in ${folders.length} folders and ${files.length} files.` +
+        `${folderPath}: ${value.total} in ${value.folderCount} folders and ${files.length} files.` +
         (top ? `\nLargest: ${top}.` : "");
       return { value, summary, activity: `Listed ${folderPath} (${value.total})` };
     },
@@ -759,7 +760,7 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
       }
       const analysis = state.analysis;
       const groups = [...analysis.groups]
-        .map((group) => ({ group, wasted: group.size * Math.max(0, group.files.length - 1) }))
+        .map((group) => ({ group, wasted: duplicateGroupReclaimable(group) }))
         .sort((a, b) => b.wasted - a.wasted);
       const value = {
         rootPath: analysis.rootPath,
@@ -773,8 +774,14 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
           fileSizeBytes: group.size,
           fileSize: bytesText(group.size),
           copies: group.files.length,
+          reclaimableBytes: wasted,
           reclaimable: bytesText(wasted),
-          files: group.files.slice(0, 12).map((file) => ({ path: file.path, modifiedAt: new Date(file.modifiedAt).toISOString() })),
+          files: group.files.slice(0, 12).map((file) => ({
+            path: file.path,
+            modifiedAt: new Date(file.modifiedAt).toISOString(),
+            reclaimableBytes: entryReclaimable(file, group.size),
+            sharing: file.sharing ?? null,
+          })),
         })),
         truncated: groups.length > input.limit,
         note:

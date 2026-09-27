@@ -190,6 +190,7 @@ export class McpPolicyStore {
     const policy = this.read();
     const session = policy.sessions.find((candidate) => candidate.id === id);
     if (!session) throw new McpAccessError("invalid_input", "session does not exist");
+    if (session.revokedAt !== null) return publicSession(session);
     const timestamp = this.now().toISOString();
     session.revokedAt ??= timestamp;
     session.updatedAt = timestamp;
@@ -202,6 +203,7 @@ export class McpPolicyStore {
     const session = policy.sessions.find((candidate) => candidate.id === sessionId);
     if (!session) throw new McpAccessError("invalid_input", "session does not exist");
     if (!findRole(roleId)) throw new McpAccessError("invalid_input", "selected role does not exist");
+    if (session.roleId === roleId) return publicSession(session);
     session.roleId = roleId;
     session.updatedAt = this.now().toISOString();
     this.write(policy);

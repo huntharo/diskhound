@@ -746,3 +746,40 @@ describe("empty skill catalog", () => {
     expect((await client.listTools()).tools.map((tool) => tool.name)).toContain("diskhound_status");
   });
 });
+
+describe("scan completeness and shared storage", () => {
+  it("reports the backend's uncapped visible folder count", async () => {
+    const { client, backend } = await connect();
+    const children = await backend.folderChildren(ROOT, ROOT);
+    backend.folderChildren.mockResolvedValue({ ...children, visibleDirCount: 800,
+      dirs: Array.from({ length: 200 }, (_, i) => ({ path: `${ROOT}/dir-${i}`, size: i, fileCount: 1 })) });
+    const result = await call(client, "diskhound_list_folder", { path: ROOT, limit: 200 });
+    expect(structured(result)).toMatchObject({ folderCount: 800, truncated: true });
+    expect(structured(result).folders).toHaveLength(200);
+    expect(text(result)).toContain("800 folders");
+  });
+
+  it("ranks groups by reclaimable bytes and preserves per-file sharing facts", async () => {
+    const { client, backend } = await connect();
+    const files = (sharing?: "clone" | "hardlink", reclaimableBytes?: number) => [0, 1].map((i) => ({
+      path: `${ROOT}/${sharing ?? "ordinary"}-${i}`, name: `copy-${i}`, parentPath: ROOT,
+      modifiedAt: NOW, sharing, reclaimableBytes,
+    }));
+    backend.duplicates.mockReturnValue({ running: false, progress: null, analysis: {
+      rootPath: ROOT, analyzedAt: NOW, totalGroups: 4, totalDuplicateFiles: 8, totalWastedBytes: 120, filesWalked: 8, filesHashed: 8, elapsedMs: 10,
+      groups: [
+        { hash: "clone", size: 1000, reclaimableBytes: 0, files: files("clone", 0) },
+        { hash: "hardlink", size: 2000, reclaimableBytes: 0, files: files("hardlink", 0) },
+        { hash: "private", size: 1000, reclaimableBytes: 20, files: files("clone", 20) },
+        { hash: "legacy", size: 100, files: files() },
+      ],
+    } });
+    const result = structured(await call(client, "diskhound_duplicates"));
+    expect(result.reclaimableBytes).toBe(120);
+    expect(result.groups.map((group: { reclaimableBytes: number }) => group.reclaimableBytes)).toEqual([100, 20, 0, 0]);
+    expect(result.groups[0].files[0]).toMatchObject({ reclaimableBytes: 100, sharing: null });
+    expect(result.groups[1].files[0]).toMatchObject({ reclaimableBytes: 20, sharing: "clone" });
+    expect(result.groups[2].files[0]).toMatchObject({ reclaimableBytes: 0, sharing: "clone" });
+    expect(result.groups[3].files[0]).toMatchObject({ reclaimableBytes: 0, sharing: "hardlink" });
+  });
+});

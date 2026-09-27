@@ -1,4 +1,4 @@
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -136,4 +136,24 @@ test("an approval survives a restart, and Revoke locks the agent out", async ({ 
 
   expect(await mcpStatus(second, token)).toBe(401);
   await agent.close();
+});
+
+
+test("protected folders remain protected through symlinked ancestors", async ({ launch, scanTree }, testInfo) => {
+  const alias = join(scanTree.root, "alias");
+  symlinkSync(scanTree.root, alias, process.platform === "win32" ? "junction" : "dir");
+  const protectedPath = join(alias, "docs");
+  const handle = await launch({ settings: { agents: { enabled: true }, scanning: { excludedFolderPaths: [protectedPath] } } });
+  const trash = await stubTrash(handle, testInfo.outputPath("trash"));
+  await trash.answer("move");
+  const agent = await connectAgent(handle, await signIn(handle, { roleId: "builtin.operator" }));
+  try {
+    for (const path of [protectedPath, join(scanTree.root, "docs"), scanTree.root]) {
+      const result = await callTool(agent, "diskhound_move_to_trash", { paths: [path] });
+      expect(result.isError, resultText(result)).toBe(true);
+      expect(resultText(result)).toContain("Protected folder");
+    }
+    expect(await trash.prompts()).toHaveLength(0);
+    expect(existsSync(join(scanTree.root, "docs"))).toBe(true);
+  } finally { await agent.close(); }
 });

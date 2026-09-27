@@ -1,6 +1,8 @@
 import * as FS from "node:fs/promises";
 import * as Path from "node:path";
 
+import { findExcludedFolderActionBlocker } from "../shared/pathProtection";
+
 /**
  * Extra checks for paths an agent asks to move to the Trash. The user's
  * Protected Folders check compares strings, which was fine while paths
@@ -66,4 +68,16 @@ export function agentTrashRefusal(
 export function outermostPaths(paths: readonly string[], platform: NodeJS.Platform = process.platform): string[] {
   const unique = [...new Map(paths.map((path) => [key(path, platform), path])).values()];
   return unique.filter((path) => !unique.some((other) => other !== path && within(other, path, platform)));
+}
+
+/** Resolve protections once per batch, retaining lexical checks even for missing folders.
+ * Resolve the final symlink too: protecting an alias protects its contents. */
+export async function configuredTrashGuard(excluded: readonly string[]) {
+  const canonical = await Promise.all(excluded.map((folder) => FS.realpath(folder).catch(() => folder)));
+  return (requested: string, target: string): string | null => {
+    const block = findExcludedFolderActionBlocker(requested, excluded)
+      ?? findExcludedFolderActionBlocker(target, excluded)
+      ?? findExcludedFolderActionBlocker(target, canonical);
+    return block ? `Protected folder: this path ${block.reason === "inside" ? "is inside" : "contains"} excluded folder "${block.folder}".` : null;
+  };
 }

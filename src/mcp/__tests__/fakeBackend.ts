@@ -91,6 +91,7 @@ export const SNAPSHOT: ScanSnapshot = {
 };
 
 const EMPTY_CHILDREN: FolderChildren = {
+  visibleDirCount: 0,
   dirs: [],
   files: [],
   totalSize: 0,
@@ -102,6 +103,7 @@ const EMPTY_CHILDREN: FolderChildren = {
 /** A small folder tree under ROOT, keyed by parent path. */
 export const TREE: Record<string, FolderChildren> = {
   [ROOT]: {
+    visibleDirCount: 4,
     dirs: [
       { path: `${ROOT}/Developer`, size: 20 * GB, fileCount: 80_000 },
       { path: `${ROOT}/Library`, size: 40 * GB, fileCount: 30_000 },
@@ -115,6 +117,7 @@ export const TREE: Record<string, FolderChildren> = {
     hiddenExcludedBytes: 0,
   },
   [`${ROOT}/Developer`]: {
+    visibleDirCount: 2,
     dirs: [
       { path: `${ROOT}/Developer/app`, size: 18 * GB, fileCount: 79_000 },
       { path: `${ROOT}/Developer/scratch`, size: 2 * GB, fileCount: 1_000 },
@@ -126,6 +129,7 @@ export const TREE: Record<string, FolderChildren> = {
     hiddenExcludedBytes: 64 * MB,
   },
   [`${ROOT}/Downloads`]: {
+    visibleDirCount: 0,
     dirs: [],
     files: [ISO, file(`${ROOT}/Downloads/installer.dmg`, 400 * MB), file(`${ROOT}/Downloads/readme.pdf`, 2 * MB)],
     totalSize: 5 * GB,

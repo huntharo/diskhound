@@ -3219,6 +3219,7 @@ void (async () => {
       const history = getScanHistory(rootPath);
       const currentId = history[0]?.id;
       const empty = {
+        visibleDirCount: 0,
         dirs: [],
         files: [],
         totalSize: 0,
