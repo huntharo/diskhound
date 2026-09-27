@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { expectIoBudget, measureFsIo } from "../../test/ioBudget";
 import { HotCpuProfiler } from "../hotCpuProfiler";
+import { createDiagnosticsShutdown } from "../diagnosticsShutdown";
 import {
   crashLogLike,
   deferred,
@@ -145,5 +146,36 @@ describe("hot-CPU profiler disk writes", () => {
       note: "an hour at 100% main-thread CPU after the launch's last allowed capture: 0 writes; the profiler has stopped sampling and recording",
       io,
     });
+  });
+
+  it("finishes an active capture and its manifest before releasing quit", async () => {
+    const { cpu, session, profiler, measure } = await launch();
+    await vi.advanceTimersByTimeAsync(116_000);
+    cpu.percent = 95;
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(profiler.status().state).toBe("profiling");
+    const resumeQuit = vi.fn();
+    const shutdown = createDiagnosticsShutdown({
+      stop: async () => {
+        await profiler.stop("app-quit");
+        session.flushEventsSync();
+      },
+      resumeQuit,
+      warn: () => { throw new Error("unexpected shutdown failure"); },
+    });
+    const { io } = await measure(async () => {
+      shutdown.beforeQuit({ preventDefault: vi.fn() });
+      await shutdown.flush();
+    });
+    expect(resumeQuit).toHaveBeenCalledOnce();
+    expectIoBudget({
+      scenario: "hot-cpu-shutdown-capture",
+      note: "quit during an active capture: flush the joined ~60 s profile, samples, events, manifest and saved crash.log line, plus final stop events. Off by default: 0/day. On at any threshold (including 5%): once per quit, within the existing 5 captures/launch cap; 7 write calls and ~1.4 MB per quit (~1.4 MB/day at one quit/day)",
+      io,
+    });
+    const manifest = JSON.parse(await FSP.readFile(session.artifactPath("session.json"), "utf8"));
+    expect(manifest.artifacts).toHaveLength(1);
+    const profile = JSON.parse(await FSP.readFile(session.artifactPath("main-hot-0001.cpuprofile"), "utf8"));
+    expect(profile.nodes.length).toBeGreaterThan(0);
   });
 });

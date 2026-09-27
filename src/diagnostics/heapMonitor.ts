@@ -78,7 +78,7 @@ function duration(ms: number): string {
  * - The cage: a snapshot needs about the main heap's size again, from
  *   the same pointer-compression cage the workers use. So main +
  *   workers + main again must stay under `fraction` of the limit. A
- *   worker that never reported counts as unknown, which fails.
+ *   worker that doesn't answer the fresh reading counts as unknown, which fails.
  */
 export function checkSnapshotHeadroom(
   main: HeapReading,
@@ -290,6 +290,10 @@ export class HeapMonitor {
   reconfigure(config: HeapGateConfig): void {
     this.config = config;
     if (!config.enabled) this.stopSampling("disabled");
+    if (!config.enabled || !config.snapshots) {
+      if (this.snapshotBTimer) clearTimeout(this.snapshotBTimer);
+      this.snapshotBTimer = null;
+    }
     this.samplingFailed = false;
   }
 
@@ -325,7 +329,7 @@ export class HeapMonitor {
       if (this.dayStateLoad === load) this.dayStateLoad = null;
     }
     // stop() ran while the state file was read.
-    if (this.stopped) return;
+    if (this.stopped || !this.config.enabled) return;
     const { usedBytes } = reading;
     if (this.gateFired && usedBytes < this.config.gateBytes * REARM_FRACTION) this.gateFired = false;
     // Sampling continues on a capped day too, for the near-limit dump.
@@ -425,8 +429,10 @@ export class HeapMonitor {
 
   private async freshWorkers(): Promise<WorkerHeapReading[]> {
     if (this.liveWorkerCount() === 0) return [];
-    this.workers = this.mergeWorkers(await this.readWorkerHeaps(WORKER_READ_TIMEOUT_MS));
-    return [...this.workers.values()];
+    const readings = await this.readWorkerHeaps(WORKER_READ_TIMEOUT_MS);
+    this.workers = this.mergeWorkers(readings);
+    // Cached values are useful for display, but cannot establish headroom.
+    return readings;
   }
 
   private cageUsed(reading: HeapReading): number {
@@ -591,13 +597,14 @@ export class HeapMonitor {
       await this.onCapture?.({ path: this.session.artifactPath(artifact.filename), kind: artifact.kind, bytes: artifact.bytes, summary: artifact.summary ?? "" });
     }
 
-    if (!this.config.snapshots) return;
-    const first = await this.takeSnapshot(`${prefix}-a`, "gate snapshot A");
-    if (!first.path || this.stopped) return;
+    if (!this.automaticSnapshotsEnabled()) return;
+    const first = await this.takeSnapshot(`${prefix}-a`, "gate snapshot A", true);
+    if (!first.path || !this.automaticSnapshotsEnabled()) return;
     // B only if the cage still has room then, so the pair can be diffed.
     const timer = setTimeout(() => {
       this.snapshotBTimer = null;
-      const work = this.takeSnapshot(`${prefix}-b`, "gate snapshot B").catch((error: unknown) => {
+      if (!this.automaticSnapshotsEnabled()) return;
+      const work = this.takeSnapshot(`${prefix}-b`, "gate snapshot B", true).catch((error: unknown) => {
         this.note("heap-snapshot", `gate snapshot B failed: ${serializeError(error)}`);
       });
       this.busy = work;
@@ -609,22 +616,36 @@ export class HeapMonitor {
     this.snapshotBTimer = timer;
   }
 
-  private async takeSnapshot(basename: string, label: string): Promise<{ message: string; path?: string }> {
-    const reading = this.readHeap(this.now());
-    const headroom = checkSnapshotHeadroom(
+  private automaticSnapshotsEnabled(): boolean {
+    return !this.stopped && this.config.enabled && this.config.snapshots;
+  }
+
+  private async skipSnapshot(label: string, reading: HeapReading, headroom: SnapshotHeadroom): Promise<{ message: string }> {
+    const message = `${label} skipped: ${headroom.reason}`;
+    this.recordEvent("snapshot-skipped", { label, reason: headroom.reason, usedBytes: reading.usedBytes });
+    if (this.session.exists) await this.session.commit();
+    this.note("heap-snapshot", message);
+    return { message };
+  }
+
+  private async takeSnapshot(basename: string, label: string, automatic = false): Promise<{ message: string; path?: string }> {
+    const workers = await this.freshWorkers();
+    if (automatic && !this.automaticSnapshotsEnabled()) return { message: `${label} cancelled` };
+    let reading = this.readHeap(this.now());
+    let headroom = checkSnapshotHeadroom(
       reading,
-      await this.freshWorkers(),
+      workers,
       this.config.headroomFraction,
       this.config.snapshotMaxBytes,
     );
-    if (!headroom.ok) {
-      const message = `${label} skipped: ${headroom.reason}`;
-      this.recordEvent("snapshot-skipped", { label, reason: headroom.reason, usedBytes: reading.usedBytes });
-      if (this.session.exists) await this.session.commit();
-      this.note("heap-snapshot", message);
-      return { message };
-    }
+    if (!headroom.ok) return this.skipSnapshot(label, reading, headroom);
     await this.session.prepare();
+    if (automatic && !this.automaticSnapshotsEnabled()) return { message: `${label} cancelled` };
+    // Main can grow while workers respond or the directory is prepared.
+    // No more awaits between this final admission check and the V8 write.
+    reading = this.readHeap(this.now());
+    headroom = checkSnapshotHeadroom(reading, workers, this.config.headroomFraction, this.config.snapshotMaxBytes);
+    if (!headroom.ok) return this.skipSnapshot(label, reading, headroom);
     const filename = `${basename}.heapsnapshot`;
     const filePath = this.session.artifactPath(filename);
     // On disk first: V8 blocks the main thread while it writes, and a

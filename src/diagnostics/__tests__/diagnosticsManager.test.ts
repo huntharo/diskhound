@@ -92,14 +92,14 @@ describe("DiagnosticsManager", () => {
     expect((await manager.status()).hotCpu.state).toBe("off");
   });
 
-  it("keeps the per-launch profile cap when Settings restart the profiler", async () => {
+  it.each(["during", "after"])("keeps the per-launch cap when Settings restart the profiler %s a capture", async (timing) => {
     let micros = 0;
-    const { manager, root, log } = await makeManager(off(), {
+    const { manager, root, log, inspectors } = await makeManager(off(), {
       env: {
         DISKHOUND_HOT_CPU_PROFILING_START_DELAY_MS: "0",
         DISKHOUND_HOT_CPU_PROFILING_INTERVAL_MS: "5",
         DISKHOUND_HOT_CPU_PROFILING_CONSECUTIVE_SAMPLES: "1",
-        DISKHOUND_HOT_CPU_PROFILING_DURATION_MS: "5",
+        DISKHOUND_HOT_CPU_PROFILING_DURATION_MS: timing === "during" ? "60000" : "5",
         DISKHOUND_HOT_CPU_PROFILING_MAX_PROFILES: "1",
       },
       // Every sample is hot.
@@ -107,13 +107,14 @@ describe("DiagnosticsManager", () => {
     });
     manager.start();
     manager.applySettings({ ...off(), hotCpuProfiling: true });
-    await vi.waitUntil(async () => (await manager.status()).hotCpu.state === "capped", { timeout: 5_000 });
-    expect((await manager.status()).hotCpu.profilesWritten).toBe(1);
+    await vi.waitUntil(async () => (await manager.status()).hotCpu.state === (timing === "during" ? "profiling" : "capped"), { timeout: 5_000 });
+    expect((await manager.status()).hotCpu.profilesWritten).toBe(timing === "during" ? 0 : 1);
 
     manager.applySettings({ ...off(), hotCpuProfiling: true, hotCpuThresholdPercent: 90 });
-    await vi.waitUntil(async () => (await manager.status()).hotCpu.thresholdPercent === 90);
+    await vi.waitUntil(async () => (await manager.status()).hotCpu.state === "capped", { timeout: 5_000 });
     const status = await manager.status();
     expect(status.hotCpu).toMatchObject({ state: "capped", profilesWritten: 1 });
+    expect(inspectors[2].inspector.attach).not.toHaveBeenCalled();
     const [session] = status.sessions;
     expect(session.artifacts.map((artifact) => artifact.filename)).toEqual(["main-hot-0001.cpuprofile"]);
     expect(session.path.startsWith(root)).toBe(true);
