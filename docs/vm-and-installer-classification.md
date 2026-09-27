@@ -40,7 +40,12 @@ ISO/DMG may contain valuable data. Old installer suggestions therefore say
 to review contents and use medium risk rather than assuming installation.
 
 Category switches run over existing file records, with no new filesystem
-walk. Tests count operations at N and 8N, including path depth, directory
+walk. Overview's category extension breakdown is explicitly labeled as a
+loaded-file sample: smaller files beyond the treemap loading cap may be
+absent. Its empty state describes that sample, not the complete scan.
+Selecting All retains the scan-wide extension totals. No full-index read
+is triggered by a filter change; aggregation is one linear Map pass over
+the loaded records. Tests count operations at N and 8N, including path depth, directory
 counts and extension diversity, with absolute caps. Integration tests scan
 synthetic VM bundles, raw photos, ISOs and DMGs and check both UI filters
 and cleanup analysis. Snapshot and streamed-index cleanup are tested for

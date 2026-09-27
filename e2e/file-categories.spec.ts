@@ -39,4 +39,12 @@ test("separates VM disks and snapshots from installers and camera images", async
   await openTab(handle.page, "Overview");
   await handle.page.getByRole("button", { name: "Virtual machines", exact: true }).click();
   await expect(handle.page.getByText(/Manage snapshots in the VM application/)).toBeVisible();
+  const sidebar = handle.page.locator(".ext-sidebar");
+  await expect(sidebar.getByText("Extensions · sample", { exact: true })).toBeVisible();
+  await expect(sidebar.getByRole("note")).toContainText("Smaller files may be missing");
+  await handle.page.getByRole("button", { name: "Archives", exact: true }).click();
+  await expect(sidebar.getByText("No matching extensions in the loaded sample", { exact: true })).toBeVisible();
+  await handle.page.locator(".overview-filter-chips").getByRole("button", { name: "All", exact: true }).click();
+  await expect(sidebar.getByText("Extensions", { exact: true })).toBeVisible();
+  await expect(sidebar.getByRole("note")).toHaveCount(0);
 });

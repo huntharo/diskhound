@@ -83,3 +83,16 @@ export function filteredExtensionBuckets(files: readonly Pick<ScanFileRecord, "e
   }
   return [...buckets.values()];
 }
+
+/** Scan-wide extension totals cannot express path-aware categories. Keep
+ * their sampled replacement explicitly scoped so callers cannot imply
+ * completeness when smaller files fall below the treemap loading cap. */
+export function overviewExtensionInventory(
+  scanTotals: ExtensionBucket[],
+  filteredSample: readonly Pick<ScanFileRecord, "extension" | "size">[],
+  category: FileCategoryFilter,
+): { scope: "scan" | "sample"; buckets: ExtensionBucket[] } {
+  return category === "all"
+    ? { scope: "scan", buckets: scanTotals }
+    : { scope: "sample", buckets: filteredExtensionBuckets(filteredSample) };
+}
