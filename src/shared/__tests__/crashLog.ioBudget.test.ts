@@ -47,13 +47,15 @@ function memorySample(rssMb: number, heapUsedMb: number, caches = "0/0/0/0/0"): 
 /**
  * The native scanner's stderr for a scan of 1,000 folders it cannot
  * read plus 20 files, recorded from the debug build on macOS with
- * every folder `chmod 000`. Unreadable folders are counted in
+ * every folder `chmod 000`, with the walker banner and platform label
+ * updated for dua-core (https://github.com/tzarebczan/diskhound/pull/37).
+ * Unreadable folders are counted in
  * `skipped=`; no line names them. The Windows walkers do the same:
  * a failed FindFirstFileExW sends `Skipped` and returns Ok.
  */
 const UNREADABLE_SCAN_STDERR = [
-  "[diskhound-native-scanner] linux: walking with jwalk, 16 rayon threads",
-  "[diskhound-native-scanner] linux: walk done in 10 ms (files=20, dirs=1001, skipped=1000, foreign_mounts_pruned=0, duplicate_mounts_pruned=0, firmlink_twins_pruned=0, readdir_calls=1001, stat_calls=1021)",
+  "[diskhound-native-scanner] unix: walking with dua-core, 8 threads",
+  "[diskhound-native-scanner] unix: walk done in 10 ms (files=20, dirs=1001, skipped=1000, foreign_mounts_pruned=0, duplicate_mounts_pruned=0, firmlink_twins_pruned=0, readdir_calls=1001, stat_calls=1021)",
   "[diskhound-native-scanner] hardlinks: 0 extra links counted once (0 bytes), 0 inodes with links outside the scan",
   "[diskhound-native-scanner] phase: walk took 11 ms (files=20, dirs=1001, inherited_dirs=0, inherited_files=0, readdir_calls=1001, stat_calls=1021, baseline_bytes_read=0)",
   "[diskhound-native-scanner] folder-tree sidecar: 2 parents written to \"/Users/me/Library/Application Support/DiskHound/folder-trees/pending-3f2a.bin\" in 0 ms (parallel: 8 shards)",
