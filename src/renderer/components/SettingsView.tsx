@@ -8,6 +8,8 @@ import {
   type MonitoringSnapshot,
   type UpdateStatus,
 } from "../../shared/contracts";
+import { resolveSizeUnitBase } from "../../shared/sizeUnits";
+import { formatDriveSpace, driveUsedPercent } from "../lib/driveSpace";
 import { formatBytes } from "../lib/format";
 import { reportPollFailure } from "../lib/pollFailure";
 import { nativeApi } from "../nativeApi";
@@ -26,6 +28,7 @@ export function SettingsView() {
   const [settings, setSettings] = useState<AppSettings>(defaultSettings());
   const [monitoringSnapshot, setMonitoringSnapshot] = useState<MonitoringSnapshot | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const sizeUnitBase = resolveSizeUnitBase(settings.general.sizeUnits, nativeApi.platform);
 
   useEffect(() => {
     void nativeApi.getSettings().then((s) => {
@@ -92,6 +95,21 @@ export function SettingsView() {
           onChange={(v) => {
             const next = { ...settings, general: { ...settings.general, theme: v as "dark" | "light" | "system" } };
             void save(next);
+          }}
+        />
+        <SelectRow
+          label="Size units"
+          value={settings.general.sizeUnits ?? "platform"}
+          options={[
+            { value: "platform", label: `Platform default (${nativeApi.platform === "darwin" ? "decimal" : "binary"})` },
+            { value: "decimal", label: "Decimal (1 KB = 1,000 bytes)" },
+            { value: "binary", label: "Binary (1 KB = 1,024 bytes)" },
+          ]}
+          onChange={(value) => {
+            const general = { ...settings.general };
+            if (value === "decimal" || value === "binary") general.sizeUnits = value;
+            else delete general.sizeUnits;
+            void save({ ...settings, general });
           }}
         />
         <ToggleRow
@@ -184,6 +202,7 @@ export function SettingsView() {
         <div className="settings-section-title">Drive Monitoring</div>
         <div className="settings-section-note">
           Polls free space and can schedule a full rescan. It does not yet track per-file changes in real time.
+          {nativeApi.platform === "darwin" && " Drive bars include purgeable space as available; alerts and history track free space excluding purgeable."}
         </div>
         <MonitoringStatusPanel
           snapshot={monitoringSnapshot}
@@ -218,10 +237,10 @@ export function SettingsView() {
         />
         <NumberRow
           label="Alert threshold (GB)"
-          value={Math.round(settings.monitoring.alertThresholdBytes / (1024 ** 3))}
+          value={Math.round(settings.monitoring.alertThresholdBytes / (sizeUnitBase ** 3))}
           min={0}
           max={51200}
-          onChange={(v) => void save({ ...settings, monitoring: { ...settings.monitoring, alertThresholdBytes: v * 1024 ** 3 } })}
+          onChange={(v) => void save({ ...settings, monitoring: { ...settings.monitoring, alertThresholdBytes: v * sizeUnitBase ** 3 } })}
         />
         <NumberRow
           label="Alert threshold (%)"
@@ -874,7 +893,7 @@ function CrashLogRow() {
             {log
               ? log.sizeBytes === 0
                 ? "Nothing logged — if something goes wrong, check back here."
-                : `${(log.sizeBytes / 1024).toFixed(1)} KB on disk.`
+                : `${formatBytes(log.sizeBytes)} on disk.`
               : "Main-process exceptions, worker failures, and renderer errors land in a single file you can share."}
           </div>
         </div>
@@ -1010,12 +1029,12 @@ function MonitoringStatusPanel({
                   <div className="monitoring-drive-body">
                     <div className="monitoring-drive-head">
                       <span className="monitoring-drive-name">{drive.drive}</span>
-                      <span className="monitoring-drive-free">{formatBytes(drive.freeBytes)} free</span>
+                      <span className="monitoring-drive-free">{formatDriveSpace(drive)}</span>
                     </div>
                     <div className="monitoring-drive-bar">
                       <div
-                        className={`monitoring-drive-fill ${drive.usedPercent > 90 ? "high" : drive.usedPercent > 70 ? "mid" : "low"}`}
-                        style={{ width: `${Math.min(100, Math.max(0, drive.usedPercent))}%` }}
+                        className={`monitoring-drive-fill ${driveUsedPercent(drive) > 90 ? "high" : driveUsedPercent(drive) > 70 ? "mid" : "low"}`}
+                        style={{ width: `${Math.min(100, Math.max(0, driveUsedPercent(drive)))}%` }}
                       />
                     </div>
                   </div>
@@ -1095,6 +1114,7 @@ function SelectRow({ label, value, options, onChange }: {
       <div className="setting-label">{label}</div>
       <select
         className="setting-input"
+        aria-label={label}
         value={value}
         onChange={(e) => onChange((e.target as HTMLSelectElement).value)}
       >

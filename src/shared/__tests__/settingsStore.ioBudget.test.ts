@@ -67,3 +67,23 @@ describe("settings store", () => {
     expect(listener).toHaveBeenCalledTimes(3);
   });
 });
+
+it("persists size overrides once per choice and removes the key when returning to platform default", async () => {
+  const store = await createSettingsStore();
+  const { io } = await measureFsIo(async () => {
+    await store.update((current) => ({ ...current, general: { ...current.general, sizeUnits: "decimal" } }));
+    await store.set(store.get()); // unchanged broadcast is not a rewrite
+    await store.update((current) => {
+      const general = { ...current.general };
+      delete general.sizeUnits;
+      return { ...current, general };
+    });
+  });
+  expectIoBudget({
+    scenario: "settings-size-units-override-and-reset",
+    note: "Two explicit user choices (decimal, then platform default): 2 settings rewrites, one per change; repeated save writes nothing. No polling writes: 0 writes/day and 0 MB/day at both default and 1-minute monitoring intervals.",
+    io,
+  });
+  expect(JSON.parse(FS.readFileSync(settingsPath(), "utf8")).general).not.toHaveProperty("sizeUnits");
+  expect((await createSettingsStore()).get().general).not.toHaveProperty("sizeUnits");
+});

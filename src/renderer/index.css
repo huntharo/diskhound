@@ -7167,6 +7167,7 @@ button, input, select, textarea { font: inherit; }
 
 .drive-card-stats {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   font-size: 10.5px;
   color: var(--text-muted);
@@ -7363,6 +7364,9 @@ button, input, select, textarea { font: inherit; }
      with centered auto-margins so the page breathes. */
   .drive-pills {
     max-width: 50vw;
+  }
+  .drive-pill-purgeable {
+    display: none;
   }
 }
 
@@ -9662,4 +9666,3 @@ body.system-widget-body #app {
   .dev-summary-actions { margin-left: 0; }
   .dev-select-bar { padding-left: 12px; padding-right: 12px; }
 }
-

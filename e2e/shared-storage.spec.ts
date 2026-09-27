@@ -17,6 +17,7 @@ import { openTab, scanFolderFromPicker } from "./fixtures/steps";
 const KiB = 1024;
 const DATA_BYTES = 2048 * KiB;
 const OTHER_BYTES = 256 * KiB;
+const COPY_SIZE = process.platform === "darwin" ? "2.1 MB" : "2.0 MB";
 
 // Keep the trees out of the uploaded CI artifacts.
 test.afterEach(({}, testInfo) => {
@@ -75,8 +76,8 @@ test("lists a hardlinked file once and counts it as freeing nothing", async ({ l
   // that name frees nothing: the plain copy is all there is to reclaim.
   await expect(group.locator(".duplicate-copies-badge")).toHaveText("2 copies");
   await expect(group.locator(".duplicate-shared-badge")).toHaveText("hardlinked");
-  await expect(group.locator(".duplicate-wasted")).toHaveText("2.0 MB wasted");
-  await expect(page.locator(".duplicates-subtitle")).toHaveText("2.0 MB reclaimable");
+  await expect(group.locator(".duplicate-wasted")).toHaveText(`${COPY_SIZE} wasted`);
+  await expect(page.locator(".duplicates-subtitle")).toHaveText(`${COPY_SIZE} reclaimable`);
 
   const rows = group.locator(".duplicate-file-row");
   await expect(rows).toHaveCount(2);
@@ -102,7 +103,7 @@ test.describe("APFS clones", () => {
     // copy frees 2 MB, not the 4 MB that (copies − 1) × size says.
     await expect(group.locator(".duplicate-copies-badge")).toHaveText("3 copies");
     await expect(group.locator(".duplicate-shared-badge")).toHaveText("APFS clones");
-    await expect(group.locator(".duplicate-wasted")).toHaveText("2.0 MB wasted");
+    await expect(group.locator(".duplicate-wasted")).toHaveText(`${COPY_SIZE} wasted`);
 
     const rows = group.locator(".duplicate-file-row");
     await expect(rows).toHaveCount(3);
@@ -134,8 +135,8 @@ test.describe("APFS clones", () => {
 
     const card = handle.page.getByRole("region", { name: "Space macOS is holding back" });
     await expect(card).toBeVisible();
-    await expect(card.locator(".storage-card-col").nth(1)).toContainText("4.0 MB in 2 cloned files");
-    await expect(card).toContainText("The 4.3 MB total counts 2.0 MB of it more than once");
+    await expect(card.locator(".storage-card-col").nth(1)).toContainText("4.2 MB in 2 cloned files");
+    await expect(card).toContainText("The 4.5 MB total counts 2.1 MB of it more than once");
   });
 
   test("Dev Artifacts marks node_modules trees cloned from each other", async ({ launch }, testInfo) => {
@@ -163,23 +164,23 @@ test.describe("APFS clones", () => {
     // 96 MB listed is 32 MB of blocks. No one tree frees any of it, and
     // deleting all three frees it once.
     const summary = page.locator(".dev-summary-net");
-    await expect(summary.locator(".changes-delta-big")).toHaveText("0 B – 32.0 MB");
-    await expect(summary.locator(".changes-delta-label")).toHaveText("reclaimable on this scan · 96.0 MB listed");
+    await expect(summary.locator(".changes-delta-big")).toHaveText("0 B – 33.6 MB");
+    await expect(summary.locator(".changes-delta-label")).toHaveText("reclaimable on this scan · 101 MB listed");
     // The kind rail tells the same story as the header.
     const rail = page.locator(".dev-kind-rail");
-    await expect(rail.locator(".dev-kind-cell-all .dev-kind-cell-size")).toHaveText("0 B – 32.0 MB");
-    await expect(rail.locator(".dev-kind-cell:not(.dev-kind-cell-all) .dev-kind-cell-size")).toHaveText(["0 B – 32.0 MB"]);
+    await expect(rail.locator(".dev-kind-cell-all .dev-kind-cell-size")).toHaveText("0 B – 33.6 MB");
+    await expect(rail.locator(".dev-kind-cell:not(.dev-kind-cell-all) .dev-kind-cell-size")).toHaveText(["0 B – 33.6 MB"]);
     // So do the group headers and the selection tally.
     await page.getByRole("radio", { name: "By kind" }).click();
-    await expect(page.locator(".dev-group-size")).toHaveText(["frees 0 B – 32.0 MB"]);
+    await expect(page.locator(".dev-group-size")).toHaveText(["frees 0 B – 33.6 MB"]);
     await page.getByRole("button", { name: "Select visible" }).click();
-    await expect(page.locator(".dev-select-bar-tally")).toHaveText("3 · frees 0 B – 32.0 MB");
+    await expect(page.locator(".dev-select-bar-tally")).toHaveText("3 · frees 0 B – 33.6 MB");
     const note = page.locator(".dev-sharing-note");
     await expect(note).toContainText(
-      "96.0 MB of these trees is APFS clones sharing blocks with files elsewhere. "
-      + "Each copy counts at full size, but together they hold about 32.0 MB of blocks. "
+      "101 MB of these trees is APFS clones sharing blocks with files elsewhere. "
+      + "Each copy counts at full size, but together they hold about 33.6 MB of blocks. "
       + "Deleting a tree frees only its own blocks: about 0 B if you deleted everything listed, "
-      + "up to 32.0 MB if no copy is left elsewhere.",
+      + "up to 33.6 MB if no copy is left elsewhere.",
     );
   });
 });
