@@ -274,11 +274,16 @@ export interface PathActionResult {
   requiresElevation?: boolean;
 }
 
-/** Live tick while a permanent delete walks a tree. Bytes stay on the report. */
+/** Batched permanent-delete progress. Bytes stay on the report. */
 export interface PermanentDeleteProgress {
   rootPath: string;
   path: string;
-  filesWalked: number;
+  phase: "preparing" | "deleting";
+  itemsDeleted: number;
+  /** Unknown during streaming; exact completed count after verification. */
+  itemsTotal: number | null;
+  /** Estimated from the prior scan, or null without a count. 100 means verified completion. */
+  percent: number | null;
 }
 
 export interface ScanStartInput {
@@ -389,6 +394,8 @@ export interface RecentScan {
 }
 
 export interface GeneralSettings {
+  /** Omitted = decimal on macOS, binary elsewhere. */
+  sizeUnits?: "decimal" | "binary";
   minimizeToTray: boolean;
   startMinimized: boolean;
   launchOnStartup: boolean;
@@ -535,7 +542,12 @@ export interface StorageStats {
 export interface DiskSpaceInfo {
   drive: string;
   totalBytes: number;
+  /** Raw filesystem free space, excluding purgeable bytes; used for change history. */
   freeBytes: number;
+  /** macOS Finder Available. Absent when Foundation cannot provide it. */
+  availableBytes?: number;
+  /** Part of Available that macOS can reclaim, from the same capacity sample. */
+  purgeableBytes?: number;
   usedBytes: number;
   usedPercent: number;
   timestamp: number;
@@ -1344,7 +1356,7 @@ export interface DiskhoundNativeApi {
   revealPath: (targetPath: string) => Promise<PathActionResult>;
   openPath: (targetPath: string) => Promise<PathActionResult>;
   trashPath: (targetPath: string) => Promise<PathActionResult>;
-  permanentlyDeletePath: (targetPath: string) => Promise<PathActionResult>;
+  permanentlyDeletePath: (targetPath: string, expectedFiles?: number) => Promise<PathActionResult>;
   /** Recursive unlink under a UAC-elevated helper. One prompt per call. */
   permanentlyDeletePathElevated: (targetPath: string) => Promise<PathActionResult>;
   onPermanentDeleteProgress: (listener: (progress: PermanentDeleteProgress) => void) => () => void;
@@ -1730,6 +1742,8 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
 
   return {
     general: {
+      ...(merged.general.sizeUnits === "decimal" || merged.general.sizeUnits === "binary"
+        ? { sizeUnits: merged.general.sizeUnits } : {}),
       minimizeToTray,
       startMinimized: minimizeToTray && Boolean(merged.general.startMinimized),
       launchOnStartup: Boolean(merged.general.launchOnStartup),

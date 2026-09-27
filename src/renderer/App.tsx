@@ -17,7 +17,9 @@ import {
 } from "../shared/contracts";
 import { duplicateGroupReclaimable } from "../shared/duplicateReclaim";
 import { formatScanRoot } from "../shared/pathUtils";
+import { formatDriveSpace, driveSpaceLabel, driveUsedPercent } from "./lib/driveSpace";
 import { formatBytes } from "./lib/format";
+import { useSizeUnitBase } from "./lib/sizeUnitSettings";
 import { clearDeletedPaths } from "./lib/deletedPaths";
 import { useLiveDiskSpace } from "./lib/hooks";
 import { setColorBlindPalette } from "./lib/treemap";
@@ -118,6 +120,7 @@ function rootKey(rootPath: string | null | undefined): string {
 }
 
 export function App() {
+  useSizeUnitBase();
   // Per-root snapshot store — allows concurrent scans on different drives
   // and lets users switch drive views without losing each drive's state.
   // Each entry is the latest known snapshot for that root (from fresh
@@ -1446,11 +1449,11 @@ function DrivePill({ drive, active, scanning, scanPercent, onScan }: {
   scanPercent: number | null;
   onScan: () => void;
 }) {
-  const pct = drive.usedPercent;
+  const pct = driveUsedPercent(drive);
   const level = pct > 90 ? "high" : pct > 70 ? "mid" : "low";
   const title = scanning
     ? `${drive.drive} — scanning${scanPercent !== null ? ` (${scanPercent}%)` : ""}. Click to view.`
-    : `View ${drive.drive} (${formatBytes(drive.freeBytes)} free)`;
+    : `View ${drive.drive} (${formatDriveSpace(drive)})`;
 
   return (
     <button
@@ -1477,7 +1480,12 @@ function DrivePill({ drive, active, scanning, scanPercent, onScan }: {
       <span className="drive-pill-free">
         {scanning && scanPercent !== null
           ? `${scanPercent}%`
-          : `${formatBytes(drive.freeBytes)} free`}
+          : <>
+              {formatBytes(drive.availableBytes ?? drive.freeBytes)} {driveSpaceLabel(drive)}
+              {drive.availableBytes !== undefined && drive.purgeableBytes !== undefined && (
+                <span className="drive-pill-purgeable"> · {formatBytes(drive.purgeableBytes)} purgeable</span>
+              )}
+            </>}
       </span>
     </button>
   );

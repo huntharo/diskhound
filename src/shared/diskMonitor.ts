@@ -4,7 +4,8 @@ import * as FS from "node:fs/promises";
 import * as Path from "node:path";
 import { promisify } from "node:util";
 
-import type { DiskDelta, DiskSpaceInfo, MonitoringSettings, MonitoringSnapshot } from "./contracts";
+import type { DiskDelta, DiskSpaceInfo, MonitoringSettings, MonitoringSnapshot, StorageAccountingReport } from "./contracts";
+import { getVolumeStorageAccounting } from "./macStorageAccounting";
 
 const execFileAsync = promisify(execFile);
 const BASELINE_FILE = "disk-baselines.json";
@@ -55,9 +56,13 @@ export async function initDiskMonitor(dataDir: string): Promise<void> {
   try {
     const raw = await FS.readFile(Path.join(dataDir, BASELINE_FILE), "utf8");
     const state = JSON.parse(raw) as PersistedState;
-    previousDriveMap = new Map(Object.entries(state.previousDrives ?? {}));
+    previousDriveMap = new Map(Object.entries(state.previousDrives ?? {}).filter(
+      ([drive]) => process.platform !== "darwin" || !isTimeMachineMount(drive),
+    ));
     lastFullScanAt = state.lastFullScanAt ?? null;
-    lastDrives = Array.isArray(state.lastDrives) ? state.lastDrives : [];
+    lastDrives = Array.isArray(state.lastDrives) ? state.lastDrives.filter(
+      ({ drive }) => process.platform !== "darwin" || !isTimeMachineMount(drive),
+    ) : [];
     lastDfDrives = lastDrives;
     lastDeltas = Array.isArray(state.lastDeltas) ? state.lastDeltas : [];
     lastCheckedAt =
@@ -447,7 +452,40 @@ async function getMacDiskSpace(): Promise<DiskSpaceInfo[] | null> {
   // separate from Linux. `-P -k` gives stable POSIX columns:
   //   Filesystem  1024-blocks  Used  Available  Capacity  Mounted on
   const stdout = await runDf(["-P", "-k"]);
-  return stdout === null ? null : parseMacDfOutput(stdout, Date.now());
+  if (stdout === null) return null;
+  return enrichMacDiskSpace(parseMacDfOutput(stdout, Date.now()));
+}
+
+const MAC_ACCOUNTING_WAIT_MS = 1_000;
+
+/** Accounting is optional: a stuck mount must not withhold df's healthy rows. */
+export function enrichMacDiskSpace(
+  drives: DiskSpaceInfo[],
+  readAccounting: (volumePath: string) => Promise<StorageAccountingReport> = getVolumeStorageAccounting,
+): Promise<DiskSpaceInfo[]> {
+  return Promise.all(drives.map((drive) => settleBy(
+    readAccounting(drive.drive).then((report) => withMacAvailableSpace(drive, report), () => drive),
+    MAC_ACCOUNTING_WAIT_MS,
+    drive,
+  )));
+}
+
+/** Keep df's raw free/used counters stable for monitoring and old baselines. */
+export function withMacAvailableSpace(
+  drive: DiskSpaceInfo,
+  report: StorageAccountingReport,
+): DiskSpaceInfo {
+  const available = report.availableForImportantUsageBytes;
+  if (report.platform !== "darwin" || report.volumePath !== drive.drive
+    || available === null || !Number.isFinite(available) || available < 0) return drive;
+  const availableBytes = Math.min(drive.totalBytes, available);
+  const purgeable = report.purgeableBytes;
+  return {
+    ...drive,
+    availableBytes,
+    ...(purgeable !== null && Number.isFinite(purgeable) && purgeable >= 0
+      ? { purgeableBytes: Math.min(availableBytes, purgeable) } : {}),
+  };
 }
 
 const DF_TIMEOUT_MS = 10_000;
@@ -651,6 +689,16 @@ function isAtOrUnder(root: string, path: string): boolean {
   return path === root || (path.startsWith(root) && path.charCodeAt(root.length) === 0x2f);
 }
 
+/** Backup snapshots are restore points, not independent volumes to scan.
+ * Match reserved mount trees, never a user-chosen disk name or `.backup` suffix.
+ * Used for both fresh df results and caches saved by older app versions.
+ */
+function isTimeMachineMount(mount: string): boolean {
+  return isAtOrUnder("/Volumes/.timemachine", mount)
+    || isAtOrUnder("/Volumes/com.apple.TimeMachine.localsnapshots", mount)
+    || mount.includes("/.MobileBackups");
+}
+
 function isMacUserStorage(filesystem: string, mount: string): boolean {
   if (!mount || mount === "/dev") return false;
   // Root is the correct scan target on modern APFS Macs; the paired
@@ -658,7 +706,7 @@ function isMacUserStorage(filesystem: string, mount: string): boolean {
   // users two cards for what Finder presents as one startup disk.
   if (mount === "/") return true;
   if (MAC_SYSTEM_MOUNT_ROOTS.some((root) => isAtOrUnder(root, mount))) return false;
-  if (mount.includes("/.MobileBackups")) return false;
+  if (isTimeMachineMount(mount)) return false;
   // External disks, disk images the user opened, and SMB/NFS shares
   // are normally presented here.
   if (mount.startsWith("/Volumes/")) return true;

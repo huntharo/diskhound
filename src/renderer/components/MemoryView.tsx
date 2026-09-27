@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks"
 import type { AffinityRule, ProcessInfo, SystemMemorySnapshot } from "../../shared/contracts";
 import { findMatchingRule } from "../lib/affinityMatch";
 import { formatBytes, formatCount } from "../lib/format";
+import { useSizeUnitBase } from "../lib/sizeUnitSettings";
 import { saveLocalPreference } from "../lib/localPreference";
 import { reportPollFailure } from "../lib/pollFailure";
 import { processMetadataParts, processSearchText } from "../lib/processMetadata";
@@ -1203,6 +1204,7 @@ function ProcessTreemap(props: {
   showMetadata: boolean;
 }) {
   const { processes, onKill, affinityRules, onRuleChanged, showMetadata } = props;
+  const sizeUnitBase = useSizeUnitBase();
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rectsRef = useRef<TreemapRect[]>([]);
@@ -1445,7 +1447,7 @@ function ProcessTreemap(props: {
     // `appearanceTick` in the deps below is what actually drives
     // repaints when icons resolve.
     void appearanceVersion;
-  }, [processes, dims, appearanceTick, affinityRules]);
+  }, [processes, dims, appearanceTick, affinityRules, sizeUnitBase]);
 
   const hitTest = useCallback((e: MouseEvent): ProcessInfo | null => {
     const canvas = canvasRef.current;

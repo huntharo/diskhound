@@ -157,7 +157,9 @@ const FS_FUNCTIONS: Record<string, IoCounter> = {
   access: "access",
   accessSync: "access",
   existsSync: "existsSync",
+  opendir: "open",
   open: "open",
+  opendirSync: "open",
   openSync: "open",
 };
 
@@ -175,6 +177,7 @@ const FS_PROMISES_FUNCTIONS: Record<string, IoCounter> = {
   stat: "stat",
   lstat: "lstat",
   access: "access",
+  opendir: "open",
   open: "open",
 };
 

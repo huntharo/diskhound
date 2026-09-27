@@ -498,6 +498,9 @@ describe("scheduled USN rescan (Windows)", () => {
     expect(result).toMatchObject({ changed, recordCount: emitted });
   });
 
+  // Seeds seven 20k-file indexes/sidecars, then rewrites and commits another.
+  // This measures I/O counts, not speed. Windows CI can exceed the default 5s;
+  // a timed-out async rescan can also outlive teardown and affect the next test.
   it("rewrites the index when files under the root changed", async () => {
     await seedHistoryAtCap();
     await saveCursor();
@@ -519,7 +522,7 @@ describe("scheduled USN rescan (Windows)", () => {
       io,
     });
     expect(result).toMatchObject({ changed: true, stats: { additions: 1, modifications: 2, deletions: 1 } });
-  });
+  }, 30_000);
 });
 
 describe("full diff after a scan", () => {

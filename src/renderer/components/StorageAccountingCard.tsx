@@ -13,7 +13,7 @@ import { startVisiblePoll } from "../lib/visiblePoll";
 import { nativeApi } from "../nativeApi";
 import { toast } from "./Toasts";
 
-/** Background refresh; the main process caches for 15 s anyway. */
+/** Background refresh; the main process caches for 60 s anyway. */
 const REFRESH_MS = 60_000;
 const COLLAPSED_KEY = "diskhound:storage-card-collapsed";
 
@@ -100,20 +100,22 @@ export function StorageAccountingCard({ snapshot, onViewDev }: {
     );
   };
 
+  const capacitySummary = (report.availableForImportantUsageBytes !== null
+    ? ` · ${formatBytes(report.availableForImportantUsageBytes)} available` : "")
+    + (report.purgeableBytes !== null ? ` · ${formatBytes(report.purgeableBytes)} purgeable` : "");
+
   const header = (
     <div className="storage-card-head">
       <div className="storage-card-kicker">
         Why deleting may not free space
         <span className="storage-card-kicker-meta">
           {collapsed
-            ? ` · ${purgeable > 0 ? `≈ ${formatBytes(purgeable)} purgeable` : "nothing purgeable"}`
+            ? capacitySummary
               // Lower only the leading "No"; "Time Machine" keeps its capitals.
               + ` · ${snapshotLabel.charAt(0).toLowerCase()}${snapshotLabel.slice(1)}`
               + (sharing ? ` · ${formatBytes(sharing.cloneBytes)} in clones` : "")
-            : (report.freeBytes !== null ? ` · ${formatBytes(report.freeBytes)} free now` : "")
-              + (report.availableForImportantUsageBytes !== null
-                ? ` · Finder “Available” ${formatBytes(report.availableForImportantUsageBytes)}`
-                : "")}
+            : capacitySummary
+              + (report.freeBytes !== null ? ` · ${formatBytes(report.freeBytes)} free now (excluding purgeable)` : "")}
         </span>
       </div>
       <button

@@ -67,6 +67,7 @@ import { readDevBranch } from "./shared/devBranch";
 import { getStorageAccounting } from "./shared/macStorageAccounting";
 import { createScanSnapshotStore, type SnapshotWriteOptions } from "./shared/scanStore";
 import { createAffinityEnforcer, upsertAffinityRule } from "./shared/affinityEnforcer";
+import { formatSizeBytes, resolveSizeUnitBase } from "./shared/sizeUnits";
 import { createSettingsStore, type SettingsStore } from "./shared/settingsStore";
 import { createUpdaterStateStore } from "./shared/updaterStateStore";
 import { createWindowStateStore, type WindowStateStore } from "./shared/windowStateStore";
@@ -2096,7 +2097,7 @@ void (async () => {
       return { ok: true, message: "Moved to trash." };
     }
   });
-  ipcMain.handle("diskhound:permanent-delete-path", async (_event, targetPath: string) => {
+  ipcMain.handle("diskhound:permanent-delete-path", async (_event, targetPath: string, expectedFiles?: number) => {
     const blocked = protectedPathBlock(targetPath, "Delete");
     if (blocked) {
       writeCrashLog("delete", `blocked path=${targetPath} ${blocked.message}`);
@@ -2108,11 +2109,13 @@ void (async () => {
       mainWindow?.webContents.send(PERMANENT_DELETE_PROGRESS_CHANNEL, progress);
     };
     let result: PathActionResult;
+    const deleteStartedAt = Date.now();
     try {
       const stat = await FS.lstat(resolved);
       if (stat.isDirectory() && !stat.isSymbolicLink()) {
         await runPermanentDeleteWorker(resolved, {
           workerPath: permanentDeleteWorkerEntry,
+          expectedFiles,
           onProgress,
         });
         result = { ok: true, message: "Permanently deleted." };
@@ -2128,7 +2131,7 @@ void (async () => {
     }
     writeCrashLog(
       "delete",
-      `${result.ok ? "ok" : result.requiresElevation ? "needs-admin" : "fail"} path=${resolved} ${result.message}`,
+      `${result.ok ? "ok" : result.requiresElevation ? "needs-admin" : "fail"} elapsedMs=${Date.now() - deleteStartedAt} path=${resolved} ${result.message}`,
     );
     return result;
   });
@@ -4841,11 +4844,7 @@ app.on("window-all-closed", () => {
 });
 
 function formatBytesShort(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const exp = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  const val = bytes / 1024 ** exp;
-  return `${val.toFixed(val >= 100 || exp === 0 ? 0 : 1)} ${units[exp]}`;
+  return formatSizeBytes(bytes, resolveSizeUnitBase(settingsStore?.get().general.sizeUnits, process.platform));
 }
 
 function formatScanIntervalLabel(minutes: number): string {
