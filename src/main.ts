@@ -185,6 +185,7 @@ import { createNativeScannerSession, type NativeScannerSession } from "./nativeS
 import * as elevationModule from "./elevation";
 import { createAgentHost, type AgentHost } from "./mcp/electronHost";
 import { DiagnosticsManager } from "./diagnostics/diagnosticsManager";
+import { createDiagnosticsShutdown } from "./diagnostics/diagnosticsShutdown";
 import { trackWorker } from "./shared/workerHeapRegistry";
 
 const SCAN_SNAPSHOT_CHANNEL = "diskhound:scan-snapshot";
@@ -268,6 +269,15 @@ let windowStateStore: WindowStateStore | null = null;
 let widgetWindowStateStore: WindowStateStore | null = null;
 // Track whether the user explicitly quit (vs. close-to-tray)
 let isQuitting = false;
+let updateInstallPending = false;
+const diagnosticsShutdown = createDiagnosticsShutdown({
+  stop: () => diagnostics?.stop("app-quit"),
+  resumeQuit: () => {
+    // An explicit install requested during the flush owns the next quit.
+    if (!updateInstallPending) app.quit();
+  },
+  warn: (message) => writeCrashLog("diagnostics", message),
+});
 
 function quitDiskHound(): void {
   isQuitting = true;
@@ -4963,7 +4973,8 @@ void (async () => {
   });
 
   ipcMain.on("diskhound:quit-and-install", () => {
-    if (!autoUpdater) return;
+    if (!autoUpdater || updateInstallPending) return;
+    updateInstallPending = true;
     const availableVersion = lastUpdateStatus?.availableVersion ?? null;
     const installStartedAt = Date.now();
     updaterState.update({
@@ -4979,14 +4990,18 @@ void (async () => {
     updateScheduler?.cancelPending();
     // Silent install + auto-relaunch after update.
     // isSilent=true → skip NSIS UI; isForceRunAfter=true → relaunch DiskHound once install finishes.
-    setTimeout(() => {
+    setTimeout(() => void (async () => {
       isQuitting = true;
+      // Squirrel/NSIS owns the exit after quitAndInstall; flush before
+      // handing over, using the same deadline as an ordinary quit.
+      await diagnosticsShutdown.flush();
+      updateInstallPending = false;
       try {
         autoUpdater.quitAndInstall(true, true);
       } catch (err) {
         handleUpdateError(err instanceof Error ? err : new Error("Failed to start installer"));
       }
-    }, 500);
+    })(), 500);
   });
 
   app.on("activate", () => {
@@ -4999,10 +5014,11 @@ void (async () => {
     }
   });
 
-  app.on("before-quit", () => {
+  app.on("before-quit", (event) => {
     isQuitting = true;
     clearInterval(affinityInterval);
     updateScheduler?.stop();
+    if (diagnosticsShutdown.beforeQuit(event)) return;
     for (const session of activeScans.values()) {
       void session.stop();
     }
@@ -5045,8 +5061,6 @@ void (async () => {
     scanStore.flush();
     flushUsnCursorStore();
     void agentHost?.dispose();
-    // Discards an untriggered CPU recording; finishes one in progress.
-    void diagnostics?.stop("app-quit");
   });
 })().catch((err: unknown) => {
   const error = err as { stack?: string; message?: string };
