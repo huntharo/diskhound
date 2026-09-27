@@ -2,7 +2,7 @@
 
 The same saved `/` scan completed on 2026-09-27 at 12:03 EDT was replayed
 through the original rules (`5d45837`), the first strict rules (`54f2b47`),
-and the expanded rules in this change. It contains 9,268,856 file records
+and the expanded cache rules (`a805f3a`). It contains 9,268,856 file records
 and 666.583 GiB of recorded allocated bytes. Neither scans nor user files
 were modified. Each file is counted once, with extra hardlinks contributing
 zero bytes. Category totals reconcile exactly to the index.
@@ -99,3 +99,14 @@ Electron artifact E2E tests pass.
 
 Machine-specific paths and full CSV/JSON data are kept in the local audit
 report rather than committed to the repository.
+
+## Common-language follow-up
+
+The subsequent common-language expansion adds 16.754 MiB on this same
+saved scan: one Bundler `vendor/bundle/ruby/3.2.0/cache` tree. No other
+category total decreases. This is deliberately broader platform/ecosystem
+support, not a claim that every supported language is installed on the
+audited machine. The shared corpus grows from 279 to 350 fixtures; see the
+language coverage matrix in `dev-artifact-classification.md` for layouts
+and explicit exclusions. The full TypeScript suite (703 tests), typecheck,
+16 native classification tests and four Electron artifact tests pass.

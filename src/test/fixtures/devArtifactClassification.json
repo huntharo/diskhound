@@ -1393,5 +1393,360 @@
     "path": "/home/dev/.npm/_npx/abc/node_modules/pkg/index.js",
     "root": "/home/dev/.npm/_npx/abc/node_modules",
     "kind": "node-modules"
+  },
+  {
+    "path": "/home/dev/.gem/specs/item.bin",
+    "root": "/home/dev/.gem/specs",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/home/dev/.gem/ruby/3.4.0/cache/item.bin",
+    "root": "/home/dev/.gem/ruby/3.4.0/cache",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/project/vendor/bundle/ruby/3.4.0/cache/item.bin",
+    "root": "/project/vendor/bundle/ruby/3.4.0/cache",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/home/dev/.cache/gem/specs/item.bin",
+    "root": "/home/dev/.cache/gem/specs",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/home/dev/.cache/gem/gems/item.bin",
+    "root": "/home/dev/.cache/gem/gems",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/home/dev/.cache/composer/item.bin",
+    "root": "/home/dev/.cache/composer",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/Users/dev/Library/Caches/composer/item.bin",
+    "root": "/Users/dev/Library/Caches/composer",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/home/dev/.composer/cache/item.bin",
+    "root": "/home/dev/.composer/cache",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/Users/dev/AppData/Local/Composer/files/item.bin",
+    "root": "/Users/dev/AppData/Local/Composer/files",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/Users/dev/AppData/Local/Composer/repo/item.bin",
+    "root": "/Users/dev/AppData/Local/Composer/repo",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/Users/dev/AppData/Local/Composer/vcs/item.bin",
+    "root": "/Users/dev/AppData/Local/Composer/vcs",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/home/dev/.pub-cache/hosted/item.bin",
+    "root": "/home/dev/.pub-cache/hosted",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/home/dev/.pub-cache/git/cache/item.bin",
+    "root": "/home/dev/.pub-cache/git/cache",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/Users/dev/AppData/Local/Pub/Cache/hosted/item.bin",
+    "root": "/Users/dev/AppData/Local/Pub/Cache/hosted",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/home/dev/.hex/packages/item.bin",
+    "root": "/home/dev/.hex/packages",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/project/.dart_tool/flutter_build/item.bin",
+    "root": "/project/.dart_tool/flutter_build",
+    "kind": "compiler-cache"
+  },
+  {
+    "path": "/Users/dev/Library/Developer/Xcode/DerivedData/item.bin",
+    "root": "/Users/dev/Library/Developer/Xcode/DerivedData",
+    "kind": "compiler-cache"
+  },
+  {
+    "path": "/project/.stack-work/dist/item.bin",
+    "root": "/project/.stack-work/dist",
+    "kind": "compiler-cache"
+  },
+  {
+    "path": "/project/dist-newstyle/build/item.bin",
+    "root": "/project/dist-newstyle/build",
+    "kind": "compiler-cache"
+  },
+  {
+    "path": "/project/dist-newstyle/cache/item.bin",
+    "root": "/project/dist-newstyle/cache",
+    "kind": "compiler-cache"
+  },
+  {
+    "path": "/project/.zig-cache/item.bin",
+    "root": "/project/.zig-cache",
+    "kind": "compiler-cache"
+  },
+  {
+    "path": "/home/dev/.cache/zig/item.bin",
+    "root": "/home/dev/.cache/zig",
+    "kind": "compiler-cache"
+  },
+  {
+    "path": "/Users/dev/Library/Caches/zig/item.bin",
+    "root": "/Users/dev/Library/Caches/zig",
+    "kind": "compiler-cache"
+  },
+  {
+    "path": "/project/_build/dev/lib/my_app/ebin/Elixir.MyApp.beam",
+    "root": "/project/_build/dev/lib/my_app/ebin",
+    "kind": "compiler-cache"
+  },
+  {
+    "path": "/project/_build/test/lib/my_app/ebin/Elixir.MyApp.beam",
+    "root": "/project/_build/test/lib/my_app/ebin",
+    "kind": "compiler-cache"
+  },
+  {
+    "path": "/project/_build/prod/lib/my_app/ebin/Elixir.MyApp.beam",
+    "root": "/project/_build/prod/lib/my_app/ebin",
+    "kind": "compiler-cache"
+  },
+  {
+    "path": "/project/_build/shared/lib/my_app/ebin/Elixir.MyApp.beam",
+    "root": "/project/_build/shared/lib/my_app/ebin",
+    "kind": "compiler-cache"
+  },
+  {
+    "path": "/project/vendor/cache/my-vendored-fork.rb",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/vendor/bundle/ruby/3.4.0/gems/mygem/src.rb",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/vendor/bundle/ruby/3.4/cache/file",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/vendor/bundle/ruby/next/cache/file",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.gem/credentials",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.gem/ruby/3.4.0/bin/tool",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.cache/gem/config.yml",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/vendor/composer/installed.json",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.composer/auth.json",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.composer/vendor/my/plugin.php",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/AppData/Local/Composer/auth.json",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/composer/src/main.php",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.pub-cache/bin/tool",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.pub-cache/global_packages/pkg/pubspec.yaml",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.pub-cache/git/edited-checkout/lib/main.dart",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/AppData/Local/Pub/Cache/bin/tool",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/.dart_tool/package_config.json",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/flutter_build/main.dart",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/build/flutter_assets/user-data",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/Library/Developer/Xcode/Archives/App.xcarchive/file",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/Library/Developer/Xcode/UserData/profile",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/Library/Developer/CoreSimulator/Devices/uuid/data",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/DerivedData/source.swift",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/.build/checkouts/edited/Sources/main.swift",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.hex/hex.config",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.mix/archives/tool",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/deps/my_app/lib/main.ex",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/_build/dev/lib/my_app/src/main.erl",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/_build/dev/lib/my_app/priv/data",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/_build/custom/lib/my_app/ebin/a.beam",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/_build/dev/lib/9app/ebin/a.beam",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/_build/dev/lib/my-app/ebin/a.beam",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/_build/dev/lib/my_app/ebin-backup/a.beam",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/.stack-work/source/Main.hs",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/dist-newstyle/src/Main.hs",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/dist/build/Main.hs",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/home/dev/.stack/config.yaml",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/zig-out/bin/server",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/zig-cache/source.zig",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/.zig-cache-backup/source.zig",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/zig/lib/std.zig",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/project/vendor/bundle/ruby/3.4.0/cache-backup/a.gem",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/Library/Developer/Xcode/DerivedData-backup/source.swift",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/Users/dev/Library/Developer/Xcode/DerivedDat\u212a/source.swift",
+    "root": null,
+    "kind": null
   }
 ]

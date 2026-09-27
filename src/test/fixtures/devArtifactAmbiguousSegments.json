@@ -34,5 +34,19 @@
   "packages-old",
   "CMakeFiles-old",
   "mod",
-  "example.com"
+  "example.com",
+  "vendor",
+  "bundle",
+  "ruby",
+  ".hex",
+  ".gem",
+  ".pub-cache",
+  ".dart_tool",
+  ".composer",
+  "_build",
+  "ebin-old",
+  "hosted-old",
+  ".stack-work-old",
+  "dist-newstyle-old",
+  ".zig-cache-old"
 ]
