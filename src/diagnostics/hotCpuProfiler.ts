@@ -204,6 +204,9 @@ export class HotCpuProfiler {
   }
 
   private async startInner(): Promise<void> {
+    // Settings changes queue start after the previous recorder has saved
+    // its active capture; construction can happen before that commit.
+    this.profileCount = this.session.writtenCount("cpuprofile");
     this.session.recordEvent({
       capturedAt: new Date(this.now()).toISOString(),
       type: "monitor-started",
