@@ -105,3 +105,43 @@ or the whole `.npm` directory.
 
 See [the machine audit](dev-artifact-machine-audit.md) for the measured gain,
 the full accounting of attribution losses, and the limits of this expansion.
+
+## Common language ecosystems
+
+The classifier also recognizes these documented layouts. Downloads stay in
+**Package caches**; compiled/intermediate trees use **Compiler & native build
+caches**. No new per-file filesystem probes or unbounded ancestor searches
+are required. All roots still fit the six-component folder-reader bound.
+
+| Ecosystem | Added scope | Intentionally excluded |
+| --- | --- | --- |
+| Ruby / Bundler | `.gem/specs`, `.gem/ruby/<x.y.z>/cache`, `vendor/bundle/ruby/<x.y.z>/cache`, `.cache/gem/{specs,gems}` | Generic `vendor/cache` (can be checked-in vendored dependencies), installed gem sources, credentials, executables |
+| PHP / Composer | `.composer/cache`, `.cache/composer`, `Library/Caches/composer`, `AppData/Local/Composer/{files,repo,vcs}` | Project `vendor`, `auth.json`, globally installed plugins |
+| Dart / Flutter | `.pub-cache/hosted`, `.pub-cache/git/cache`, `AppData/Local/Pub/Cache/hosted`, `.dart_tool/flutter_build` | Global tools, direct Git checkouts, package configuration, generic `build` |
+| Swift / Objective-C / Xcode | `Library/Developer/Xcode/DerivedData` (in addition to SwiftPM download caches) | Archives, simulator data, signing/user settings, generic `.build` and source checkouts |
+| Elixir / Erlang | `.hex/packages`, `_build/{dev,test,prod,shared}/lib/<app>/ebin` | `deps`, source, `priv` data, Hex config, Mix-installed tools, custom environments |
+| Haskell / Stack / Cabal | `.stack-work/dist`, `dist-newstyle/{build,cache}` | Generic `dist`, toolchains, source, global config |
+| Zig | `.zig-cache`, `.cache/zig`, `Library/Caches/zig` | Installed `zig-out`, generic `zig-cache`, Zig SDK/source |
+
+These complement existing JS/TypeScript, Python, Rust, Java/Kotlin/Scala,
+Go, C#/.NET and C/C++ layouts above. Coverage is deliberately per layout,
+not a promise that every output from a language can safely be deleted.
+Custom paths and source-vendoring directories need stronger context.
+
+Layout references:
+[RubyGems/Bundler caches](https://guides.rubygems.org/caching-and-vendoring/),
+[RubyGems environment](https://guides.rubygems.org/environment-variables/),
+[Composer cache settings](https://getcomposer.org/doc/06-config.md#cache-dir),
+[Dart's cache location](https://dart.dev/tools/pub/environment-variables),
+[Flutter build system](https://github.com/flutter/flutter/blob/master/packages/flutter_tools/lib/src/build_system/build_system.dart),
+[Mix build paths](https://hexdocs.pm/mix/Mix.Project.html),
+[Hex package cache implementation](https://github.com/hexpm/hex/blob/main/lib/hex/scm.ex),
+[Stack work directories](https://docs.haskellstack.org/en/stable/topics/stack_work/),
+[Cabal build layout](https://cabal.readthedocs.io/en/2.0/nix-local-build.html), and
+[Zig build system](https://ziglang.org/learn/build-system/).
+
+The shared corpus now has 350 positive/negative fixtures, including
+lookalikes, unrelated source and configuration siblings. The 2,000 seeded
+ambiguous-path trials per implementation include the new tool names and
+near misses. Integration and N/8N operation-count tests exercise the longest
+new roots, including Ruby, Mix and Windows Pub layouts.
