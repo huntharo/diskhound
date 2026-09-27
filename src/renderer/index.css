@@ -2760,6 +2760,10 @@ button, input, select, textarea { font: inherit; }
   overflow: hidden;
 }
 
+.file-view.has-bulk-status {
+  grid-template-rows: auto auto auto auto minmax(0, 1fr);
+}
+
 .file-toolbar {
   display: flex;
   align-items: center;

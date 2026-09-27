@@ -399,7 +399,7 @@ export function FileList({ snapshot, initialFilter, onRescan }: Props) {
   };
 
   return (
-    <div className="file-view">
+    <div className={`file-view${bulkStatus ? " has-bulk-status" : ""}`}>
       <div className="file-toolbar">
         <input
           className="filter-input"

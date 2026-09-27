@@ -23,6 +23,9 @@ test("bulk trash shows progress, cancels queued files, reports failures, and off
   await page.getByRole("button", { name: "Trash selected", exact: true }).click();
   const status = page.locator(".file-view [role=status]");
   await expect(status).toContainText("Moving to Trash: 0 of 5 files");
+  const statusBox = await status.boundingBox();
+  const firstRowBox = await page.locator(".file-row").first().boundingBox();
+  expect(firstRowBox!.y - (statusBox!.y + statusBox!.height)).toBeLessThan(60);
   await expect(page.getByRole("button", { name: "Trash selected", exact: true })).toBeDisabled();
   await expect.poll(() => handle.app.evaluate(() => (globalThis as any).trashCalls)).toBe(4);
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
