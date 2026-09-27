@@ -68,7 +68,7 @@ beforeAll(async () => {
 
 describe("Files tab", () => {
   it("sorts and filters the largest files without asking main", async () => {
-    const view = ui.mount(h(FileList, { snapshot }));
+    const view = ui.mount(h(FileList, { snapshot, onRescan: () => {} }));
     await ui.settle();
     // The mount's own IPC goes through the harness: settings and icons.
     expect(ui.takeIpc()).toEqual(expect.arrayContaining(["diskhound:get-settings", "diskhound:get-file-icon"]));

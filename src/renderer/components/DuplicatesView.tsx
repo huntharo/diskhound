@@ -13,6 +13,7 @@ import {
   deletedPathTitle,
   useDeletedPaths,
 } from "../lib/deletedPaths";
+import { updateDuplicateGroupWindow, type DuplicateGroupWindow, type DuplicateSortMode } from "../lib/duplicateStream";
 import { formatBytes, formatElapsed, humanAge } from "../lib/format";
 import { useConfirmPermanentDelete, useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
@@ -32,7 +33,10 @@ interface Props {
   onClearAnalysis: (rootPath: string) => void;
 }
 
-type SortMode = "wasted" | "copies" | "size";
+type SortMode = DuplicateSortMode;
+
+/** Groups rendered at first, and added per "Show more". */
+const GROUP_PAGE = 200;
 
 export function DuplicatesView({ snapshot, analysis, progress, isScanning, onClearAnalysis }: Props) {
   const rootPath = snapshot.rootPath;
@@ -47,6 +51,11 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
   const { findProtectedFolder, isProtectedPath } = useExcludedFolderProtection();
   const { isDeleted } = useDeletedPaths();
   const [sortMode, setSortMode] = useState<SortMode>("wasted");
+  const [shownLimit, setShownLimit] = useState(GROUP_PAGE);
+  // Another drive's groups start again from the first page.
+  useEffect(() => {
+    setShownLimit(GROUP_PAGE);
+  }, [rootPath]);
   const confirmDelete = useConfirmPermanentDelete();
   // Optional narrower scope — lets the user scan a subfolder of the
   // current disk snapshot rather than the whole root. Null = use
@@ -173,6 +182,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
     setDismissed(new Set());
     setExpanded(new Set());
     setSelectedPaths(new Set());
+    setShownLimit(GROUP_PAGE);
     setScanStarting(true); // suppresses the "no index" warning during the IPC roundtrip
     void nativeApi.startDuplicateScan(effectiveScope);
   };
@@ -190,6 +200,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
     setDismissed(new Set());
     setExpanded(new Set());
     setSelectedPaths(new Set());
+    setShownLimit(GROUP_PAGE);
     setScanStarting(true); // suppress the "no index" warning while we set up the chain
     setChainPhase("regular");
     // Reset the snapshot-status tracker to whatever status the snapshot
@@ -303,35 +314,33 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
     }
   };
 
-  const visibleGroups = useMemo(() => {
-    if (!analysis) return [];
-    const groups = analysis.groups.filter((g) => !dismissed.has(g.hash));
-    switch (sortMode) {
-      case "copies":
-        return [...groups].sort((a, b) => b.files.length - a.files.length);
-      case "size":
-        return [...groups].sort((a, b) => b.size - a.size);
-      case "wasted":
-      default:
-        return [...groups].sort((a, b) => duplicateGroupReclaimable(b) - duplicateGroupReclaimable(a));
-    }
-  }, [analysis, dismissed, sortMode]);
-
-  const visibleWasted = useMemo(
-    () => visibleGroups.reduce((sum, g) => sum + duplicateGroupReclaimable(g), 0),
-    [visibleGroups],
-  );
+  // Only the first `shownLimit` groups render. During a scan, each
+  // progress event places its new groups into that page instead of
+  // re-sorting (and re-rendering) every group found so far.
+  const groupWindowRef = useRef<DuplicateGroupWindow | null>(null);
+  const groupWindow = useMemo(() => {
+    groupWindowRef.current = analysis
+      ? updateDuplicateGroupWindow(groupWindowRef.current, analysis.groups, sortMode, dismissed, shownLimit)
+      : null;
+    return groupWindowRef.current;
+  }, [analysis, dismissed, sortMode, shownLimit]);
+  const visibleGroups = groupWindow?.shown ?? [];
+  const visibleCount = groupWindow?.visibleCount ?? 0;
+  const visibleWasted = groupWindow?.visibleWasted ?? 0;
+  const hiddenCount = visibleCount - visibleGroups.length;
 
   /**
    * Select every duplicate EXCEPT the one we want to keep — the common
    * case ("trash all the extras, keep one copy per group"). `which`
-   * controls which copy to keep. Runs across visibleGroups so dismissed
+   * controls which copy to keep. Runs across every group that isn't
+   * dismissed, including those past the shown page, so dismissed
    * groups don't get re-selected.
    */
   const selectAllExcept = (which: "newest" | "oldest") => {
     setSelectedPaths(() => {
       const next = new Set<string>();
-      for (const group of visibleGroups) {
+      for (const group of analysis?.groups ?? []) {
+        if (dismissed.has(group.hash)) continue;
         const sorted = [...group.files].sort((a, b) =>
           which === "newest" ? b.modifiedAt - a.modifiedAt : a.modifiedAt - b.modifiedAt,
         );
@@ -345,18 +354,20 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
   };
 
   /**
-   * Map of path → file size for the current analysis. Rebuilt whenever
-   * the analysis changes; used to compute the "X bytes" total in the
-   * bulk-actions toolbar without having to scan groups each render.
+   * Map of path → file size for the current analysis, for the "X bytes"
+   * total in the bulk-actions toolbar. Only built while something is
+   * selected: it covers every file, and the analysis changes on every
+   * progress event during a scan.
    */
+  const hasSelection = selectedPaths.size > 0;
   const pathSizeMap = useMemo(() => {
     const map = new Map<string, number>();
-    if (!analysis) return map;
+    if (!analysis || !hasSelection) return map;
     for (const g of analysis.groups) {
       for (const f of g.files) map.set(f.path, g.size);
     }
     return map;
-  }, [analysis]);
+  }, [analysis, hasSelection]);
 
   const selectionBytes = useMemo(() => {
     let total = 0;
@@ -446,7 +457,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
             <>
               <div className="duplicates-title-row">
                 <span className="duplicates-title">
-                  {visibleGroups.length} duplicate group{visibleGroups.length !== 1 ? "s" : ""}
+                  {visibleCount.toLocaleString()} duplicate group{visibleCount !== 1 ? "s" : ""}
                 </span>
                 <span className="duplicates-subtitle">
                   {formatBytes(visibleWasted)} reclaimable
@@ -579,7 +590,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
       )}
 
       {/* ── Sort bar ── */}
-      {analysis && !isScanning && visibleGroups.length > 0 && (
+      {analysis && !isScanning && visibleCount > 0 && (
         <div className="duplicates-sort-bar">
           <div className="chip-group">
             <button className={`chip ${sortMode === "wasted" ? "active" : ""}`} onClick={() => setSortMode("wasted")}>
@@ -651,7 +662,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
           </div>
         )}
 
-        {analysis && !isScanning && visibleGroups.length === 0 && (
+        {analysis && !isScanning && visibleCount === 0 && (
           <div className="duplicates-empty">
             <div className="duplicates-empty-text">
               {dismissed.size > 0 ? "All groups handled" : "No duplicates found"}
@@ -690,6 +701,17 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
             onToggleGroupSelected={setGroupSelected}
           />
         ))}
+
+        {hiddenCount > 0 && (
+          <div className="duplicates-show-more">
+            <span>
+              Showing {visibleGroups.length.toLocaleString()} of {visibleCount.toLocaleString()} groups
+            </span>
+            <button className="action-btn" onClick={() => setShownLimit((limit) => limit + GROUP_PAGE)}>
+              Show {Math.min(GROUP_PAGE, hiddenCount).toLocaleString()} more
+            </button>
+          </div>
+        )}
       </div>
 
       {/* ── Bulk action bar ── floats at the bottom whenever anything

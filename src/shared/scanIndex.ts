@@ -18,6 +18,7 @@ import { createIdleScanSnapshot } from "./contracts";
 import { parseIndexLine } from "./indexLineParse";
 import { normPath } from "./pathUtils";
 import { attachPipeErrorHandlers } from "./streamSafety";
+import { TopK } from "./topK";
 
 const INDEX_DIR = "scan-indexes";
 const INDEX_SUFFIX = ".ndjson.gz";
@@ -316,8 +317,7 @@ export async function loadLargestFiles(
 ): Promise<IndexRecord[]> {
   if (!FS.existsSync(filePath)) return [];
 
-  const top: IndexRecord[] = [];
-  let smallestInTop = 0;
+  const top = new TopK<IndexRecord>(limit, bySizeDesc);
 
   const gunzip = createGunzip();
   const source = createReadStream(filePath);
@@ -336,20 +336,7 @@ export async function loadLargestFiles(
       // Skip directory entries — they carry mtime only, no size.
       if (rec.t === "d") continue;
       if (rec.h === 1) continue;
-
-      if (top.length < limit) {
-        top.push(rec);
-        if (top.length === limit) {
-          top.sort((a, b) => a.s - b.s);
-          smallestInTop = top[0].s;
-        }
-      } else if (rec.s > smallestInTop) {
-        // Replace the smallest entry (binary insertion keeps it sorted ascending)
-        top[0] = rec;
-        // Re-bubble down to maintain sorted order — simple re-sort is fine at this size
-        top.sort((a, b) => a.s - b.s);
-        smallestInTop = top[0].s;
-      }
+      top.offer(rec);
     }
   } catch { /* stream errored — return partial */ }
   finally {
@@ -357,7 +344,11 @@ export async function loadLargestFiles(
     try { source.destroy(); } catch { /* ok */ }
   }
 
-  return top.sort((a, b) => b.s - a.s);
+  return top.sorted();
+}
+
+function bySizeDesc(a: { s: number }, b: { s: number }): number {
+  return b.s - a.s;
 }
 
 /**
@@ -396,8 +387,7 @@ export async function loadDirectChildrenFromIndex(
   const prefix = parentNorm.endsWith(":") ? parentNorm + Path.sep : parentNorm + Path.sep;
 
   const childDirTotals = new Map<string, { size: number; fileCount: number }>();
-  const topFiles: IndexRecord[] = [];
-  let smallestInTop = 0;
+  const topFiles = new TopK<IndexRecord>(fileLimit, bySizeDesc);
 
   const gunzip = createGunzip();
   const source = createReadStream(filePath);
@@ -424,17 +414,7 @@ export async function loadDirectChildrenFromIndex(
       const firstSep = rest.search(/[\\/]/);
       if (firstSep === -1) {
         // Direct file in parentPath — capture in top-N.
-        if (topFiles.length < fileLimit) {
-          topFiles.push(rec);
-          if (topFiles.length === fileLimit) {
-            topFiles.sort((a, b) => a.s - b.s);
-            smallestInTop = topFiles[0].s;
-          }
-        } else if (rec.s > smallestInTop) {
-          topFiles[0] = rec;
-          topFiles.sort((a, b) => a.s - b.s);
-          smallestInTop = topFiles[0].s;
-        }
+        topFiles.offer(rec);
       } else {
         // Belongs to a child subfolder — roll up into that folder's totals.
         const childName = rest.slice(0, firstSep);
@@ -461,7 +441,7 @@ export async function loadDirectChildrenFromIndex(
 
   return {
     dirs,
-    files: topFiles.sort((a, b) => b.s - a.s),
+    files: topFiles.sorted(),
   };
 }
 
@@ -514,10 +494,8 @@ export async function buildSnapshotFromIndex(
   let bytesSeen = 0;
   const directoryTotals = new Map<string, { size: number; count: number }>();
   const extensionTotals = new Map<string, { size: number; count: number }>();
-  const largestFiles: ScanFileRecord[] = [];
-  // Bounded heap semantics for largestFiles: keep up to TOP_FILE_LIMIT,
-  // with a running "smallest size in the top" cursor for O(1) reject.
-  let smallestInTop = 0;
+  // Bounded heap: O(1) reject for files smaller than all TOP_FILE_LIMIT kept.
+  const largestFiles = new TopK<ScanFileRecord>(TOP_FILE_LIMIT, (a, b) => b.size - a.size);
 
   // Directory set: populated both from explicit {t:"d"} entries AND from
   // every unique parent directory encountered during the file walk. The
@@ -616,8 +594,9 @@ export async function buildSnapshotFromIndex(
     if (rec.h === 1) {
       continue;
     }
-    if (largestFiles.length < TOP_FILE_LIMIT) {
-      largestFiles.push({
+    const lowest = largestFiles.lowest;
+    if (!lowest || rec.s > lowest.size) {
+      largestFiles.offer({
         path: rec.p,
         name,
         parentPath: Path.dirname(rec.p),
@@ -625,21 +604,6 @@ export async function buildSnapshotFromIndex(
         size: rec.s,
         modifiedAt: rec.m,
       });
-      if (largestFiles.length === TOP_FILE_LIMIT) {
-        largestFiles.sort((a, b) => a.size - b.size);
-        smallestInTop = largestFiles[0].size;
-      }
-    } else if (rec.s > smallestInTop) {
-      largestFiles[0] = {
-        path: rec.p,
-        name,
-        parentPath: Path.dirname(rec.p),
-        extension,
-        size: rec.s,
-        modifiedAt: rec.m,
-      };
-      largestFiles.sort((a, b) => a.size - b.size);
-      smallestInTop = largestFiles[0].size;
     }
   }
   } catch { /* stream errored — finalize with partial data */ }
@@ -649,7 +613,7 @@ export async function buildSnapshotFromIndex(
   }
 
   // Finalize: sort largest files descending, build hottestDirectories
-  largestFiles.sort((a, b) => b.size - a.size);
+  const largestFilesSorted = largestFiles.sorted();
 
   const hottestDirectories: DirectoryHotspot[] = Array.from(
     directoryTotals.entries(),
@@ -693,7 +657,7 @@ export async function buildSnapshotFromIndex(
     directoriesVisited: directorySet.size,
     skippedEntries: 0,
     bytesSeen,
-    largestFiles,
+    largestFiles: largestFilesSorted,
     hottestDirectories,
     topExtensions,
     errorMessage: params.errorMessage ?? null,
@@ -736,12 +700,11 @@ export async function searchIndexFile(
   const minSize = query.minSizeBytes ?? 0;
   const extFilter = query.extension?.trim().toLowerCase() ?? "";
   const limit = Math.min(2_000, Math.max(1, query.limit ?? 400));
-  const hits: IndexSearchHit[] = [];
+  const hits = new TopK<IndexSearchHit>(limit, (a, b) => b.size - a.size);
   let filesScanned = 0;
-  let smallest = 0;
 
   if (!needle || !FS.existsSync(filePath)) {
-    return { hits, truncated: false, filesScanned };
+    return { hits: [], truncated: false, filesScanned };
   }
 
   const PathMod = await import("node:path");
@@ -768,25 +731,16 @@ export async function searchIndexFile(
       const haystack = rec.p.toLowerCase();
       if (!haystack.includes(needle) && !extension.includes(needle)) continue;
 
-      const hit: IndexSearchHit = {
+      const lowest = hits.lowest;
+      if (lowest && rec.s <= lowest.size) continue;
+      hits.offer({
         path: rec.p,
         name,
         parentPath: PathMod.dirname(rec.p),
         extension,
         size: rec.s,
         modifiedAt: typeof rec.m === "number" ? rec.m : 0,
-      };
-      if (hits.length < limit) {
-        hits.push(hit);
-        if (hits.length === limit) {
-          hits.sort((a, b) => a.size - b.size);
-          smallest = hits[0]!.size;
-        }
-      } else if (hit.size > smallest) {
-        hits[0] = hit;
-        hits.sort((a, b) => a.size - b.size);
-        smallest = hits[0]!.size;
-      }
+      });
     }
   } catch { /* partial */ }
   finally {
@@ -794,6 +748,6 @@ export async function searchIndexFile(
     try { source.destroy(); } catch { /* ok */ }
   }
 
-  hits.sort((a, b) => b.size - a.size);
-  return { hits, truncated: filesScanned > 0 && hits.length >= limit, filesScanned };
+  const sorted = hits.sorted();
+  return { hits: sorted, truncated: filesScanned > 0 && sorted.length >= limit, filesScanned };
 }

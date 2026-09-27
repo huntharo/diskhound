@@ -2760,6 +2760,10 @@ button, input, select, textarea { font: inherit; }
   overflow: hidden;
 }
 
+.file-view.has-bulk-status {
+  grid-template-rows: auto auto auto auto minmax(0, 1fr);
+}
+
 .file-toolbar {
   display: flex;
   align-items: center;
@@ -5823,6 +5827,16 @@ button, input, select, textarea { font: inherit; }
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.duplicates-show-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 8px 0 4px;
+  font-size: 11px;
+  color: var(--text-muted);
 }
 
 /* Group card */
