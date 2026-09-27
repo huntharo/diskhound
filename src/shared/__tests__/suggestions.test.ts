@@ -86,6 +86,30 @@ describe("analyzeCleanupFromIndex", () => {
     expect(caches?.paths).toEqual(["/mono/jvm/target/scala-2.13"]);
   });
 
+  it("does not offer tool configuration, installed tools or arbitrary obj folders as caches", async () => {
+    const filePath = indexFilePath("scan-tool-homes");
+    const { stream, finalize } = openIndexWriter(filePath);
+    const keep = [
+      ".yarn/patches/pkg.patch", ".yarn/releases/yarn.cjs", ".bun/bin/bun",
+      ".gradle/gradle.properties", ".gradle/init.d/init.gradle", ".m2/settings.xml",
+      ".nuget/NuGet.Config", "obj/model.obj", "obj/Debug/notes.txt", "venv/app.py",
+      "ccache/src/a.c", "cmake-build-debug/README.txt",
+    ];
+    const caches = [
+      ".yarn/cache/pkg.zip", ".bun/install/cache/pkg/a.js", ".gradle/caches/modules/a.jar",
+      ".m2/repository/org/a.jar", ".nuget/packages/pkg/a.dll", "obj/Debug/net8.0/App.dll",
+      ".venv/lib/python3.12/site-packages/pkg/a.py", ".cache/ccache/a", "custom/CMakeFiles/a.o",
+    ];
+    for (const path of keep) stream.write(`${JSON.stringify({ p: `/mono/${path}`, s: 1000, m: 1 })}\n`);
+    for (const path of caches) stream.write(`${JSON.stringify({ p: `/mono/${path}`, s: 100, m: 1 })}\n`);
+    await finalize();
+    const result = await analyzeCleanupFromIndex("/mono", filePath, defaultSettings().cleanup);
+    const cache = result.suggestions.find((s) => s.category === "build-cache");
+    expect(cache?.totalSize).toBe(caches.length * 100);
+    expect(cache?.paths).toHaveLength(caches.length);
+    expect(cache?.paths).not.toContain("/mono/obj");
+  });
+
   it("splits DiagOutputDir ETL traces out of generic logs", async () => {
     const filePath = indexFilePath("scan-diag");
     const { stream, finalize } = openIndexWriter(filePath);

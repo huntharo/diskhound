@@ -44,31 +44,16 @@ export function devKindCssVar(kind: DevArtifactKind): string {
 const SEGMENT_KIND: Record<string, DevArtifactKind> = {
   node_modules: "node-modules",
   ".pnpm-store": "package-cache",
-  ".yarn": "package-cache",
-  ".bun": "package-cache",
   ".next": "js-build",
   ".nuxt": "js-build",
-  ".output": "js-build",
   ".turbo": "js-build",
   ".parcel-cache": "js-build",
   ".svelte-kit": "js-build",
-  ".vercel": "js-build",
-  ".netlify": "js-build",
   __pycache__: "python",
-  ".venv": "python",
-  venv: "python",
-  ".tox": "python",
   ".mypy_cache": "python",
   ".pytest_cache": "python",
   ".ruff_cache": "python",
-  ".gradle": "jvm",
-  ".m2": "jvm",
-  ".nuget": "dotnet",
   cmakefiles: "cmake-build",
-  "cmake-build-debug": "cmake-build",
-  "cmake-build-release": "cmake-build",
-  ccache: "compiler-cache",
-  sccache: "compiler-cache",
   ".worktrees": "worktree",
   diagoutputdir: "diag-logs",
   rdclientautotrace: "diag-logs",
@@ -82,6 +67,9 @@ const SEGMENT_KIND: Record<string, DevArtifactKind> = {
 export const ARTIFACT_SEGMENT_NAMES: ReadonlySet<string> = new Set([
   ...Object.keys(SEGMENT_KIND),
   "target",
+  ".yarn", ".bun", ".output", ".vercel", ".netlify",
+  ".venv", "venv", ".tox", ".gradle", ".m2", ".nuget",
+  "ccache", "sccache", "mozilla.sccache", "obj",
   ".cargo",
   "pkg",
   "pnpm",
@@ -89,6 +77,15 @@ export const ARTIFACT_SEGMENT_NAMES: ReadonlySet<string> = new Set([
   ".terraform",
   ".terraform.d",
 ]);
+
+/** Longest supported root: pkg/mod/<host>/<owner>/<module>/v2@v2.0.0. */
+export const ARTIFACT_ROOT_LOOKBACK = 6;
+
+// Reserved tool names are ASCII. Unicode case folding (e.g. K -> k)
+// must not turn a different folder name into one of these markers.
+function lowerArtifactName(value: string): string {
+  return /^[\x00-\x7f]*$/.test(value) ? value.toLowerCase() : value;
+}
 
 function splitSegments(filePath: string): string[] {
   return filePath.split(/[\\/]+/).filter(Boolean);
@@ -108,24 +105,81 @@ function joinSegments(original: string, count: number): string {
 }
 
 /**
- * Every root ends at most three segments past the matched segment. The folder-tree
+ * Every root ends within ARTIFACT_ROOT_LOOKBACK segments of its match. The folder-tree
  * fallback (devArtifactFolderTree.ts) relies on that to skip rows whose
- * last four segments aren't in ARTIFACT_SEGMENT_NAMES, so a rule that
+ * last ARTIFACT_ROOT_LOOKBACK segments aren't in ARTIFACT_SEGMENT_NAMES, so a rule that
  * reaches further needs that reader changed too.
  */
 export function classifyArtifactPath(filePath: string): { root: string; kind: DevArtifactKind } | null {
   const parts = splitSegments(filePath);
   for (let i = 0; i < parts.length; i++) {
-    const lower = parts[i]!.toLowerCase();
+    const lower = lowerArtifactName(parts[i]!);
     // Also keeps Object.prototype names ("constructor", "toString")
     // out of the SEGMENT_KIND lookup below.
     if (!ARTIFACT_SEGMENT_NAMES.has(lower)) continue;
+
+    const next = lowerArtifactName(parts[i + 1] ?? "");
+    const after = lowerArtifactName(parts[i + 2] ?? "");
+
+    // Tool homes also contain configuration, patches and executables.
+    // Classify only the documented cache/output children, never the home.
+    if (lower === ".yarn") {
+      return /^(?:cache|unplugged)$/.test(next)
+        ? { root: joinSegments(filePath, i + 2), kind: "package-cache" } : null;
+    }
+    if (lower === ".bun") {
+      return next === "install" && after === "cache"
+        ? { root: joinSegments(filePath, i + 3), kind: "package-cache" } : null;
+    }
+    if (lower === ".gradle") {
+      if (next === "caches" || /^[0-9]+\.[0-9]+(?:\.[0-9]+)?$/.test(next)) {
+        return { root: joinSegments(filePath, i + 2), kind: "jvm" };
+      }
+      return next === "wrapper" && after === "dists"
+        ? { root: joinSegments(filePath, i + 3), kind: "jvm" } : null;
+    }
+    if (lower === ".m2" || lower === ".nuget") {
+      return next === (lower === ".m2" ? "repository" : "packages")
+        ? { root: joinSegments(filePath, i + 2), kind: lower === ".m2" ? "jvm" : "dotnet" } : null;
+    }
+    if (lower === ".vercel" || lower === ".netlify" || lower === ".output") {
+      const output = lower === ".vercel" ? /^(?:cache|output)$/.test(next)
+        : lower === ".netlify" ? next === "cache" : /^(?:public|server)$/.test(next);
+      return output ? { root: joinSegments(filePath, i + 2), kind: "js-build" } : null;
+    }
+    if (lower === ".venv" || lower === "venv" || lower === ".tox") {
+      const lib = i + (lower === ".tox" ? 2 : 1);
+      if (lowerArtifactName(parts[lib] ?? "") === "lib") {
+        const version = lowerArtifactName(parts[lib + 1] ?? "");
+        const packages = version === "site-packages" ? lib + 1
+          : /^python[0-9]+\.[0-9]+t?$/.test(version) ? lib + 2 : -1;
+        if (packages >= 0 && lowerArtifactName(parts[packages] ?? "") === "site-packages") {
+          return { root: joinSegments(filePath, packages + 1), kind: "python" };
+        }
+      }
+      continue;
+    }
+    if (lower === "obj" && /^(?:debug|release)$/.test(next)
+      && /^net(?:[0-9]+(?:\.[0-9]+)?|(?:standard|coreapp)[0-9]+\.[0-9]+)(?:-(?:windows|android|ios|macos|maccatalyst|tvos|browser)(?:[0-9]+(?:\.[0-9]+)*)?)?$/.test(after)) {
+      return { root: joinSegments(filePath, i + 3), kind: "dotnet" };
+    }
+    if (lower === "ccache" || lower === "sccache" || lower === "mozilla.sccache") {
+      const parent = lowerArtifactName(parts[i - 1] ?? "");
+      const grandparent = lowerArtifactName(parts[i - 2] ?? "");
+      if ((parent === "caches" && grandparent === "library")
+        || (parent === "local" && grandparent === "appdata")
+        || (lower === "sccache" && parent === "mozilla" && grandparent === "local"
+          && lowerArtifactName(parts[i - 3] ?? "") === "appdata")) {
+        return { root: joinSegments(filePath, i + 1), kind: "compiler-cache" };
+      }
+      continue;
+    }
 
     if (lower === "target") {
       // Shared by Cargo, sbt, Maven and arbitrary user folders. Never
       // infer a language from target, a profile name, or an ancestor's
       // project marker. Keep only the subtree carrying the evidence.
-      const next = parts[i + 1]?.toLowerCase() ?? "";
+      const next = lowerArtifactName(parts[i + 1] ?? "");
       if (/^scala-(?:2\.[0-9]+|3)(?:\.[0-9]+)*$/.test(next)
         || next === "maven-status" || next === "maven-archiver") {
         return { root: joinSegments(filePath, i + 2), kind: "jvm" };
@@ -135,19 +189,32 @@ export function classifyArtifactPath(filePath: string): { root: string; kind: De
       // do not strengthen the evidence.
       const profile = /^(?:debug|release)$/.test(next) ? i + 1
         : /^[a-z0-9_]+-[a-z0-9_]+-[a-z0-9_][a-z0-9_-]*$/.test(next) ? i + 2 : -1;
-      if (profile >= 0 && /^(?:debug|release)$/.test(parts[profile]?.toLowerCase() ?? "")
-        && /^(?:deps|incremental|\.fingerprint)$/.test(parts[profile + 1]?.toLowerCase() ?? "")) {
+      if (profile >= 0 && /^(?:debug|release)$/.test(lowerArtifactName(parts[profile] ?? "") ?? "")
+        && /^(?:deps|incremental|\.fingerprint)$/.test(lowerArtifactName(parts[profile + 1] ?? "") ?? "")) {
         return { root: joinSegments(filePath, profile + 2), kind: "rust-target" };
       }
       continue;
     }
 
-    if (lower === ".cargo" && i + 1 < parts.length && parts[i + 1]!.toLowerCase() === "registry") {
+    if (lower === ".cargo" && i + 1 < parts.length && lowerArtifactName(parts[i + 1]!) === "registry") {
       return { root: joinSegments(filePath, i + 2), kind: "cargo-registry" };
     }
 
-    if (lower === "pkg" && i + 1 < parts.length && parts[i + 1]!.toLowerCase() === "mod") {
-      return { root: joinSegments(filePath, i + 2), kind: "go-module" };
+    if (lower === "pkg" && next === "mod") {
+      if (after === "cache" && lowerArtifactName(parts[i + 3] ?? "") === "download") {
+        return { root: joinSegments(filePath, i + 4), kind: "go-module" };
+      }
+      // pkg/mod can be a source package. Downloaded modules carry a
+      // version in the directory name. Bound the search so repeated
+      // ambiguous segments cannot turn this into a quadratic walk.
+      if (after.includes(".")) {
+        for (let end = i + 2; end < Math.min(parts.length, i + ARTIFACT_ROOT_LOOKBACK); end++) {
+          if (/^[a-z0-9.!_-]+@v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][a-z0-9.+-]+)?$/.test(lowerArtifactName(parts[end]!))) {
+            return { root: joinSegments(filePath, end + 1), kind: "go-module" };
+          }
+        }
+      }
+      continue;
     }
 
     // pnpm's global content-addressable store outside a `.pnpm-store`
@@ -156,12 +223,12 @@ export function classifyArtifactPath(filePath: string): { root: string; kind: De
     // (Windows). Projects' node_modules are clones / hard links of it —
     // see storageSharing.ts. Same rule as `classify` in the native
     // scanner's dev_artifacts.rs.
-    if (lower === "pnpm" && i + 1 < parts.length && parts[i + 1]!.toLowerCase() === "store") {
+    if (lower === "pnpm" && i + 1 < parts.length && lowerArtifactName(parts[i + 1]!) === "store") {
       return { root: joinSegments(filePath, i + 2), kind: "package-cache" };
     }
 
     if (lower === ".cache" && i + 1 < parts.length) {
-      const next = parts[i + 1]!.toLowerCase();
+      const next = lowerArtifactName(parts[i + 1]!);
       if (next === "ccache" || next === "sccache" || next === "yarn" || next === "pnpm") {
         const kind: DevArtifactKind = next === "yarn" || next === "pnpm" ? "package-cache" : "compiler-cache";
         return { root: joinSegments(filePath, i + 2), kind };
@@ -172,7 +239,7 @@ export function classifyArtifactPath(filePath: string): { root: string; kind: De
     // the lock file. The rest of .terraform records the selected
     // workspace and the last backend config, so it stays.
     if (lower === ".terraform" && i + 1 < parts.length) {
-      const next = parts[i + 1]!.toLowerCase();
+      const next = lowerArtifactName(parts[i + 1]!);
       if (next === "providers" || next === "plugins") {
         return { root: joinSegments(filePath, i + 2), kind: "terraform" };
       }
@@ -180,7 +247,7 @@ export function classifyArtifactPath(filePath: string): { root: string; kind: De
 
     // The documented plugin_cache_dir. `.terraform.d/plugins` holds
     // providers installed by hand, so it stays.
-    if (lower === ".terraform.d" && i + 1 < parts.length && parts[i + 1]!.toLowerCase() === "plugin-cache") {
+    if (lower === ".terraform.d" && i + 1 < parts.length && lowerArtifactName(parts[i + 1]!) === "plugin-cache") {
       return { root: joinSegments(filePath, i + 2), kind: "terraform" };
     }
 

@@ -198,5 +198,780 @@
     "path": "/mono/target/scala-2.13-backup/debug/deps/a",
     "root": null,
     "kind": null
+  },
+  {
+    "path": "/mono/.venv/lib/python3.12/site-packages/pkg/a.py",
+    "root": "/mono/.venv/lib/python3.12/site-packages",
+    "kind": "python"
+  },
+  {
+    "path": "/mono/venv/Lib/site-packages/pkg/a.py",
+    "root": "/mono/venv/Lib/site-packages",
+    "kind": "python"
+  },
+  {
+    "path": "/mono/.venv/lib/python3.13t/site-packages/pkg/a.py",
+    "root": "/mono/.venv/lib/python3.13t/site-packages",
+    "kind": "python"
+  },
+  {
+    "path": "/mono/.tox/py312/lib/python3.12/site-packages/pkg/a.py",
+    "root": "/mono/.tox/py312/lib/python3.12/site-packages",
+    "kind": "python"
+  },
+  {
+    "path": "/mono/.tox/py312/Lib/site-packages/pkg/a.py",
+    "root": "/mono/.tox/py312/Lib/site-packages",
+    "kind": "python"
+  },
+  {
+    "path": "/mono/__pycache__/data",
+    "root": "/mono/__pycache__",
+    "kind": "python"
+  },
+  {
+    "path": "/mono/.mypy_cache/data",
+    "root": "/mono/.mypy_cache",
+    "kind": "python"
+  },
+  {
+    "path": "/mono/.pytest_cache/data",
+    "root": "/mono/.pytest_cache",
+    "kind": "python"
+  },
+  {
+    "path": "/mono/.ruff_cache/data",
+    "root": "/mono/.ruff_cache",
+    "kind": "python"
+  },
+  {
+    "path": "/mono/.yarn/cache/pkg.zip",
+    "root": "/mono/.yarn/cache",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/mono/.yarn/unplugged/pkg/index.js",
+    "root": "/mono/.yarn/unplugged",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/mono/.bun/install/cache/pkg/index.js",
+    "root": "/mono/.bun/install/cache",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/mono/.pnpm-store/v3/files/a",
+    "root": "/mono/.pnpm-store",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/mono/pnpm/store/v10/files/a",
+    "root": "/mono/pnpm/store",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/mono/.cache/yarn/v6/pkg/a",
+    "root": "/mono/.cache/yarn",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/mono/.cache/pnpm/v10/a",
+    "root": "/mono/.cache/pnpm",
+    "kind": "package-cache"
+  },
+  {
+    "path": "/mono/.gradle/caches/modules-2/files-2.1/a.jar",
+    "root": "/mono/.gradle/caches",
+    "kind": "jvm"
+  },
+  {
+    "path": "/mono/.gradle/wrapper/dists/gradle-8.10/bin/a",
+    "root": "/mono/.gradle/wrapper/dists",
+    "kind": "jvm"
+  },
+  {
+    "path": "/mono/.m2/repository/org/example/1/a.jar",
+    "root": "/mono/.m2/repository",
+    "kind": "jvm"
+  },
+  {
+    "path": "/mono/.nuget/packages/newtonsoft.json/13/lib/a.dll",
+    "root": "/mono/.nuget/packages",
+    "kind": "dotnet"
+  },
+  {
+    "path": "/mono/obj/Debug/net8.0/App.dll",
+    "root": "/mono/obj/Debug/net8.0",
+    "kind": "dotnet"
+  },
+  {
+    "path": "/mono/obj/Release/net48/App.dll",
+    "root": "/mono/obj/Release/net48",
+    "kind": "dotnet"
+  },
+  {
+    "path": "/mono/obj/Debug/netstandard2.0/a.dll",
+    "root": "/mono/obj/Debug/netstandard2.0",
+    "kind": "dotnet"
+  },
+  {
+    "path": "/mono/obj/Debug/netcoreapp3.1/a.dll",
+    "root": "/mono/obj/Debug/netcoreapp3.1",
+    "kind": "dotnet"
+  },
+  {
+    "path": "/mono/obj/Release/net8.0-windows10.0.19041.0/a.dll",
+    "root": "/mono/obj/Release/net8.0-windows10.0.19041.0",
+    "kind": "dotnet"
+  },
+  {
+    "path": "/mono/.cache/ccache/a/b",
+    "root": "/mono/.cache/ccache",
+    "kind": "compiler-cache"
+  },
+  {
+    "path": "/mono/.cache/sccache/a/b",
+    "root": "/mono/.cache/sccache",
+    "kind": "compiler-cache"
+  },
+  {
+    "path": "/mono/Library/Caches/ccache/a/b",
+    "root": "/mono/Library/Caches/ccache",
+    "kind": "compiler-cache"
+  },
+  {
+    "path": "/mono/Library/Caches/sccache/a/b",
+    "root": "/mono/Library/Caches/sccache",
+    "kind": "compiler-cache"
+  },
+  {
+    "path": "/mono/AppData/Local/ccache/a/b",
+    "root": "/mono/AppData/Local/ccache",
+    "kind": "compiler-cache"
+  },
+  {
+    "path": "/mono/AppData/Local/sccache/a/b",
+    "root": "/mono/AppData/Local/sccache",
+    "kind": "compiler-cache"
+  },
+  {
+    "path": "/mono/cmake-build-debug/CMakeFiles/app.dir/a.o",
+    "root": "/mono/cmake-build-debug/CMakeFiles",
+    "kind": "cmake-build"
+  },
+  {
+    "path": "/mono/custom-build/CMakeFiles/app.dir/a.o",
+    "root": "/mono/custom-build/CMakeFiles",
+    "kind": "cmake-build"
+  },
+  {
+    "path": "/mono/go/pkg/mod/github.com/org/pkg@v1.2.3/a.go",
+    "root": "/mono/go/pkg/mod/github.com/org/pkg@v1.2.3",
+    "kind": "go-module"
+  },
+  {
+    "path": "/mono/go/pkg/mod/cache/download/github.com/org/pkg/@v/v1.2.3.zip",
+    "root": "/mono/go/pkg/mod/cache/download",
+    "kind": "go-module"
+  },
+  {
+    "path": "/mono/.cargo/registry/src/pkg/a.rs",
+    "root": "/mono/.cargo/registry",
+    "kind": "cargo-registry"
+  },
+  {
+    "path": "/mono/.next/cache/a",
+    "root": "/mono/.next",
+    "kind": "js-build"
+  },
+  {
+    "path": "/mono/.nuxt/cache/a",
+    "root": "/mono/.nuxt",
+    "kind": "js-build"
+  },
+  {
+    "path": "/mono/.turbo/cache/a",
+    "root": "/mono/.turbo",
+    "kind": "js-build"
+  },
+  {
+    "path": "/mono/.parcel-cache/cache/a",
+    "root": "/mono/.parcel-cache",
+    "kind": "js-build"
+  },
+  {
+    "path": "/mono/.svelte-kit/cache/a",
+    "root": "/mono/.svelte-kit",
+    "kind": "js-build"
+  },
+  {
+    "path": "/mono/.vercel/output/a",
+    "root": "/mono/.vercel/output",
+    "kind": "js-build"
+  },
+  {
+    "path": "/mono/.vercel/cache/a",
+    "root": "/mono/.vercel/cache",
+    "kind": "js-build"
+  },
+  {
+    "path": "/mono/.netlify/cache/a",
+    "root": "/mono/.netlify/cache",
+    "kind": "js-build"
+  },
+  {
+    "path": "/mono/.output/server/a",
+    "root": "/mono/.output/server",
+    "kind": "js-build"
+  },
+  {
+    "path": "/mono/.output/public/a",
+    "root": "/mono/.output/public",
+    "kind": "js-build"
+  },
+  {
+    "path": "/mono/.terraform/providers/registry/a",
+    "root": "/mono/.terraform/providers",
+    "kind": "terraform"
+  },
+  {
+    "path": "/mono/.terraform/plugins/registry/a",
+    "root": "/mono/.terraform/plugins",
+    "kind": "terraform"
+  },
+  {
+    "path": "/mono/.terraform.d/plugin-cache/registry/a",
+    "root": "/mono/.terraform.d/plugin-cache",
+    "kind": "terraform"
+  },
+  {
+    "path": "/mono/.worktrees/feature/src/a",
+    "root": "/mono/.worktrees/feature",
+    "kind": "worktree"
+  },
+  {
+    "path": "/mono/DiagOutputDir/a.etl",
+    "root": "/mono/DiagOutputDir",
+    "kind": "diag-logs"
+  },
+  {
+    "path": "/mono/RdClientAutoTrace/a.etl",
+    "root": "/mono/RdClientAutoTrace",
+    "kind": "diag-logs"
+  },
+  {
+    "path": "/mono/venv",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/venv/notes.txt",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.venv/src/app.py",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.venv/bin/python",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.venv/lib/python3x12/site-packages/a",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.venv/lib/python3.12-backup/site-packages/a",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.venv/lib/python3.12/site-packages-old/a",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.tox/notes.txt",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.tox/py312/src/app.py",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.tox/py312/lib/python3/site-packages/a",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.yarn",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.yarn/patches/pkg.patch",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.yarn/releases/yarn.cjs",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.yarn/plugins/plugin.cjs",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.yarn/sdks/typescript/lib/a.js",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.yarn/versions/pkg.yml",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.yarn/cache-old/a",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.yarn/patches/node_modules/a/index.js",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.bun",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.bun/bin/bun",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.bun/install/global/node_modules/a/index.js",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.bun/install/cache-old/a",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.gradle",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.gradle/gradle.properties",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.gradle/init.d/init.gradle",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.gradle/wrapper/gradle-wrapper.properties",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.gradle/caches-old/a",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.gradle/init.d/node_modules/a.js",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.m2",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.m2/settings.xml",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.m2/toolchains.xml",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.m2/repository-old/a",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.nuget",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.nuget/NuGet.Config",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.nuget/plugins/plugin.exe",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.nuget/packages-old/a",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/obj",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/obj/model.obj",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/obj/Debug/App.dll",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/obj/Debug/network/App.dll",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/obj/Debug/net8x0/a",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/obj/Debug/net8.0-backup2-x/a",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/obj/Debug/netstandard20/a",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/bin/Release/net8.0/App.dll",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/cmake-build-debug",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/cmake-build-release/notes.txt",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/custom-build/CMakeLists.txt",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/CMakeFiles-old/a.o",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/ccache",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/ccache/src/a.c",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/sccache/src/a.rs",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/Library/Caches/ccache-old/a",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/AppData/Roaming/ccache/notes",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/go/pkg/mod-old/a.go",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/go/pkg/modules/a.go",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/go/mod/pkg/a.go",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.cargo/bin/cargo",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.cargo/credentials.toml",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.vercel/project.json",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.vercel/README.txt",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.netlify/state.json",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.netlify/functions-source/a.js",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.output/notes.txt",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.terraform/terraform.tfstate",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.terraform/environment",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.terraform/modules/modules.json",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.terraform.d/plugins/vendor/plugin",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/node_modules-old/pkg/a",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/__pycache__-old/a.py",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.pytest_cache-old/data",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.pnpm-store-old/data",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/venv/.m2/settings.xml",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/venv/notes.txt",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/node_modules/pkg/.gradle/gradle.properties",
+    "root": "/mono/node_modules",
+    "kind": "node-modules"
+  },
+  {
+    "path": "/mono/node_modules/pkg/.venv/lib/python3.12/site-packages/a",
+    "root": "/mono/node_modules",
+    "kind": "node-modules"
+  },
+  {
+    "path": "/mono/node_modules/pkg/obj/Debug/net8.0/a.dll",
+    "root": "/mono/node_modules",
+    "kind": "node-modules"
+  },
+  {
+    "path": "/mono/node_modules/pkg/CMakeFiles/a.o",
+    "root": "/mono/node_modules",
+    "kind": "node-modules"
+  },
+  {
+    "path": "/mono/go/pkg/mod/example.com/team/module/v2@v2.0.0/file.go",
+    "root": "/mono/go/pkg/mod/example.com/team/module/v2@v2.0.0",
+    "kind": "go-module"
+  },
+  {
+    "path": "/mono/go/pkg/mod/golang.org/x/sys@v0.0.0-20250320123456-abcdef123456/file.go",
+    "root": "/mono/go/pkg/mod/golang.org/x/sys@v0.0.0-20250320123456-abcdef123456",
+    "kind": "go-module"
+  },
+  {
+    "path": "/mono/go/pkg/mod/gopkg.in/yaml.v3@v3.0.1/file.go",
+    "root": "/mono/go/pkg/mod/gopkg.in/yaml.v3@v3.0.1",
+    "kind": "go-module"
+  },
+  {
+    "path": "/mono/go/pkg/mod/github.com/!azure/sdk@v1.2.3+incompatible/file.go",
+    "root": "/mono/go/pkg/mod/github.com/!azure/sdk@v1.2.3+incompatible",
+    "kind": "go-module"
+  },
+  {
+    "path": "/mono/pkg/mod",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/pkg/mod/module.go",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/go/pkg/mod/example.com/org/repo@v1.2/file.go",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/go/pkg/mod/cache/notes.txt",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/go/pkg/mod/example.com/org/repo@v1.2.3-backup_/file.go",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/go/pkg/mod/example.com/org/repo@v1.2.3+/file.go",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/.worKtrees/feature/a",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/CMaKeFiles/a.o",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/go/pkg/mod/example.com/pacKage@v1.2.3/a.go",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/Library/Caches/Mozilla.sccache/a/b",
+    "root": "/mono/Library/Caches/Mozilla.sccache",
+    "kind": "compiler-cache"
+  },
+  {
+    "path": "/mono/AppData/Local/Mozilla/sccache/a/b",
+    "root": "/mono/AppData/Local/Mozilla/sccache",
+    "kind": "compiler-cache"
+  },
+  {
+    "path": "/mono/Mozilla.sccache/src/a.rs",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/Mozilla/sccache/src/a.rs",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/AppData/Roaming/Mozilla/sccache/a",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/Library/Application Support/Mozilla.sccache/config",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/android/.gradle/8.10/fileHashes/data.bin",
+    "root": "/mono/android/.gradle/8.10",
+    "kind": "jvm"
+  },
+  {
+    "path": "/mono/android/.gradle/9.0.0/checksums/data.bin",
+    "root": "/mono/android/.gradle/9.0.0",
+    "kind": "jvm"
+  },
+  {
+    "path": "/mono/android/.gradle/8.10-notes/a.txt",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/obj/Debug/net8.0-backup/notes.txt",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/obj/Debug/net8.0-windows.10/notes.txt",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/obj/Debug/net8.0-android34.0/a.dll",
+    "root": "/mono/obj/Debug/net8.0-android34.0",
+    "kind": "dotnet"
+  },
+  {
+    "path": "/mono/obj/Debug/net9.0-ios18.0/a.dll",
+    "root": "/mono/obj/Debug/net9.0-ios18.0",
+    "kind": "dotnet"
   }
 ]

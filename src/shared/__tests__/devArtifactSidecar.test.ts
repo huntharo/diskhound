@@ -465,6 +465,26 @@ describe("mixed-language evidence", () => {
     }
   });
 
+  it("flags legacy tool homes for a full scan instead of preserving broad cleanup roots", async () => {
+    const { reportFromSidecar, planRescanTargets } = await import("../devArtifactSidecar");
+    const sidecar = {
+      version: 1 as const, rootPath: "/mono", generatedAt: 1, projects: [],
+      roots: [
+        { path: "/mono/.yarn", kind: "package-cache" as const, size: 1000, files: 10 },
+        { path: "/mono/.bun", kind: "package-cache" as const, size: 1000, files: 10 },
+        { path: "/mono/.gradle", kind: "jvm" as const, size: 1000, files: 10 },
+        { path: "/mono/.m2", kind: "jvm" as const, size: 1000, files: 10 },
+        { path: "/mono/.nuget", kind: "dotnet" as const, size: 1000, files: 10 },
+        { path: "/mono/venv", kind: "python" as const, size: 1000, files: 10 },
+        { path: "/mono/ccache", kind: "compiler-cache" as const, size: 1000, files: 10 },
+        { path: "/mono/cmake-build-debug", kind: "cmake-build" as const, size: 1000, files: 10 },
+        { path: "/mono/.gradle/caches", kind: "jvm" as const, size: 100, files: 1 },
+      ],
+    };
+    expect(reportFromSidecar(sidecar)).toMatchObject({ totalBytes: 100, classificationNeedsFullScan: true });
+    expect(planRescanTargets(sidecar)).toEqual(["/mono/.gradle/caches"]);
+  });
+
   it("rejects legacy guesses in both reports and rescan plans", async () => {
     const { reportFromSidecar, planRescanTargets, sidecarFromReport, compactDevArtifactSidecar, rescanDevArtifactSidecar, dropSidecarRoots } = await import("../devArtifactSidecar");
     const sidecar = {

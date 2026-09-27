@@ -355,9 +355,6 @@ export async function analyzeCleanupFromIndex(
   };
 }
 
-/** A path segment named `obj` (.NET build output), any case. */
-const OBJ_SEGMENT = /(?:^|[\\/])obj(?:[\\/]|$)/i;
-
 /** `classified` is `classifyArtifactPath(filePath)` when the caller already has it. */
 function cleanupCacheRoot(
   filePath: string,
@@ -370,15 +367,7 @@ function cleanupCacheRoot(
       if (last && last !== "dist" && last !== "build" && last !== "out") return classified.root;
     }
   }
-  if (!OBJ_SEGMENT.test(filePath)) return null;
-  const parts = filePath.split(/[\\/]+/).filter(Boolean);
-  const idx = parts.findIndex((seg) => seg.toLowerCase() === "obj");
-  if (idx < 0) return null;
-  const sep = filePath.includes("\\") ? "\\" : "/";
-  if (/^[A-Za-z]:/.test(filePath)) return parts.slice(0, idx + 1).join(sep);
-  if (filePath.startsWith("/")) return "/" + parts.slice(0, idx + 1).join("/");
-  if (filePath.startsWith("\\\\")) return "\\\\" + parts.slice(0, idx + 1).join("\\");
-  return parts.slice(0, idx + 1).join(sep);
+  return null;
 }
 
 interface Bucket {

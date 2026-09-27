@@ -287,10 +287,187 @@ fn is_project_marker(name: &str) -> bool {
     )
 }
 
+fn numeric_version(value: &str, min_parts: usize, max_parts: usize) -> bool {
+    let mut count = 0;
+    for part in value.split('.') {
+        count += 1;
+        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+    }
+    (min_parts..=max_parts).contains(&count)
+}
+
+fn dotnet_framework(value: &str) -> bool {
+    let (framework, platform) = value
+        .split_once('-')
+        .map_or((value, None), |(a, b)| (a, Some(b)));
+    let Some(version) = framework.strip_prefix("net") else {
+        return false;
+    };
+    let valid = if let Some(version) = version
+        .strip_prefix("standard")
+        .or_else(|| version.strip_prefix("coreapp"))
+    {
+        numeric_version(version, 2, 2)
+    } else {
+        numeric_version(version, 1, 2)
+    };
+    valid
+        && platform.is_none_or(|platform| {
+            let letters = platform
+                .bytes()
+                .take_while(|b| b.is_ascii_lowercase())
+                .count();
+            matches!(
+                &platform[..letters],
+                "windows" | "android" | "ios" | "macos" | "maccatalyst" | "tvos" | "browser"
+            ) && (letters == platform.len() || numeric_version(&platform[letters..], 1, usize::MAX))
+        })
+}
+
+fn go_module_version(name: &str) -> bool {
+    let Some((module, version)) = name.split_once("@v") else {
+        return false;
+    };
+    if module.is_empty()
+        || !module
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".!_-".contains(&b))
+    {
+        return false;
+    }
+    let suffix = version.find(['-', '+']);
+    let base = suffix.map_or(version, |i| &version[..i]);
+    numeric_version(base, 3, 3)
+        && suffix.is_none_or(|i| {
+            let suffix = &version[i + 1..];
+            !suffix.is_empty()
+                && suffix
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b".+-".contains(&b))
+        })
+}
+
 fn classify(path: &str) -> Option<(String, Kind)> {
     let parts = split_segments(path);
     for i in 0..parts.len() {
+        crate::work::step();
         let lower = parts[i].to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            ".yarn"
+                | ".bun"
+                | ".gradle"
+                | ".m2"
+                | ".nuget"
+                | ".vercel"
+                | ".netlify"
+                | ".output"
+                | ".venv"
+                | "venv"
+                | ".tox"
+                | "obj"
+        ) {
+            let next = parts
+                .get(i + 1)
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_default();
+            let after = parts
+                .get(i + 2)
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_default();
+            // Only generated/cache children, not whole tool homes.
+            match lower.as_str() {
+                ".yarn" => {
+                    return matches!(next.as_str(), "cache" | "unplugged")
+                        .then(|| (join_segments(path, &parts, i + 2), Kind::PackageCache));
+                }
+                ".bun" => {
+                    return (next == "install" && after == "cache")
+                        .then(|| (join_segments(path, &parts, i + 3), Kind::PackageCache));
+                }
+                ".gradle" => {
+                    if next == "caches" || numeric_version(&next, 2, 3) {
+                        return Some((join_segments(path, &parts, i + 2), Kind::Jvm));
+                    }
+                    return (next == "wrapper" && after == "dists")
+                        .then(|| (join_segments(path, &parts, i + 3), Kind::Jvm));
+                }
+                ".m2" => {
+                    return (next == "repository")
+                        .then(|| (join_segments(path, &parts, i + 2), Kind::Jvm));
+                }
+                ".nuget" => {
+                    return (next == "packages")
+                        .then(|| (join_segments(path, &parts, i + 2), Kind::Dotnet));
+                }
+                ".vercel" | ".netlify" | ".output" => {
+                    let output = match lower.as_str() {
+                        ".vercel" => matches!(next.as_str(), "cache" | "output"),
+                        ".netlify" => next == "cache",
+                        _ => matches!(next.as_str(), "public" | "server"),
+                    };
+                    return output.then(|| (join_segments(path, &parts, i + 2), Kind::JsBuild));
+                }
+                ".venv" | "venv" | ".tox" => {
+                    let lib = i + if lower == ".tox" { 2 } else { 1 };
+                    if parts
+                        .get(lib)
+                        .is_some_and(|s| s.eq_ignore_ascii_case("lib"))
+                    {
+                        let version = parts
+                            .get(lib + 1)
+                            .map(|s| s.to_ascii_lowercase())
+                            .unwrap_or_default();
+                        let packages = if version == "site-packages" {
+                            Some(lib + 1)
+                        } else if version.strip_prefix("python").is_some_and(|v| {
+                            numeric_version(v.strip_suffix('t').unwrap_or(v), 2, 2)
+                        }) {
+                            Some(lib + 2)
+                        } else {
+                            None
+                        };
+                        if let Some(packages) = packages {
+                            if parts
+                                .get(packages)
+                                .is_some_and(|s| s.eq_ignore_ascii_case("site-packages"))
+                            {
+                                return Some((
+                                    join_segments(path, &parts, packages + 1),
+                                    Kind::Python,
+                                ));
+                            }
+                        }
+                    }
+                }
+                "obj"
+                    if matches!(next.as_str(), "debug" | "release") && dotnet_framework(&after) =>
+                {
+                    return Some((join_segments(path, &parts, i + 3), Kind::Dotnet));
+                }
+                _ => {}
+            }
+            continue;
+        }
+        if matches!(lower.as_str(), "ccache" | "sccache" | "mozilla.sccache") {
+            let parent = i.checked_sub(1).and_then(|j| parts.get(j));
+            let grandparent = i.checked_sub(2).and_then(|j| parts.get(j));
+            if parent.zip(grandparent).is_some_and(|(p, gp)| {
+                (p.eq_ignore_ascii_case("caches") && gp.eq_ignore_ascii_case("library"))
+                    || (p.eq_ignore_ascii_case("local") && gp.eq_ignore_ascii_case("appdata"))
+                    || (lower == "sccache"
+                        && p.eq_ignore_ascii_case("mozilla")
+                        && gp.eq_ignore_ascii_case("local")
+                        && i.checked_sub(3)
+                            .and_then(|j| parts.get(j))
+                            .is_some_and(|s| s.eq_ignore_ascii_case("appdata")))
+            }) {
+                return Some((join_segments(path, &parts, i + 1), Kind::CompilerCache));
+            }
+            continue;
+        }
         if lower == "target" {
             // Match only tool-specific subtrees, never a whole ambiguous
             // target/profile tree or an ancestor's project language.
@@ -343,8 +520,30 @@ fn classify(path: &str) -> Option<(String, Kind)> {
         {
             return Some((join_segments(path, &parts, i + 2), Kind::CargoRegistry));
         }
-        if lower == "pkg" && i + 1 < parts.len() && parts[i + 1].eq_ignore_ascii_case("mod") {
-            return Some((join_segments(path, &parts, i + 2), Kind::GoModule));
+        if lower == "pkg"
+            && parts
+                .get(i + 1)
+                .is_some_and(|s| s.eq_ignore_ascii_case("mod"))
+        {
+            if parts
+                .get(i + 2)
+                .is_some_and(|s| s.eq_ignore_ascii_case("cache"))
+                && parts
+                    .get(i + 3)
+                    .is_some_and(|s| s.eq_ignore_ascii_case("download"))
+            {
+                return Some((join_segments(path, &parts, i + 4), Kind::GoModule));
+            }
+            // Same bounded layout search as ARTIFACT_ROOT_LOOKBACK in TS.
+            if parts.get(i + 2).is_some_and(|s| s.contains('.')) {
+                for end in i + 2..parts.len().min(i + 6) {
+                    crate::work::step();
+                    if go_module_version(&parts[end].to_ascii_lowercase()) {
+                        return Some((join_segments(path, &parts, end + 1), Kind::GoModule));
+                    }
+                }
+            }
+            continue;
         }
         // pnpm's global store outside a `.pnpm-store` folder:
         // `$PNPM_HOME/store`. Same rule as `classifyArtifactPath` in
@@ -395,15 +594,10 @@ fn classify(path: &str) -> Option<(String, Kind)> {
 fn mapped_kind(lower: &str) -> Option<Kind> {
     Some(match lower {
         "node_modules" => Kind::NodeModules,
-        ".pnpm-store" | ".yarn" | ".bun" => Kind::PackageCache,
-        ".next" | ".nuxt" | ".output" | ".turbo" | ".parcel-cache" | ".svelte-kit"
-        | ".vercel" | ".netlify" => Kind::JsBuild,
-        "__pycache__" | ".venv" | "venv" | ".tox" | ".mypy_cache" | ".pytest_cache"
-        | ".ruff_cache" => Kind::Python,
-        ".gradle" | ".m2" => Kind::Jvm,
-        ".nuget" => Kind::Dotnet,
-        "cmakefiles" | "cmake-build-debug" | "cmake-build-release" => Kind::CmakeBuild,
-        "ccache" | "sccache" => Kind::CompilerCache,
+        ".pnpm-store" => Kind::PackageCache,
+        ".next" | ".nuxt" | ".turbo" | ".parcel-cache" | ".svelte-kit" => Kind::JsBuild,
+        "__pycache__" | ".mypy_cache" | ".pytest_cache" | ".ruff_cache" => Kind::Python,
+        "cmakefiles" => Kind::CmakeBuild,
         ".worktrees" => Kind::Worktree,
         "diagoutputdir" | "rdclientautotrace" => Kind::DiagLogs,
         _ => return None,
@@ -473,6 +667,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn classification_scales_with_files_and_ambiguous_path_depth() {
+        let count = |files: usize, depth: usize| {
+            let prefix = "/pkg/mod/example.com".repeat(depth);
+            crate::work::take();
+            for _ in 0..files {
+                assert!(classify(&format!("{prefix}/notes.txt")).is_none());
+                assert!(
+                    classify("/go/pkg/mod/example.com/team/module/v2@v2.0.0/file.go").is_some()
+                );
+            }
+            crate::work::take()
+        };
+        // Grow file count alone and path depth alone: each must be linear.
+        let small = count(100, 10);
+        assert!(count(800, 10) <= small * 16);
+        assert!(count(100, 80) <= small * 16);
+        assert!(count(800, 80) <= 600_000);
+    }
+
+    #[test]
     fn mixed_monorepo_is_independent_of_marker_order() {
         let files = [
             "/mono/Cargo.toml",
@@ -539,6 +753,13 @@ mod tests {
                             };
                             (root, case["kind"].as_str().unwrap().to_string())
                         });
+                        if let Some((root, kind)) = &expected {
+                            assert_eq!(
+                                classify(root).map(|(r, k)| (r, k.as_str().to_string())),
+                                Some((root.clone(), kind.clone())),
+                                "root: {root}"
+                            );
+                        }
                         assert_eq!(
                             classify(&path).map(|(r, k)| (r, k.as_str().to_string())),
                             expected,
@@ -557,24 +778,15 @@ mod tests {
             seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
             seed as usize % n
         };
-        let names = [
-            "target",
-            "build",
-            "dist",
-            "out",
-            "debug",
-            "release",
-            "doc",
-            "classes",
-            "scala-source",
-            "scala-3x",
-            "deps-old",
-        ];
+        let names: Vec<String> = serde_json::from_str(include_str!(
+            "../../../src/test/fixtures/devArtifactAmbiguousSegments.json"
+        ))
+        .unwrap();
         for _ in 0..2000 {
             let mut path = String::from("/mono");
             for _ in 0..1 + random(24) {
                 path.push('/');
-                path.push_str(names[random(names.len())]);
+                path.push_str(&names[random(names.len())]);
             }
             path.push_str("/notes.txt");
             assert!(classify(&path).is_none(), "{path}");
