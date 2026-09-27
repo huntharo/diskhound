@@ -97,7 +97,10 @@ type DeleteProgress = {
   size: number;
   deletedBytes: number;
   totalBytes: number;
-  filesWalked: number;
+  itemsDeleted: number;
+  itemsTotal: number | null;
+  percent: number | null;
+  phase: "preparing" | "deleting";
   startedAt: number;
 };
 
@@ -350,7 +353,10 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
         return {
           ...prev,
           path: progress.path,
-          filesWalked: progress.filesWalked,
+          itemsDeleted: progress.itemsDeleted,
+          itemsTotal: progress.itemsTotal,
+          percent: progress.percent,
+          phase: progress.phase,
         };
       });
     });
@@ -547,13 +553,16 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
           size: artifact.size,
           deletedBytes,
           totalBytes,
-          filesWalked: 0,
+          itemsDeleted: 0,
+          itemsTotal: null,
+          percent: null,
+          phase: "preparing",
           startedAt,
         });
         setBusyPaths((prev) => new Set(prev).add(artifact.path));
         await yieldToUi();
         try {
-          let result = await nativeApi.permanentlyDeletePath(artifact.path);
+          let result = await nativeApi.permanentlyDeletePath(artifact.path, artifact.fileCount);
           if (result?.requiresElevation) {
             if (!askedElevate) {
               askedElevate = true;
@@ -906,9 +915,14 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
           </div>
           <div className="dev-rescan-banner-detail">
             {truncatePath(deleteProgress.path)}
-            {deleteProgress.filesWalked > 0
-              ? ` · ${formatCount(deleteProgress.filesWalked)} files`
-              : ` · ${formatBytes(deleteProgress.size)}`}
+            {deleteProgress.phase === "preparing"
+              ? " · Starting deletion"
+              : <>
+                  {deleteProgress.percent !== null && (
+                    <> · {deleteProgress.percent < 100 ? "≈ " : ""}{deleteProgress.percent.toFixed(1)}%</>
+                  )}
+                  {` · ${formatCount(deleteProgress.itemsDeleted)} items removed`}
+                </>}
             {` · ${deleteElapsedSec}s`}
           </div>
         </div>

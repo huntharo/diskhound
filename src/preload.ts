@@ -63,8 +63,8 @@ const api: DiskhoundNativeApi = {
   revealPath: (targetPath) => ipcRenderer.invoke("diskhound:reveal-path", targetPath),
   openPath: (targetPath) => ipcRenderer.invoke("diskhound:open-path", targetPath),
   trashPath: (targetPath) => ipcRenderer.invoke("diskhound:trash-path", targetPath),
-  permanentlyDeletePath: (targetPath) =>
-    ipcRenderer.invoke("diskhound:permanent-delete-path", targetPath),
+  permanentlyDeletePath: (targetPath, expectedFiles) =>
+    ipcRenderer.invoke("diskhound:permanent-delete-path", targetPath, expectedFiles),
   permanentlyDeletePathElevated: (targetPath) =>
     ipcRenderer.invoke("diskhound:permanent-delete-path-elevated", targetPath),
   onPermanentDeleteProgress: (listener) => {

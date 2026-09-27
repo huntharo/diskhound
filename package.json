@@ -35,6 +35,7 @@
     "dist": "bun run build:native && bun run build && electron-builder --config electron-builder.yml"
   },
   "dependencies": {
+    "@shutterstock/p-map-iterable": "^1.1.2",
     "blake2": "^5.0.1",
     "electron-updater": "^6.6.2",
     "preact": "^10.26.9"

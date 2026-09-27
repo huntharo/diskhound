@@ -477,6 +477,26 @@
     "open": 0,
     "observedBytesWritten": 0
   },
+  "permanent-delete-tree": {
+    "note": "User-requested 4 MiB build tree: 256 file unlinks, 9 streamed directory opens, no content writes or persisted progress. rmdir metadata operations are outside this harness's counters. No automatic deletion: 0 writes/day and 0 MB/day at default and 1-minute monitoring. One manual delete performs these 256 metadata unlinks; OS metadata bytes are not measured.",
+    "writeFile": 0,
+    "appendFile": 0,
+    "rename": 0,
+    "copyFile": 0,
+    "link": 0,
+    "mkdir": 0,
+    "createWriteStream": 0,
+    "unlink": 256,
+    "readFile": 0,
+    "readdir": 0,
+    "stat": 0,
+    "lstat": 10,
+    "access": 0,
+    "existsSync": 0,
+    "createReadStream": 0,
+    "open": 9,
+    "observedBytesWritten": 0
+  },
   "mac-available-polling-1-minute-monitor": {
     "note": "One hour of 10 s display polls plus raw-free monitoring while purgeable swings: 0 writes, 0 MB. Projects 0 writes/day and 0 MB/day at both the 60-minute default and 1-minute minimum; shared in-memory accounting runs once/minute/volume. Existing dirty baseline flush remains once per quit.",
     "writeFile": 0,

@@ -13,6 +13,7 @@ export function resolveBundledPermanentDeleteWorkerPath(baseDir: string): string
 
 export interface RunPermanentDeleteWorkerOptions {
   workerPath: string;
+  expectedFiles?: number;
   onProgress?: (progress: PermanentDeleteProgress) => void;
 }
 
@@ -25,10 +26,13 @@ export async function runPermanentDeleteWorker(
     type: "delete",
     requestId: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     targetPath,
+    expectedFiles: options.expectedFiles,
   };
 
   await new Promise<void>((resolve, reject) => {
     let settled = false;
+    let progressFailed = false;
+    let progressError: unknown;
 
     const settle = (callback: () => void) => {
       if (settled) return;
@@ -36,20 +40,27 @@ export async function runPermanentDeleteWorker(
       worker.off("message", onMessage);
       worker.off("error", onError);
       worker.off("exit", onExit);
-      void worker.terminate().finally(() => callback());
+      void worker.terminate().then(callback, reject);
     };
 
     const onMessage = (message: PermanentDeleteWorkerResponse) => {
       if (!message || message.requestId !== request.requestId) return;
       if (message.type === "progress") {
-        options.onProgress?.(message.progress);
+        if (!progressFailed) {
+          try { options.onProgress?.(message.progress); } catch (error) {
+            // A UI listener must not escape the event emitter or terminate
+            // active filesystem work. Let the worker finish, then reject.
+            progressFailed = true;
+            progressError = error;
+          }
+        }
         return;
       }
       if (message.type === "result") {
-        settle(() => resolve());
+        settle(() => progressFailed ? reject(progressError) : resolve());
         return;
       }
-      settle(() => reject(new Error(message.message)));
+      settle(() => reject(Object.assign(new Error(message.message), { code: message.code })));
     };
 
     const onError = (error: Error) => {
@@ -57,8 +68,8 @@ export async function runPermanentDeleteWorker(
     };
 
     const onExit = (code: number) => {
-      if (!settled && code !== 0) {
-        settle(() => reject(new Error(`Permanent delete worker exited with code ${code}`)));
+      if (!settled) {
+        settle(() => reject(new Error(`Permanent delete worker exited with code ${code} before reporting a result`)));
       }
     };
 
