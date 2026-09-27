@@ -12,7 +12,9 @@ import type {
   ScanSnapshot,
   SystemMemorySnapshot,
 } from "../../shared/contracts";
+import { formatDriveSpace, driveUsedPercent } from "../lib/driveSpace";
 import { formatBytes, formatCount, relativeTime } from "../lib/format";
+import { useSizeUnitBase } from "../lib/sizeUnitSettings";
 import { saveLocalPreference } from "../lib/localPreference";
 import { reportPollFailure } from "../lib/pollFailure";
 import { nativeApi } from "../nativeApi";
@@ -231,6 +233,7 @@ interface DetailRow {
 }
 
 export function SystemWidget() {
+  const sizeUnitBase = useSizeUnitBase();
   const [drives, setDrives] = useState<DiskSpaceInfo[]>([]);
   const [scan, setScan] = useState<ScanSnapshot | null>(null);
   const [memory, setMemory] = useState<SystemMemorySnapshot | null>(null);
@@ -452,23 +455,29 @@ export function SystemWidget() {
     const totalBytes = drives.reduce((sum, d) => sum + d.totalBytes, 0);
     const usedBytes = drives.reduce((sum, d) => sum + d.usedBytes, 0);
     const freeBytes = drives.reduce((sum, d) => sum + d.freeBytes, 0);
+    const availableBytes = drives.some((d) => d.availableBytes !== undefined)
+      ? drives.reduce((sum, d) => sum + (d.availableBytes ?? d.freeBytes), 0) : undefined;
+    const purgeableBytes = drives.some((d) => d.purgeableBytes !== undefined)
+      ? drives.reduce((sum, d) => sum + (d.purgeableBytes ?? 0), 0) : undefined;
     return {
       totalBytes,
       usedBytes,
       freeBytes,
+      availableBytes,
+      purgeableBytes,
       usedPercent: totalBytes > 0 ? (usedBytes / totalBytes) * 100 : 0,
     };
   }, [drives]);
 
   const activeDrive = rootDrive(scan?.rootPath, drives)
-    ?? drives.slice().sort((a, b) => b.usedPercent - a.usedPercent)[0]
+    ?? drives.slice().sort((a, b) => driveUsedPercent(b) - driveUsedPercent(a))[0]
     ?? null;
-  const diskPct = activeDrive?.usedPercent ?? totalDisk.usedPercent;
-  const diskValue = activeDrive ? pct(activeDrive.usedPercent) : pct(totalDisk.usedPercent);
+  const diskPct = driveUsedPercent(activeDrive ?? totalDisk);
+  const diskValue = pct(diskPct);
   const diskSub = activeDrive
-    ? `${activeDrive.drive} · ${formatBytes(activeDrive.freeBytes)} free`
+    ? `${activeDrive.drive} · ${formatDriveSpace(activeDrive)}`
     : drives.length > 0
-      ? `${formatBytes(totalDisk.freeBytes)} free`
+      ? formatDriveSpace(totalDisk)
       : "";
 
   const memoryPct = memory?.usedPercent ?? null;
@@ -512,7 +521,7 @@ export function SystemWidget() {
   // ── Sparkline ring-buffer updates ─────────────────────────
   useEffect(() => {
     if (drives.length === 0) return;
-    const value = activeDrive?.usedPercent ?? totalDisk.usedPercent;
+    const value = driveUsedPercent(activeDrive ?? totalDisk);
     if (typeof value === "number" && Number.isFinite(value)) {
       setDiskHistory((h) => [...h.slice(-(HISTORY_CAP - 1)), value]);
     }
@@ -558,7 +567,7 @@ export function SystemWidget() {
       value: formatBytes(p.memoryBytes),
       pct: max > 0 ? (p.memoryBytes / max) * 100 : 0,
     }));
-  }, [memory, detailTopN]);
+  }, [memory, detailTopN, sizeUnitBase]);
 
   const cpuDetail = useMemo<DetailRow[]>(() => {
     if (!memory) return [];
@@ -848,24 +857,24 @@ export function SystemWidget() {
 
         {layout.showDrives && (
         <section className="system-widget-section">
-          <SectionHead label="Drives" value={`${formatBytes(totalDisk.freeBytes)} free`} />
+          <SectionHead label="Drives" value={formatDriveSpace(totalDisk)} />
           <div className="system-widget-drive-list">
             {/* Wide mode: show every drive (uncapped). Compact:
               * cap at 4 to keep the widget short, with a static
               * "+ N more drives" footer pointing at the main
               * window. */}
             {(mode === "wide" ? drives : drives.slice(0, 4)).map((drive) => {
-              const cls = pressureClass(drive.usedPercent);
+              const cls = pressureClass(driveUsedPercent(drive));
               return (
                 <div className="system-widget-drive-row" key={drive.drive}>
                   <div className="system-widget-drive-label">
                     <span>{drive.drive}</span>
-                    <span>{formatBytes(drive.freeBytes)} free</span>
+                    <span>{formatDriveSpace(drive)}</span>
                   </div>
                   <div className="system-widget-drive-track">
                     <div
                       className={`system-widget-drive-fill ${cls}`}
-                      style={{ width: `${Math.max(2, Math.min(100, drive.usedPercent))}%` }}
+                      style={{ width: `${Math.max(2, Math.min(100, driveUsedPercent(drive)))}%` }}
                     />
                   </div>
                 </div>

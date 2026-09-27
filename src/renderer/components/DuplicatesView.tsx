@@ -538,7 +538,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
                 : "Starting scan…"}
             </span>
             <span>
-              {snapshot.bytesSeen > 0 && `${(snapshot.bytesSeen / 1024 / 1024 / 1024).toFixed(1)} GB so far`}
+              {snapshot.bytesSeen > 0 && `${formatBytes(snapshot.bytesSeen)} so far`}
             </span>
           </div>
           <div className="duplicates-walk-hint">

@@ -467,12 +467,13 @@ impl IndexWriter {
     }
 }
 
-/// The Unix walker yields entries in the order its parallel reads finish,
+/// The dua-core Unix walker yields entries in the order its parallel reads finish,
 /// and APFS lists a folder's names in hash order. gzip finds repeats only
 /// within 32 KB, so the index writer sorts its lines in runs of this many
 /// bytes before compressing them. On a warm ~/github (625k files, 112 MB
 /// of lines) the index took 24.5 MB in arrival order, 14.6 MB in 16 MB
-/// sorted runs, and 13.6 MB from jwalk, which walked in sorted order.
+/// sorted runs, and 13.6 MB from the previous walker, which walked in sorted order.
+/// Migration and benchmarks: https://github.com/tzarebczan/diskhound/pull/37.
 /// Windows walkers keep their order.
 const SORTED_RUN_BYTES: usize = if cfg!(windows) { 0 } else { 16 << 20 };
 
@@ -5550,12 +5551,11 @@ mod unix_visit_once_tests {
 
         assert_walked_once(&state, &index);
         let note = if cfg!(target_os = "macos") {
-            "4 dirs, 4 files (one a second hardlink), 2 symlinks: 1 listing per dir, 1 lstat \
-             per dir (its index mtime); getattrlistbulk gives files and symlinks theirs. \
-             jwalk took 8 stats: it also lstat'ed every file"
+            "dua-core: 4 dirs, 4 files (one a second hardlink), 2 symlinks: 1 listing per dir, 1 lstat \
+             per dir (its index mtime); getattrlistbulk gives files and symlinks theirs"
         } else {
-            "4 dirs, 4 files (one a second hardlink), 2 symlinks: 1 listing per dir, 1 fstatat \
-             per entry, symlinks included (jwalk took 8: no stat for symlinks)"
+            "dua-core: 4 dirs, 4 files (one a second hardlink), 2 symlinks: 1 listing per dir, 1 fstatat \
+             per entry, symlinks included"
         };
         expect_io_budget(&format!("{OS}/walk"), measured(note, &state.io, None));
     }

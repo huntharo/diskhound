@@ -7006,7 +7006,7 @@ button, input, select, textarea { font: inherit; }
   position: absolute;
   inset: 0;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   background: radial-gradient(ellipse at 50% 30%, rgba(245,158,11,0.04) 0%, transparent 60%),
               var(--bg);
@@ -7016,6 +7016,8 @@ button, input, select, textarea { font: inherit; }
 }
 
 .picker-card {
+  /* Center short lists; overflowing lists start at the scrollable top. */
+  margin-block: auto;
   width: 100%;
   max-width: 520px;
   background: var(--bg-raised);
@@ -7165,6 +7167,7 @@ button, input, select, textarea { font: inherit; }
 
 .drive-card-stats {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   font-size: 10.5px;
   color: var(--text-muted);
@@ -7361,6 +7364,9 @@ button, input, select, textarea { font: inherit; }
      with centered auto-margins so the page breathes. */
   .drive-pills {
     max-width: 50vw;
+  }
+  .drive-pill-purgeable {
+    display: none;
   }
 }
 
@@ -9660,4 +9666,3 @@ body.system-widget-body #app {
   .dev-summary-actions { margin-left: 0; }
   .dev-select-bar { padding-left: 12px; padding-right: 12px; }
 }
-

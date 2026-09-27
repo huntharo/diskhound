@@ -10,6 +10,7 @@ import {
   type DeletedPathAction,
 } from "../lib/deletedPaths";
 import { formatBytes, humanAge } from "../lib/format";
+import { useSizeUnitBase } from "../lib/sizeUnitSettings";
 import { checkFreedSpace, freeBytesBeforeDelete } from "../lib/freedSpaceCheck";
 import { useConfirmPermanentDelete, useExcludedFolderProtection } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
@@ -49,6 +50,7 @@ export function Treemap({
   showFolderOutlines = true,
   onFileClick,
 }: Props) {
+  const sizeUnitBase = useSizeUnitBase();
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rectsRef = useRef<TreemapRect[]>([]);
@@ -245,7 +247,7 @@ export function Treemap({
         );
       }
     }
-  }, [files, dims, areaMode, layout, showFolderOutlines, getDeletedRecord]);
+  }, [files, dims, areaMode, layout, showFolderOutlines, getDeletedRecord, sizeUnitBase]);
 
   const hitTest = useCallback((e: MouseEvent): ScanFileRecord | null => {
     const canvas = canvasRef.current;

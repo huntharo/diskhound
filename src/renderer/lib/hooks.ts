@@ -24,6 +24,8 @@ function diskSpaceEqual(a: DiskSpaceInfo[], b: DiskSpaceInfo[]): boolean {
       left.drive !== right.drive ||
       left.totalBytes !== right.totalBytes ||
       left.freeBytes !== right.freeBytes ||
+      left.availableBytes !== right.availableBytes ||
+      left.purgeableBytes !== right.purgeableBytes ||
       left.usedBytes !== right.usedBytes
     ) {
       return false;

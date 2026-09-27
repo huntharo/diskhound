@@ -1,6 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 
 import type { DiskSpaceInfo, RecentScan } from "../../shared/contracts";
+import { formatDriveSpace, driveUsedPercent } from "../lib/driveSpace";
 import { formatBytes, relativeTime } from "../lib/format";
 import { useLiveDiskSpace } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
@@ -116,7 +117,7 @@ export function DiskPicker({ onScanDrive, onScanFolder }: Props) {
 }
 
 function DriveCard({ drive, onScan }: { drive: DiskSpaceInfo; onScan: () => void }) {
-  const pct = drive.usedPercent;
+  const pct = driveUsedPercent(drive);
   const level = pct > 90 ? "critical" : pct > 75 ? "warn" : "ok";
 
   const driveLabel = drive.drive.includes(":")
@@ -135,12 +136,12 @@ function DriveCard({ drive, onScan }: { drive: DiskSpaceInfo; onScan: () => void
 
       <div className="drive-card-info">
         <MiddleEllipsis className="drive-card-name" text={driveLabel} maxTail={24} />
-        <div className="drive-card-bar">
+        <div className="drive-card-bar" title={drive.availableBytes !== undefined ? "Available includes purgeable space macOS can reclaim." : undefined}>
           <div className={`drive-card-fill ${level}`} style={{ width: `${pct}%` }} />
         </div>
         <div className="drive-card-stats">
           <span>{formatBytes(drive.usedBytes)} used</span>
-          <span className="drive-card-free">{formatBytes(drive.freeBytes)} free</span>
+          <span className="drive-card-free">{formatDriveSpace(drive)}</span>
           <span>{formatBytes(drive.totalBytes)} total</span>
         </div>
       </div>

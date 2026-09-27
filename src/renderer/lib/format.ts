@@ -1,9 +1,29 @@
+import type { GeneralSettings } from "../../shared/contracts";
+import { formatSizeBytes, resolveSizeUnitBase } from "../../shared/sizeUnits";
+import { nativeApi } from "../nativeApi";
+
+let sizeUnitPreference: GeneralSettings["sizeUnits"];
+const sizeUnitListeners = new Set<() => void>();
+
+export function getSizeUnitBase() {
+  return resolveSizeUnitBase(sizeUnitPreference, typeof window === "undefined" ? "linux" : nativeApi.platform);
+}
+
+export function setSizeUnitPreference(preference: GeneralSettings["sizeUnits"]): void {
+  const previous = getSizeUnitBase();
+  sizeUnitPreference = preference;
+  if (getSizeUnitBase() !== previous) {
+    for (const listener of sizeUnitListeners) listener();
+  }
+}
+
+export function subscribeSizeUnits(listener: () => void): () => void {
+  sizeUnitListeners.add(listener);
+  return () => { sizeUnitListeners.delete(listener); };
+}
+
 export function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const exp = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  const val = bytes / 1024 ** exp;
-  return `${val.toFixed(val >= 100 || exp === 0 ? 0 : 1)} ${units[exp]}`;
+  return formatSizeBytes(bytes, getSizeUnitBase());
 }
 
 /** "684–694 GB", "0 B – 32.0 MB", or one value when both ends format alike. */

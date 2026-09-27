@@ -18,6 +18,7 @@ import {
   deletedPathTitle,
   useDeletedPaths,
 } from "../lib/deletedPaths";
+import { formatDriveSpace, driveSpaceLabel } from "../lib/driveSpace";
 import { basename, formatBytes, relativeTime } from "../lib/format";
 import { useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { saveLocalPreference } from "../lib/localPreference";
@@ -630,7 +631,7 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
       <div className="changes-summary">
         <div
           className="changes-summary-net"
-          title={`Change in total bytes seen by the scanner between the two scans. Not the same as the disk's free space — see the "${currentDrive?.drive ?? ""} free" stat to the right.`}
+          title={`Change in total bytes seen by the scanner between the two scans. Not the same as the disk's free space — see the "${currentDrive?.drive ?? ""} ${currentDrive ? driveSpaceLabel(currentDrive) : "free"}" stat to the right.`}
         >
           <span className={`changes-delta-big ${netColorClass}`}>
             {isZeroDelta ? "0 B" : `${gained ? "+" : ""}${formatBytes(Math.abs(diff.totalBytesDelta))}`}
@@ -642,8 +643,10 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
           <SummaryItem label="Current" value={formatBytes(diff.currentBytesSeen)} />
           {currentDrive && (
             <SummaryItem
-              label={`${currentDrive.drive} free`}
-              value={`${formatBytes(currentDrive.freeBytes)} / ${formatBytes(currentDrive.totalBytes)}`}
+              label={`${currentDrive.drive} ${driveSpaceLabel(currentDrive)}`}
+              value={currentDrive.availableBytes === undefined
+                ? `${formatBytes(currentDrive.freeBytes)} / ${formatBytes(currentDrive.totalBytes)}`
+                : `${formatDriveSpace(currentDrive)} / ${formatBytes(currentDrive.totalBytes)} total`}
             />
           )}
           <SummaryItem
