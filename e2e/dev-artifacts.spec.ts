@@ -132,6 +132,13 @@ test("keeps tool configuration out of native and folder-tree cache reports", asy
   const root = testInfo.outputPath("dev");
   const generated: Array<[string, string, string]> = [
     [".yarn/cache/pkg.zip", ".yarn/cache", "package-cache"],
+    [".yarn/berry/cache/pkg.zip", ".yarn/berry/cache", "package-cache"],
+    ["target/aarch64-apple-darwin/release/build/crate-0123456789abcdef/out/lib.a", "target/aarch64-apple-darwin/release/build/crate-0123456789abcdef", "rust-target"],
+    ["Library/Caches/electron/download.zip", "Library/Caches/electron", "package-cache"],
+    ["Library/Caches/vscode-cpptools/ipch/a", "Library/Caches/vscode-cpptools", "compiler-cache"],
+    [".local/share/NuGet/http-cache/a.dat", ".local/share/NuGet/http-cache", "dotnet"],
+    [".cache/pip/http-v2/a", ".cache/pip", "python"],
+    [".npm/_cacache/content-v2/a", ".npm/_cacache", "package-cache"],
     [".bun/install/cache/pkg/a.js", ".bun/install/cache", "package-cache"],
     [".gradle/caches/modules/a.jar", ".gradle/caches", "jvm"],
     [".m2/repository/org/a.jar", ".m2/repository", "jvm"],
@@ -148,6 +155,10 @@ test("keeps tool configuration out of native and folder-tree cache reports", asy
     ".gradle/gradle.properties", ".gradle/init.d/init.gradle", ".m2/settings.xml",
     ".nuget/NuGet.Config", "obj/mesh.obj", "venv/app.py", "ccache/src/a.c",
     "cmake-build-debug/README.txt", "go/pkg/mod/helpers.go",
+    "target/debug/build/source/main.rs", ".yarn/berry/metadata/state.json",
+    "Library/Caches/unknown-tool/my-data", ".npm/_npx/user-script.js",
+    ".tart/vms/work/disk.img", ".codex/worktrees/branch/src/main.ts",
+    ".vscode/extensions/tool/dist/main.js", "Library/Application Support/electron/settings.json",
   ]) writeFile(root, file.split("/"), SMALL_BYTES);
 
   const first = await launch();

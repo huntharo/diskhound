@@ -10,7 +10,7 @@ export const DEV_KIND_LABEL: Record<DevArtifactKind, string> = {
   "cargo-registry": "Cargo registry",
   "js-build": "JS / frontend build output",
   python: "Python venv & caches",
-  "go-module": "Go module cache",
+  "go-module": "Go module & build caches",
   jvm: "Gradle / JVM (Java, Maven, Scala / sbt)",
   dotnet: "NuGet / .NET",
   "compiler-cache": "Compiler caches",
@@ -31,7 +31,7 @@ export const DEV_KIND_SHORT: Record<DevArtifactKind, string> = {
   "go-module": "Go cache",
   jvm: "Gradle / JVM",
   dotnet: ".NET",
-  "compiler-cache": "ccache",
+  "compiler-cache": "Compiler cache",
   "cmake-build": "CMake",
   terraform: "Terraform",
   "diag-logs": "RDP / diag",
@@ -66,7 +66,7 @@ const SEGMENT_KIND: Record<string, DevArtifactKind> = {
  */
 export const ARTIFACT_SEGMENT_NAMES: ReadonlySet<string> = new Set([
   ...Object.keys(SEGMENT_KIND),
-  "target",
+  "target", "library", "appdata", ".npm", ".local",
   ".yarn", ".bun", ".output", ".vercel", ".netlify",
   ".venv", "venv", ".tox", ".gradle", ".m2", ".nuget",
   "ccache", "sccache", "mozilla.sccache", "obj",
@@ -104,6 +104,17 @@ function joinSegments(original: string, count: number): string {
   return parts.join(sep);
 }
 
+// Only documented cache namespaces. A repository named pip/electron/uv is not evidence.
+const CACHE_TOOL_KIND: Readonly<Record<string, DevArtifactKind>> = {
+  pip: "python", uv: "python", "go-build": "go-module", coursier: "jvm",
+  ccache: "compiler-cache", sccache: "compiler-cache", "mozilla.sccache": "compiler-cache",
+  "vscode-cpptools": "compiler-cache",
+  yarn: "package-cache", pnpm: "package-cache", electron: "package-cache",
+  "electron-builder": "package-cache", "ms-playwright": "package-cache",
+  cypress: "package-cache", homebrew: "package-cache", puppeteer: "package-cache",
+  "node-gyp": "package-cache", "org.swift.swiftpm": "package-cache",
+};
+
 /**
  * Every root ends within ARTIFACT_ROOT_LOOKBACK segments of its match. The folder-tree
  * fallback (devArtifactFolderTree.ts) relies on that to skip rows whose
@@ -121,9 +132,28 @@ export function classifyArtifactPath(filePath: string): { root: string; kind: De
     const next = lowerArtifactName(parts[i + 1] ?? "");
     const after = lowerArtifactName(parts[i + 2] ?? "");
 
+    const cacheTool = lower === ".cache" ? i + 1
+      : lower === "library" && next === "caches" ? i + 2 : -1;
+    if (cacheTool >= 0) {
+      const tool = lowerArtifactName(parts[cacheTool] ?? "");
+      const kind = Object.hasOwn(CACHE_TOOL_KIND, tool) ? CACHE_TOOL_KIND[tool] : undefined;
+      if (kind) return { root: joinSegments(filePath, cacheTool + 1), kind };
+    }
+    // NuGet's HTTP cache is separate from restored packages, on all platforms.
+    const nuget = lower === ".local" && next === "share" && after === "nuget" ? i + 2
+      : lower === "appdata" && next === "local" && after === "nuget" ? i + 2 : -1;
+    if (nuget >= 0 && /^(?:http-cache|v3-cache|plugins-cache)$/.test(lowerArtifactName(parts[nuget + 1] ?? ""))) {
+      return { root: joinSegments(filePath, nuget + 2), kind: "dotnet" };
+    }
+    if (lower === ".npm") {
+      if (next === "_cacache") return { root: joinSegments(filePath, i + 2), kind: "package-cache" };
+      continue;
+    }
+
     // Tool homes also contain configuration, patches and executables.
     // Classify only the documented cache/output children, never the home.
     if (lower === ".yarn") {
+      if (next === "berry" && after === "cache") return { root: joinSegments(filePath, i + 3), kind: "package-cache" };
       return /^(?:cache|unplugged)$/.test(next)
         ? { root: joinSegments(filePath, i + 2), kind: "package-cache" } : null;
     }
@@ -192,6 +222,13 @@ export function classifyArtifactPath(filePath: string): { root: string; kind: De
       if (profile >= 0 && /^(?:debug|release)$/.test(lowerArtifactName(parts[profile] ?? "") ?? "")
         && /^(?:deps|incremental|\.fingerprint)$/.test(lowerArtifactName(parts[profile + 1] ?? "") ?? "")) {
         return { root: joinSegments(filePath, profile + 2), kind: "rust-target" };
+      }
+      // Build scripts have crate-name + 16-hex unit hashes. Keep that unit,
+      // never promote the ambiguous profile or a generic build directory.
+      if (profile >= 0 && /^(?:debug|release)$/.test(lowerArtifactName(parts[profile] ?? ""))
+        && lowerArtifactName(parts[profile + 1] ?? "") === "build"
+        && /^[a-z0-9_][a-z0-9_-]*-[0-9a-f]{16}$/.test(lowerArtifactName(parts[profile + 2] ?? ""))) {
+        return { root: joinSegments(filePath, profile + 3), kind: "rust-target" };
       }
       continue;
     }
