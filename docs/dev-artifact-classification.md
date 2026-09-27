@@ -31,7 +31,13 @@ contain files belonging to other tools or the user.
 Saved Rust/JS roots are checked against current rules before display or
 rescan. Old broad guesses are hidden rather than relabeled with their
 old byte totals. Run a new full scan to discover the narrower subtrees;
-the Dev Artifacts rescan only refreshes known valid roots.
+the Dev Artifacts rescan only refreshes known valid roots. The UI marks
+these saved reports as incomplete, including after refreshing or deleting
+known roots. A new full scan produces a report without this notice.
+
+The shared bucket is labeled **JVM**, with Gradle, Maven and Scala/sbt in
+the full label. `.gradle` and `.m2` have always belonged to this bucket;
+they are not evidence that the project uses Scala.
 
 Tests share `src/test/fixtures/devArtifactClassification.json` across
 Rust and TypeScript, expand it across case/separator/UNC variants, and
