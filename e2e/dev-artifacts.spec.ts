@@ -123,6 +123,6 @@ test("marks old build classifications incomplete without relabeling Gradle as Sc
   await waitForScanComplete(second.page);
   await openTab(second.page, "Dev Artifacts");
   await expect(second.page.getByText("Build artifact totals are incomplete.", { exact: true })).toBeVisible();
-  await expect(second.page.locator('.dev-kind-cell-label', { hasText: /^JVM$/ })).toBeVisible();
+  await expect(second.page.locator('.dev-kind-cell-label', { hasText: /^Gradle \/ JVM$/ })).toBeVisible();
   await expect(second.page.locator('.dev-kind-cell-label', { hasText: /^Rust target$/ })).toHaveCount(0);
 });

@@ -35,7 +35,7 @@ the Dev Artifacts rescan only refreshes known valid roots. The UI marks
 these saved reports as incomplete, including after refreshing or deleting
 known roots. A new full scan produces a report without this notice.
 
-The shared bucket is labeled **JVM**, with Gradle, Maven and Scala/sbt in
+The shared bucket is labeled **Gradle / JVM**, with Java, Maven and Scala/sbt in
 the full label. `.gradle` and `.m2` have always belonged to this bucket;
 they are not evidence that the project uses Scala.
 
