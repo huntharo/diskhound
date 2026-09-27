@@ -12,7 +12,7 @@ import {
 } from "../devArtifactsWorkerRuntime";
 import type { SerializedFolderTree } from "../folderTreeWorkerProtocol";
 import { runFolderTreeWorker } from "../folderTreeWorkerRuntime";
-import { runFullDiffWorker } from "../fullDiffWorkerRuntime";
+import { runFullDiffSortWorker, runFullDiffWorker } from "../fullDiffWorkerRuntime";
 
 // Each runtime is driven against a real worker thread running a tiny
 // script that speaks the runtime's protocol. The runtime terminates the
@@ -96,6 +96,8 @@ interface RuntimeCase {
   name: string;
   label: string;
   resultField: string;
+  /** The success message's type, when it isn't "result". */
+  resultType?: string;
   payload: unknown;
   run: (workerPath: string, signal?: AbortSignal) => Promise<unknown>;
 }
@@ -122,6 +124,23 @@ const runtimes: RuntimeCase[] = [
           baselinePath: "/unused/baseline.ndjson.gz",
           currentPath: "/unused/current.ndjson.gz",
           limit: 10,
+        },
+        { workerPath, signal },
+      ),
+  },
+  {
+    name: "runFullDiffSortWorker",
+    label: "Full diff worker",
+    resultField: "sorted",
+    resultType: "sorted",
+    payload: { exists: true, runs: ["/tmp/diff/b/run-0.bin", "/tmp/diff/b/run-1.bin"] },
+    run: (workerPath, signal) =>
+      runFullDiffSortWorker(
+        {
+          indexPath: "/unused/baseline.ndjson.gz",
+          caseSensitive: true,
+          runDir: "/unused/runs",
+          sortChunkRecords: 120_000,
         },
         { workerPath, signal },
       ),
@@ -161,7 +180,7 @@ const runtimes: RuntimeCase[] = [
 describe.each(runtimes)("$name", (runtime) => {
   it("resolves with the worker's result", async () => {
     const workerPath = await fakeWorker(
-      reply({ type: "result", [runtime.resultField]: runtime.payload }),
+      reply({ type: runtime.resultType ?? "result", [runtime.resultField]: runtime.payload }),
     );
     await expect(runtime.run(workerPath)).resolves.toEqual(runtime.payload);
   });

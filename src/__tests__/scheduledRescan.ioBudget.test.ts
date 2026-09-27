@@ -103,7 +103,7 @@ let now: number;
 beforeEach(async () => {
   dataDir = FS.realpathSync(await FSP.mkdtemp(Path.join(OS.tmpdir(), "diskhound-rescan-io-")));
   paths.userData = dataDir;
-  // The full diff's external sort spills into OS.tmpdir().
+  // The full diff's external sort writes its runs to OS.tmpdir().
   tmpDir = Path.join(dataDir, "tmp");
   FS.mkdirSync(tmpDir);
   savedTmpEnv = { TMPDIR: process.env.TMPDIR, TEMP: process.env.TEMP, TMP: process.env.TMP };
@@ -437,28 +437,29 @@ describe("full diff after a scan", () => {
   function loader(failing = false) {
     const compute = (input: Parameters<typeof computeFullDiffFromIndexFiles>[0]) =>
       computeFullDiffFromIndexFiles({ ...input, sortChunkRecords: SORT_CHUNK });
-    // A diff that spills both indexes and then fails, in the worker and
-    // again inline, like one that runs the temp volume out of space.
-    const spillThenFail = async (input: Parameters<typeof computeFullDiffFromIndexFiles>[0]) => {
+    // A diff that writes both indexes' runs and then fails, in the
+    // worker and again inline, like one that runs the temp volume out of
+    // space.
+    const writeRunsThenFail = async (input: Parameters<typeof computeFullDiffFromIndexFiles>[0]) => {
       await compute(input);
       throw new Error("ENOSPC: no space left on device");
     };
     return createFullDiffLoader({
       loadSnapshot: loadHistoricalSnapshot,
-      runWorker: failing ? spillThenFail : compute,
-      computeInline: failing ? spillThenFail : compute,
+      runWorker: failing ? writeRunsThenFail : compute,
+      computeInline: failing ? writeRunsThenFail : compute,
       log: () => {},
     });
   }
 
-  it("spills both indexes to the temp dir to warm the latest pair", async () => {
+  it("sorts both indexes through the temp dir to warm the latest pair", async () => {
     await seedPair();
 
     const { io, result } = await measureFsIo(() => loader().warmLatest(ROOT));
 
     expectIoBudget({
       scenario: "full-diff-warm",
-      note: "the latest pair's full diff, warmed after every scan whose totals moved: both indexes sorted into runs spilled to OS.tmpdir() as uncompressed JSONL, ~265 B per file per side (the path twice). 8 runs and 10.6 MB here; 59 runs per side and ~3.7 GB per scan at 7M files, ~15 GB/day at the 6 h default. Plus a ~150 KB full-diff-cache entry, and 2 stats for the failed-diff check",
+      note: "the latest pair's full diff, warmed after every scan whose totals moved: both indexes sorted into runs of 5,000 records (120,000 in the app) written to OS.tmpdir() as deflated binary blocks, ~20 B per file per side (the path once, next to sorted neighbours that share its prefix). Was uncompressed JSONL at ~265 B, the path twice. 8 runs and 0.82 MB here, was 10.6 MB; ~0.29 GB per diff at 7M files, was ~3.7 GB, and 0.49 GB on a real 20.5M-file root, was 12.7 GB. ~1.2 GB/day at the 6 h default, was ~15 GB/day; up to 1,440/day and ~415 GB/day at the 1-minute minimum, was ~5.3 TB/day. Plus a ~150 KB full-diff-cache entry, and 2 stats for the failed-diff check",
       io,
     });
     expect(result?.totalChanges).toBeGreaterThan(0);
@@ -475,7 +476,7 @@ describe("full diff after a scan", () => {
 
     expectIoBudget({
       scenario: "full-diff-retry-after-failure",
-      note: "asking again for a pair whose diff failed in the worker and inline: 2 stats and 0 writes, since the failure is remembered against both indexes' size and mtime. Was both spills again, 2 × 10.6 MB here and ~7.4 GB at 7M files per retry",
+      note: "asking again for a pair whose diff failed in the worker and inline: 2 stats and 0 writes, since the failure is remembered against both indexes' size and mtime. Was both indexes' runs written again: 2 × 0.82 MB here and ~0.58 GB at 7M files per retry, and 2 × 10.6 MB and ~7.4 GB before the runs were deflated",
       io,
     });
     expect(result).toBeNull();
