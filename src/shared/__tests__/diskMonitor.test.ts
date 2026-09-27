@@ -9,7 +9,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { DiskSpaceInfo } from "../contracts";
 import {
+  __resetDiskMonitorForTests,
   getDiskSpace,
+  getMonitoringSnapshot,
   initDiskMonitor,
   parseLinuxDfOutput,
   parseMacDfOutput,
@@ -21,6 +23,53 @@ import {
 const execFileAsync = promisify(execFile);
 
 describe("parseMacDfOutput", () => {
+  it("hides Time Machine mount trees while preserving ordinary backup disks", () => {
+    const hidden = [
+      "/Volumes/.timemachine",
+      "/Volumes/.timemachine/01234567-89AB-CDEF/2026-09-09-212616.backup",
+      "/Volumes/.timemachine/01234567-89AB-CDEF/2026-09-09-212616.backup/Macintosh HD - Data",
+      "/Volumes/com.apple.TimeMachine.localsnapshots",
+      "/Volumes/com.apple.TimeMachine.localsnapshots/Backups.backupdb/Example Mac/2026-09-09-212616/Data",
+      "/Volumes/.MobileBackups/Computer/Latest",
+      "/.MobileBackups/Computer/Latest",
+    ];
+    const visible = [
+      "/", "/Volumes/Archive", "/Volumes/Time Machine", "/Volumes/Project.backup",
+      "/Volumes/.timemachine-archive", "/Volumes/com.apple.TimeMachine.localsnapshots-copy",
+    ];
+    const stdout = [
+      "Filesystem 1024-blocks Used Available Capacity Mounted on",
+      ...[...hidden, ...visible].map((mount, i) => `/dev/disk${i}s1 1000 400 600 40% ${mount}`),
+    ].join("\n");
+
+    expect(parseMacDfOutput(stdout).map(({ drive }) => drive)).toEqual(visible);
+  });
+
+  it("filters mount rows with linear work as snapshot counts grow", () => {
+    function measured(count: number): number {
+      const stdout = [
+        "Filesystem 1024-blocks Used Available Capacity Mounted on",
+        ...Array.from({ length: count }, (_, i) =>
+          `/dev/disk${i}s1 1000 400 600 40% /Volumes/.timemachine/id/${i}.backup`),
+        "/dev/disk1s1 1000 400 600 40% /Volumes/Archive",
+      ].join("\n");
+      const calls = vi.spyOn(String.prototype, "startsWith");
+      try {
+        const drives = parseMacDfOutput(stdout);
+        const work = calls.mock.calls.length;
+        expect(drives.map(({ drive }) => drive)).toEqual(["/Volumes/Archive"]);
+        return work;
+      } finally {
+        calls.mockRestore();
+      }
+    }
+    const small = measured(100);
+    const large = measured(800);
+    expect(small).toBeGreaterThan(0);
+    expect(large).toBeLessThanOrEqual(small * 16);
+    expect(large).toBeLessThanOrEqual(8_000);
+  });
+
   it("keeps the startup disk and mounted user volumes", () => {
     const stdout = [
       "Filesystem   1024-blocks      Used Available Capacity Mounted on",
@@ -397,12 +446,15 @@ describe.skipIf(process.platform === "win32")("getDiskSpace", () => {
   let savedPath: string | undefined;
 
   beforeEach(async () => {
+    __resetDiskMonitorForTests();
     tempDir = await FSP.mkdtemp(Path.join(OS.tmpdir(), "diskhound-df-"));
     savedPath = process.env.PATH;
     process.env.PATH = `${tempDir}${Path.delimiter}${savedPath ?? ""}`;
   });
 
   afterEach(async () => {
+    __resetDiskMonitorForTests();
+    vi.restoreAllMocks();
     process.env.PATH = savedPath;
     await FSP.rm(tempDir, { recursive: true, force: true });
   });
@@ -414,6 +466,22 @@ describe.skipIf(process.platform === "win32")("getDiskSpace", () => {
     FS.writeFileSync(next, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
     FS.renameSync(next, Path.join(tempDir, "df"));
   }
+
+  it("never restores Time Machine mounts from a pre-upgrade macOS cache", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
+    const paths = ["/Volumes/Archive", "/Volumes/.timemachine/id/2026-09-09-212616.backup",
+      "/Volumes/com.apple.TimeMachine.localsnapshots/Backups.backupdb/Example Mac"];
+    const drives = paths.map((drive) => ({ drive, totalBytes: 2048, freeBytes: 1024,
+      usedBytes: 1024, usedPercent: 50, timestamp: 1 }));
+    await FSP.writeFile(Path.join(tempDir, "disk-baselines.json"), JSON.stringify({
+      previousDrives: Object.fromEntries(drives.map((drive) => [drive.drive, drive])),
+      lastDrives: drives,
+    }));
+    await initDiskMonitor(tempDir);
+    expect(getMonitoringSnapshot().drives).toEqual([drives[0]]);
+    fakeDf("exit 1");
+    expect(await getDiskSpace()).toEqual([drives[0]]);
+  });
 
   const printsVolumesData = [
     `case " $* " in`,
