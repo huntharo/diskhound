@@ -129,6 +129,12 @@ bun run build:native
 bun run dev
 ```
 
+Electron's install script downloads its platform binary. The repository's
+`trustedDependencies` allows Bun to run that script during `bun install`;
+this is a project setting shared by all checkouts, not a per-machine approval.
+If an existing checkout reports "Electron failed to install correctly", run
+`bun pm trust electron` to run its previously blocked installer.
+
 ### Scripts
 
 | Command | Description |
