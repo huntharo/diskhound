@@ -2809,8 +2809,21 @@ button, input, select, textarea { font: inherit; }
   overflow: hidden;
 }
 
-.file-view.has-bulk-status {
+.file-category-note {
+  margin: 8px 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.file-view.has-bulk-status,
+.file-view.has-category-note {
   grid-template-rows: auto auto auto auto minmax(0, 1fr);
+}
+
+.file-view.has-bulk-status.has-category-note {
+  grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
+
 }
 
 .file-toolbar {
