@@ -17,6 +17,7 @@ import {
   type DeletedPathRecord,
 } from "../lib/deletedPaths";
 import { basename, formatBytes, formatCount, formatElapsed, humanAge, relativeTime } from "../lib/format";
+import { overviewStorageTotal } from "../lib/overviewStorageTotal";
 import { useConfirmPermanentDelete, useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { saveLocalPreference } from "../lib/localPreference";
 import {
@@ -123,6 +124,7 @@ const DENSE_TREEMAP_LIMIT = 5_000;
 
 export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev, scanPercent, drives, onOpenDrive }: Props) {
   const { bytesSeen, filesVisited, directoriesVisited, skippedEntries } = snapshot;
+  const storageTotal = overviewStorageTotal(snapshot);
   // Live-ticking elapsed: during a running scan the snapshot only updates
   // ~5x/second via progress messages, so the "elapsed" metric would
   // freeze between ticks — users reported seeing "0.0s" stuck on screen.
@@ -317,11 +319,18 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
       <MonitoringNudge />
       <div className="metrics-strip">
         <Metric
-          value={formatBytes(bytesSeen)}
-          label="on disk"
+          value={formatBytes(storageTotal.primaryBytes)}
+          label={storageTotal.primaryLabel}
           accent
-          title="Size on disk after sparse holes and filesystem compression"
+          title={storageTotal.primaryTitle}
         />
+        {storageTotal.adjustedBytes !== null && (
+          <Metric
+            value={`≈ ${formatBytes(storageTotal.adjustedBytes)}`}
+            label={storageTotal.adjustedLabel!}
+            title={storageTotal.adjustedTitle!}
+          />
+        )}
         <Metric value={formatCount(filesVisited)} label="files" />
         <Metric value={formatCount(directoriesVisited)} label="dirs" />
         <Metric value={formatCount(skippedEntries)} label="skipped" />

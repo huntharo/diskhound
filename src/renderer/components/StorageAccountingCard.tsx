@@ -179,9 +179,13 @@ export function StorageAccountingCard({ snapshot, onViewDev }: {
                 {formatBytes(sharing.cloneBytes)} in {formatCount(sharing.cloneFiles)} cloned file{sharing.cloneFiles === 1 ? "" : "s"}
               </div>
               <div className="storage-card-meta">
-                {sharing.duplicateBytes !== null && sharing.duplicateBytes > 0
-                  ? `The ${formatBytes(snapshot.bytesSeen)} total counts ${sharing.approximate ? "at least " : ""}${formatBytes(sharing.duplicateBytes)} of it more than once`
-                  : "No clone is counted twice in this scan"}
+                {sharing.duplicateBytes === null
+                  ? "Full-clone repeats were not measured in this scan"
+                  : sharing.duplicateBytes > 0
+                    ? `The ${formatBytes(snapshot.bytesSeen)} scanned file bytes count ${sharing.approximate ? "at least " : ""}${formatBytes(sharing.duplicateBytes)} of known full clones more than once`
+                    : sharing.approximate
+                      ? "No full-clone repeats found before clone-group tracking was truncated"
+                      : "No full-clone repeats found among measured files"}
                 {sharing.clonePrivateBytes > 0 ? ` · ${formatBytes(sharing.clonePrivateBytes)} no longer shared` : ""}
               </div>
               <p className="storage-card-guide">
