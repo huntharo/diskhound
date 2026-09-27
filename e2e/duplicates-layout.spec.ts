@@ -7,10 +7,10 @@ import type { Locator } from "@playwright/test";
 import { expect, test } from "./fixtures/electron-app";
 import { openTab, scanFolderFromPicker } from "./fixtures/steps";
 
-// The Duplicates file rows with the content that broke them: paths of
-// very different lengths in one group. Duplicates only counts files of
-// 1 MiB and up. The group header has its own checks in
-// shared-storage.spec.ts.
+// The Duplicates view with the content that broke its layout: paths of
+// very different lengths in one group, and the bulk bar under a short
+// list. Duplicates only counts files of 1 MiB and up. The group header
+// has its own checks in shared-storage.spec.ts.
 const DATA_BYTES = 2048 * 1024;
 // Long enough to truncate at the 960 px minimum window width even
 // under a short output dir, and short enough to stay under Windows'
@@ -29,7 +29,7 @@ async function rect(locator: Locator) {
   return { ...box, right: box.x + box.width };
 }
 
-test("rows line up", async ({ launch }, testInfo) => {
+test("lays out", async ({ launch }, testInfo) => {
   // A copy at a short path and one at a long path.
   const root = testInfo.outputPath("t");
   const data = randomBytes(DATA_BYTES);
@@ -81,4 +81,15 @@ test("rows line up", async ({ launch }, testInfo) => {
   await longRow.getByRole("button", { name: "Reveal" }).hover();
   await expect(actions).toHaveCSS("opacity", "1");
 
+  // Selecting a copy brings up the bulk bar. It keeps its own height at
+  // the bottom of the view, and the list fills the space above it.
+  await shortRow.locator(".duplicate-file-checkbox input").check();
+  const bulkBar = page.getByRole("region", { name: "Bulk actions" });
+  await expect(bulkBar).toBeVisible();
+  const view = await rect(page.locator(".duplicates-view"));
+  const bar = await rect(bulkBar);
+  const list = await rect(page.locator(".duplicates-list-scroll"));
+  expect(bar.height).toBeLessThan(80);
+  expect(Math.abs(bar.y + bar.height - (view.y + view.height))).toBeLessThan(1);
+  expect(Math.abs(list.y + list.height - bar.y)).toBeLessThan(1);
 });
