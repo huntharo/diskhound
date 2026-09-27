@@ -34,6 +34,8 @@ import { loadScanPrunePlan, skipReason } from "../shared/scanPrune";
  */
 export interface BaselineFileRecord extends ScanFileRecord {
   extraHardlink?: boolean;
+  /** `dev:ino` of a file with several names (`i`), carried through inheritance. */
+  linkId?: string;
 }
 
 export interface Baseline {
@@ -132,13 +134,22 @@ export async function runScan(
     }
   }
   const devAcc = createDevAcc();
-  const writeIndexEntry = (path: string, size: number, mtime: number, extraHardlink = false) => {
+  const writeIndexEntry = (
+    path: string,
+    size: number,
+    mtime: number,
+    extraHardlink = false,
+    linkId?: string,
+  ) => {
     noteDevFile(devAcc, path, size, extraHardlink);
     if (!indexGzip) return;
     try {
-      indexGzip.write(JSON.stringify(
-        extraHardlink ? { p: path, s: size, m: mtime, h: 1 } : { p: path, s: size, m: mtime },
-      ) + "\n");
+      // Key order matches the native writer (h, then i) so the fast-path
+      // parsers in indexLineParse.ts / the Rust reader take it.
+      const rec: { p: string; s: number; m: number; h?: 1; i?: string } = { p: path, s: size, m: mtime };
+      if (extraHardlink) rec.h = 1;
+      if (linkId) rec.i = linkId;
+      indexGzip.write(JSON.stringify(rec) + "\n");
     } catch {
       indexGzip = null;
     }
@@ -306,7 +317,15 @@ export async function runScan(
             rollupExtension(extensionTotals, fileRecord.extension, occupancy);
           }
           rollupDirectorySize(rootPath, fileRecord.parentPath, occupancy, directoryTotals);
-          writeIndexEntry(fileRecord.path, fileRecord.size, fileRecord.modifiedAt, fileRecord.extraHardlink);
+          // Re-emit `i` too: inheritance skips the stat, and a name whose
+          // other links sit outside the root has `i` but no `h:1`.
+          writeIndexEntry(
+            fileRecord.path,
+            fileRecord.size,
+            fileRecord.modifiedAt,
+            fileRecord.extraHardlink,
+            fileRecord.linkId,
+          );
           if (hardlinks) inheritedPaths.push(fileRecord.path);
         }
         // Also re-emit the directory entries under the subtree so the new
@@ -425,7 +444,10 @@ export async function runScan(
           rollupExtension(extensionTotals, fileRecord.extension, occupancy);
         }
         rollupDirectorySize(rootPath, directoryPath, occupancy, directoryTotals);
-        writeIndexEntry(fileRecord.path, fileRecord.size, fileRecord.modifiedAt, extraHardlink);
+        // Every name of a multi-link file gets the same id, owner included,
+        // so Duplicates can fold names of one file without a stat.
+        const linkId = link && link.nlink > 1 ? `${link.dev}:${link.ino}` : undefined;
+        writeIndexEntry(fileRecord.path, fileRecord.size, fileRecord.modifiedAt, extraHardlink, linkId);
         maybeEmitProgress();
       }
     }
@@ -682,7 +704,7 @@ async function loadBaseline(filePath: string): Promise<Baseline> {
   const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
   for await (const line of rl) {
     if (!line) continue;
-    let rec: { p?: string; s?: number; m?: number; t?: string; h?: number };
+    let rec: { p?: string; s?: number; m?: number; t?: string; h?: number; i?: string };
     try {
       rec = JSON.parse(line);
     } catch { continue; }
@@ -709,6 +731,7 @@ async function loadBaseline(filePath: string): Promise<Baseline> {
       size: rec.s,
       modifiedAt: rec.m,
       extraHardlink: rec.h === 1,
+      ...(typeof rec.i === "string" && rec.i ? { linkId: rec.i } : {}),
     };
 
     let list = filesByParent.get(parentPath);

@@ -95,7 +95,7 @@ pub fn state_for(
 
 /// Closes the scan's index and returns every line in it.
 pub fn finish_index(state: &mut ScanState, index_output: &Path) -> Vec<IndexLineRec> {
-    state.index_writer.take().unwrap().finish().unwrap();
+    state.index_writer.take().unwrap().finish().0.unwrap();
     let reader = BufReader::new(GzDecoder::new(File::open(index_output).unwrap()));
     reader
         .lines()

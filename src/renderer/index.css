@@ -1713,6 +1713,123 @@ button, input, select, textarea { font: inherit; }
   flex-shrink: 0;
 }
 
+/* ── Storage accounting card (macOS Overview) ──────────────────
+ * Why "delete X to free Y" goes wrong on APFS: local snapshots still
+ * holding deleted blocks, and clones sharing blocks between trees.
+ * Same frame as the scan summary card; two columns that stack on
+ * narrow windows. */
+.storage-card {
+  margin: 0 12px 8px;
+  padding: 10px 14px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--blue);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  flex-shrink: 0;
+}
+.storage-card.collapsed { padding-bottom: 10px; }
+.storage-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.storage-card.collapsed .storage-card-head { margin-bottom: 0; }
+.storage-card-kicker {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.storage-card-toggle {
+  flex-shrink: 0;
+  font-size: 11px;
+}
+.storage-card-kicker-meta {
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: var(--text-muted);
+}
+.storage-card-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+}
+.storage-card-col {
+  min-width: 0;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+}
+.storage-card-col.warn { border-left-color: var(--amber-dim); }
+.storage-card-col.info { border-left-color: var(--blue-dim); }
+.storage-card-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+.storage-card-value {
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+}
+.storage-card-value.muted { color: var(--text-muted); }
+.storage-card-meta {
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+.storage-card-guide {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+.storage-card-guide code,
+.storage-card-command code {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+.storage-card-command {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  min-width: 0;
+}
+.storage-card-command code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text);
+  user-select: all;
+}
+.storage-card-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 600;
+  color: var(--amber);
+  cursor: pointer;
+}
+.storage-card-link:hover { text-decoration: underline; }
+@media (max-width: 900px) {
+  .storage-card-cols { grid-template-columns: 1fr; }
+}
+
 /* Changes-tab diff-mode toggle (cumulative vs per-scan). Lives in
  * the sidebar above the quick-select time pills. */
 .changes-diff-mode {
@@ -5837,6 +5954,26 @@ button, input, select, textarea { font: inherit; }
   color: var(--amber);
   white-space: nowrap;
 }
+.duplicate-wasted.none {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+/* Copies that share storage (hardlinks / APFS clones) — see duplicateReclaim.ts. */
+.duplicate-shared-badge,
+.duplicate-sharing-badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: rgba(59,130,246,0.1);
+  color: var(--blue);
+  white-space: nowrap;
+}
+.duplicate-sharing-badge {
+  font-size: 9px;
+  padding: 1px 5px;
+  margin-left: 6px;
+}
 .duplicate-group-actions {
   display: flex;
   gap: 4px;
@@ -9435,6 +9572,47 @@ body.system-widget-body #app {
 :root.light .dev-kind-swatch {
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.18);
 }
+/* APFS clone sharing (macOS). Badge in the row meta, "frees ≈" under
+ * the size, and a note above the list for snapshots / shared bytes. */
+.dev-share-badge {
+  display: inline-block;
+  padding: 0 5px;
+  border: 1px solid rgba(59, 130, 246, 0.35);
+  border-radius: var(--radius-sm);
+  background: rgba(59, 130, 246, 0.08);
+  color: var(--blue);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 15px;
+  cursor: help;
+}
+.dev-share-badge.likely {
+  border-style: dashed;
+  background: transparent;
+}
+.dev-row-size {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+.dev-row-frees {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--blue);
+  cursor: help;
+}
+.dev-sharing-note {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 16px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  background: rgba(59, 130, 246, 0.06);
+  border-bottom: 1px solid rgba(59, 130, 246, 0.16);
+}
+.dev-sharing-note strong { color: var(--text); }
 .dev-delta-up { color: var(--orange); }
 .dev-delta-down { color: var(--green); }
 .overview-insight-row {

@@ -16,3 +16,10 @@ export function dispatchSettingsUpdated(settings: AppSettings): void {
     }),
   );
 }
+
+/** Free space / snapshots likely changed (a delete finished). */
+export const STORAGE_ACCOUNTING_STALE_EVENT = "diskhound:storage-accounting-stale";
+
+export function dispatchStorageAccountingStale(): void {
+  window.dispatchEvent(new CustomEvent(STORAGE_ACCOUNTING_STALE_EVENT));
+}

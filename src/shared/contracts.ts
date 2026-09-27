@@ -156,6 +156,12 @@ export interface ScanSnapshot {
   sizeSemantics?: ScanSizeSemantics;
   /** macOS/Linux: `once` when hardlinked bytes were counted once. */
   hardlinkAccounting?: HardlinkAccounting;
+  /**
+   * APFS clone / private-size tallies (macOS native scanner only). Absent
+   * on other platforms, on non-APFS volumes, and on scans from older
+   * builds — the UI then falls back to path heuristics.
+   */
+  storageAccounting?: ScanStorageAccounting;
   /** macOS: `own-disk` when the walk stayed on the root's disk. */
   volumeAccounting?: VolumeAccounting;
   /**
@@ -163,6 +169,99 @@ export interface ScanSnapshot {
    * another disk (/Volumes/Storage, /mnt/windows). Omitted when none were.
    */
   skippedMounts?: string[];
+}
+
+// ── Storage accounting (snapshots + clones) ─────────────────
+//
+// `bytesSeen` answers "how many blocks do these files reference?". On
+// copy-on-write filesystems that is not "how much would deleting them
+// free?": APFS clones share blocks (pnpm/bun stores cloned into every
+// node_modules, Finder duplicates, Xcode DerivedData), and local Time
+// Machine snapshots keep deleted blocks pinned until the snapshot ages
+// out. These types carry the extra accounting so the UI can say so.
+
+/**
+ * Per-scan totals from the native scanner's APFS clone pass (macOS 12+:
+ * ATTR_CMNEXT_CLONEID / CLONE_REFCNT / EXT_FLAGS for every file, plus
+ * ATTR_CMNEXT_PRIVATESIZE for clone files only — asking for it on every
+ * file cost 20–25 % scan time). All byte counts are allocated sizes,
+ * same units as `bytesSeen`.
+ */
+export interface ScanStorageAccounting {
+  /** Files that returned clone attributes (APFS only). */
+  measuredFiles: number;
+  /** Allocated bytes of those files. Compare against `bytesSeen`. */
+  measuredBytes: number;
+  /** Files APFS flags as sharing blocks with a clone (EF_MAY_SHARE_BLOCKS). */
+  cloneFiles: number;
+  /** Allocated bytes of those files. */
+  cloneBytes: number;
+  /**
+   * Σ private size of clone files — blocks a clone no longer shares
+   * (it was modified after cloning). Deleting the clone frees these.
+   */
+  clonePrivateBytes: number;
+  /**
+   * Bytes the scan total counts more than once because several scanned
+   * files are full clones of the same data stream. `bytesSeen − this` is
+   * a better estimate of the blocks the scanned tree really occupies.
+   * Null when clone groups were not tracked (no index output).
+   */
+  cloneDuplicateBytes: number | null;
+  /** Clone-group tracking hit its memory cap; duplicates are a lower bound. */
+  approximate?: boolean;
+}
+
+export type LocalSnapshotKind = "time-machine" | "os-update" | "other";
+
+export interface LocalSnapshotInfo {
+  name: string;
+  kind: LocalSnapshotKind;
+  /** Epoch ms parsed from the snapshot name (Time Machine encodes it). */
+  createdAt: number | null;
+  /** APFS reports the OS may delete it on its own to free space. */
+  purgeable: boolean | null;
+  /** diskutil: "This snapshot limits the minimum size of APFS Container". */
+  limitsContainerShrink: boolean | null;
+}
+
+export interface ApfsVolumeUsage {
+  name: string;
+  device: string;
+  roles: string[];
+  usedBytes: number;
+}
+
+export interface StorageAccountingReport {
+  platform: DiskhoundPlatform;
+  /** Mount point the numbers describe (`/` for the startup disk). */
+  volumePath: string;
+  /** False when this platform / filesystem has nothing wired up yet. */
+  supported: boolean;
+  /** Lowercase filesystem type (`apfs`, `hfs`, `exfat`, …) when known. */
+  filesystem: string | null;
+  checkedAt: number;
+  totalBytes: number | null;
+  /** Free right now — the number `df` shows and a delete should move. */
+  freeBytes: number | null;
+  /**
+   * Free + what macOS will purge on demand (local snapshots, caches).
+   * Finder's "Available" (NSURLVolumeAvailableCapacityForImportantUsageKey).
+   */
+  availableForImportantUsageBytes: number | null;
+  /** `availableForImportantUsageBytes − freeBytes`, clamped at 0. */
+  purgeableBytes: number | null;
+  /** APFS container shared by every volume on the disk (System, Data, VM…). */
+  container: {
+    device: string;
+    totalBytes: number | null;
+    freeBytes: number | null;
+    volumes: ApfsVolumeUsage[];
+  } | null;
+  /** Local snapshots on the data volume, newest first. */
+  snapshots: LocalSnapshotInfo[];
+  /** Caveats worth showing next to the numbers. */
+  notes: string[];
 }
 
 export interface PathActionResult {
@@ -523,6 +622,36 @@ export type DevArtifactKind =
   | "terraform"
   | "diag-logs";
 
+/**
+ * APFS clone accounting for one Dev Artifacts tree (macOS native scan).
+ * Sizes are allocated bytes like `DevArtifact.size`. See
+ * `devArtifactSharing()` in storageSharing.ts for how the UI reads them.
+ */
+export interface DevArtifactCloneInfo {
+  /** Allocated bytes of files that share blocks with a clone. */
+  cloneSize: number;
+  /** Private bytes of those clone files (partially-modified clones). */
+  clonePrivateSize: number;
+  /**
+   * Blocks of clone groups that live entirely inside this tree — freed
+   * when the whole tree goes. Counted once per group.
+   */
+  cloneInternalSize: number;
+  /** Clone bytes whose blocks are also referenced from outside this tree. */
+  cloneSharedSize: number;
+  /**
+   * The blocks behind `cloneSharedSize`: each copy of a group of k full
+   * clones counts 1/k of its size (a modified clone counts whole). Summed
+   * over trees, at least what deleting all of them frees beyond each
+   * tree's own blocks. Absent from sidecars older than this field.
+   */
+  cloneSharedBlocks?: number;
+  /** Other Dev Artifacts trees that share clone groups with this one. */
+  sharedRoots: number;
+  /** Up to three of those trees, most shared bytes first. */
+  sharedWith: string[];
+}
+
 export interface DevArtifact {
   path: string;
   kind: DevArtifactKind;
@@ -532,6 +661,8 @@ export interface DevArtifact {
   fileCount: number;
   previousSize: number | null;
   deltaBytes: number | null;
+  /** Present when the scanner measured APFS clones under this tree. */
+  clone?: DevArtifactCloneInfo;
 }
 
 export interface DevArtifactReport {
@@ -1017,12 +1148,33 @@ export interface DuplicateFileEntry {
   name: string;
   parentPath: string;
   modifiedAt: number;
+  /**
+   * What deleting just this file frees, when the scan knew its storage
+   * is shared: 0 for a hardlinked file (another name keeps the data),
+   * the APFS private bytes for a clone. Absent = the full `size`.
+   */
+  reclaimableBytes?: number;
+  /** Why `reclaimableBytes` is below the size. */
+  sharing?: DuplicateSharing;
 }
+
+/**
+ * `hardlink`: one file with several names (only the first name in the
+ * folder is listed). `clone`: an APFS clone sharing blocks with another
+ * file. Both come from the scan index (`i`, `v`/`k`), not a fresh stat.
+ */
+export type DuplicateSharing = "hardlink" | "clone";
 
 export interface DuplicateGroup {
   hash: string;
   size: number;
   files: DuplicateFileEntry[];
+  /**
+   * Bytes freed by keeping one copy and deleting the rest, with hardlinks
+   * and APFS clones counted at what they really free. Absent on results
+   * from older builds: read it through `duplicateGroupReclaimable`.
+   */
+  reclaimableBytes?: number;
 }
 
 export interface DuplicateAnalysis {
@@ -1205,6 +1357,18 @@ export interface DiskhoundNativeApi {
   // Monitoring
   getMonitoringSnapshot: () => Promise<MonitoringSnapshot>;
   getDiskSpace: () => Promise<DiskSpaceInfo[]>;
+  /**
+   * Local snapshots + purgeable space for the volume holding `path`.
+   * macOS only today; other platforms return `supported: false`.
+   * Cached for a few seconds in the main process — safe to poll.
+   */
+  getStorageAccounting: (path: string, opts?: { fresh?: boolean }) => Promise<StorageAccountingReport | null>;
+  /**
+   * `statfs` free bytes for the volume holding `path` (walks up to the
+   * nearest existing parent, so it works after the path was deleted).
+   * Used to check whether a delete actually freed space.
+   */
+  getVolumeFreeBytes: (path: string) => Promise<number | null>;
   /** Rolling timeline of drive-level free-space deltas (newest first). */
   getDiskDeltaHistory: () => Promise<DiskDelta[]>;
   /** Schedule info for the Changes tab — last scan, next scan, interval, etc. */

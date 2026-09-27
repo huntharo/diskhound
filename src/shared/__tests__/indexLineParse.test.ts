@@ -33,6 +33,44 @@ describe("parseIndexLine", () => {
     });
   });
 
+  it("reads the APFS clone suffix on the fast path", () => {
+    expect(parseIndexLine('{"p":"/u/a.js","s":4096,"m":1,"v":0,"k":1}')).toEqual({
+      t: "f", p: "/u/a.js", s: 4096, m: 1, v: 0, k: 1,
+    });
+    expect(parseIndexLine('{"p":"/u/a.js","s":4096,"m":1,"h":1,"v":12}')).toEqual({
+      t: "f", p: "/u/a.js", s: 4096, m: 1, h: 1, v: 12,
+    });
+    expect(parseIndexLine('{"p":"/u/a.js","s":4096,"m":1,"k":1}')).toEqual({
+      t: "f", p: "/u/a.js", s: 4096, m: 1, k: 1,
+    });
+    // Out-of-order keys still parse through JSON.parse.
+    expect(parseIndexLine('{"p":"/u/a.js","s":4096,"m":1,"k":1,"v":3}')).toEqual({
+      t: "f", p: "/u/a.js", s: 4096, m: 1, v: 3, k: 1,
+    });
+  });
+
+  it("decodes every escape the native writer emits on the fast path", () => {
+    // append_json_escaped: \" \\ \n \r \t, other control chars as \u00XX.
+    const path = 'C:\\odd "dir"\\a\tb\nc\rd\u0001e.bin';
+    const line = JSON.stringify({ p: path, s: 1, m: 2 });
+    expect(line).toContain("\\u0001");
+    expect(parseIndexLine(line)).toEqual({ t: "f", p: path, s: 1, m: 2 });
+    expect(parseIndexLine(JSON.stringify({ p: "/x\\\\y\"", s: 1, m: 2 }))).toMatchObject({ p: "/x\\\\y\"" });
+  });
+
+  it("reads the hardlink id between h and the clone suffix", () => {
+    expect(parseIndexLine('{"p":"/s/a.js","s":4096,"m":1,"i":"16777232:4815"}')).toEqual({
+      t: "f", p: "/s/a.js", s: 4096, m: 1, i: "16777232:4815",
+    });
+    expect(parseIndexLine('{"p":"/p/a.js","s":4096,"m":1,"h":1,"i":"16777232:4815","v":0,"k":1}')).toEqual({
+      t: "f", p: "/p/a.js", s: 4096, m: 1, h: 1, i: "16777232:4815", v: 0, k: 1,
+    });
+    // JSON.stringify order from the JS worker (i before h) still parses.
+    expect(parseIndexLine('{"p":"/p/a.js","s":4096,"m":1,"i":"1:2","h":1}')).toEqual({
+      t: "f", p: "/p/a.js", s: 4096, m: 1, h: 1, i: "1:2",
+    });
+  });
+
   it("parses the canonical directory shape", () => {
     const line = JSON.stringify({ p: "C:\\Users", t: "d", m: 99 });
     expect(parseIndexLine(line)).toEqual({ t: "d", p: "C:\\Users" });

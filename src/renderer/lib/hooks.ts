@@ -10,6 +10,7 @@ import {
 import { nativeApi } from "../nativeApi";
 import { toast } from "../components/Toasts";
 import { markDeletedPath, type DeletedPathAction } from "./deletedPaths";
+import { checkFreedSpace, freeBytesBeforeDelete } from "./freedSpaceCheck";
 import { dispatchSettingsUpdated, SETTINGS_UPDATED_EVENT } from "./uiEvents";
 
 const DEFAULT_DISK_SPACE_REFRESH_MS = 10_000;
@@ -96,12 +97,22 @@ export function usePathActions() {
   const runAction = useCallback(async (
     path: string,
     action: () => Promise<PathActionResult>,
-    opts?: { dismiss?: boolean; onSuccess?: () => void; deletedAction?: DeletedPathAction },
+    opts?: {
+      dismiss?: boolean;
+      onSuccess?: () => void;
+      deletedAction?: DeletedPathAction;
+      /** Size on disk of what a permanent delete removes; enables the
+       *  "did free space actually move?" check on macOS. */
+      expectedBytes?: number;
+    },
   ) => {
     markBusy(path);
+    const expectedBytes = opts?.deletedAction === "delete" ? opts.expectedBytes ?? 0 : 0;
+    const freeBefore = await freeBytesBeforeDelete(path, expectedBytes);
     const r = await action();
     clearBusy(path);
     if (r.ok) {
+      if (freeBefore !== null) void checkFreedSpace({ path, expectedBytes, freeBefore });
       if (opts?.deletedAction) markDeletedPath(path, opts.deletedAction);
       if (opts?.onSuccess) opts.onSuccess();
       else if (opts?.dismiss || opts?.deletedAction) toast("success", r.message);

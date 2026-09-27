@@ -45,6 +45,23 @@ describe("classifyArtifactPath", () => {
     });
   });
 
+  it("detects pnpm's global store outside a .pnpm-store folder", () => {
+    expect(classifyArtifactPath("/Users/dev/Library/pnpm/store/v10/files/00/abc-index.json")).toEqual({
+      root: "/Users/dev/Library/pnpm/store",
+      kind: "package-cache",
+    });
+    expect(classifyArtifactPath("/home/dev/.local/share/pnpm/store/v3/files/ff/x")).toEqual({
+      root: "/home/dev/.local/share/pnpm/store",
+      kind: "package-cache",
+    });
+    expect(classifyArtifactPath("C:\\Users\\dev\\AppData\\Local\\pnpm\\store\\v10\\x")).toEqual({
+      root: "C:\\Users\\dev\\AppData\\Local\\pnpm\\store",
+      kind: "package-cache",
+    });
+    // pnpm's own binary next to the store is not an artifact.
+    expect(classifyArtifactPath("/Users/dev/Library/pnpm/pnpm")).toBeNull();
+  });
+
   it("detects Terraform provider downloads", () => {
     expect(classifyArtifactPath(
       "/Users/me/infra/env/prod/.terraform/providers/registry.terraform.io/hashicorp/aws/6.54.0/darwin_arm64/terraform-provider-aws_v6.54.0_x5",
@@ -88,6 +105,7 @@ describe("classifyArtifactPath", () => {
       expect(name.toLowerCase(), name).toBe(name);
       const inside = classifyArtifactPath(`/p/${name}/debug/x`) ?? classifyArtifactPath(`/p/${name}/registry/x`)
         ?? classifyArtifactPath(`/p/${name}/mod/x`) ?? classifyArtifactPath(`/p/${name}/ccache/x`)
+        ?? classifyArtifactPath(`/p/${name}/store/x`)
         ?? classifyArtifactPath(`/p/${name}/providers/x`) ?? classifyArtifactPath(`/p/${name}/plugin-cache/x`);
       expect(inside, name).not.toBeNull();
     }

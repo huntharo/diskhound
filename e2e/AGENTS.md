@@ -105,3 +105,6 @@ the bug has to remove the mark.
 
 - `links.spec.ts`, APFS clones (macOS only): a file and its clone count
   twice toward the scan total.
+- `shared-storage.spec.ts`, hardlinks in Duplicates (Windows only): the
+  Windows walkers write no link id (`i`), so both names of a hardlinked
+  file are listed as copies at full size.

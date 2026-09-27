@@ -148,6 +148,32 @@ describe("groupDevArtifacts", () => {
     ]);
   });
 
+  it("gives each group what deleting it frees, and ranks by that when asked", () => {
+    // Two trees in "cloned" hold full clones of each other: 200 listed,
+    // 100 of blocks, and deleting one alone frees nothing.
+    const clone = (other: string) => ({
+      cloneSize: 100,
+      clonePrivateSize: 0,
+      cloneInternalSize: 0,
+      cloneSharedSize: 100,
+      cloneSharedBlocks: 50,
+      sharedRoots: 1,
+      sharedWith: [other],
+    });
+    const one = tree({ path: "/c/one/node_modules", projectPath: "/c", projectName: "cloned", size: 100, clone: clone("/c/two/node_modules") });
+    const two = tree({ path: "/c/two/node_modules", projectPath: "/c", projectName: "cloned", size: 100, clone: clone("/c/one/node_modules") });
+    const plain = tree({ path: "/p/node_modules", projectPath: "/p", projectName: "plain", size: 60 });
+
+    const bySize = groupDevArtifacts([one, two, plain], "project");
+    expect(bySize.map((g) => [g.label, g.size, g.frees, g.freesAtMost])).toEqual([
+      ["cloned", 200, 0, 100],
+      ["plain", 60, 60, 60],
+    ]);
+    // 0–100 ranks by its middle, 50, below plain's 60.
+    expect(groupDevArtifacts([one, two, plain], "project", "size", true).map((g) => g.label))
+      .toEqual(["plain", "cloned"]);
+  });
+
   it("Largest increase sorts visible deltas desc and treats missing as 0", () => {
     const grew = tree({ path: "C:\\grew", size: 5, deltaBytes: 40, previousSize: 0 });
     const grewLess = tree({ path: "C:\\grew-less", size: 80, deltaBytes: 10, previousSize: 70 });

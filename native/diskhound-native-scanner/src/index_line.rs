@@ -1,7 +1,10 @@
 //! Hand-rolled NDJSON parse for scan-index lines.
 //!
 //! Inverse of IndexWriter's emitter:
-//!   `{"p":"...","s":N,"m":N}` with optional `,"h":1`
+//!   `{"p":"...","s":N,"m":N}` with optional `,"h":1`, then (Unix)
+//!   optional `,"i":"<dev>:<ino>"` (file has more than one name), then
+//!   (macOS APFS) optional `,"v":N` (private bytes) and `,"k":1` (shares
+//!   clone blocks)
 //!   `{"p":"...","t":"d","m":N}`
 //!
 //! Canonical shape first; field scan for odd key order. Avoids
@@ -14,6 +17,8 @@ pub struct IndexLineRec {
     pub mtime: Option<u64>,
     pub is_dir: bool,
     pub extra_hardlink: bool,
+    /// `(dev, ino)` from `"i"`: set on every name of a hardlinked file.
+    pub link_id: Option<(u64, u64)>,
 }
 
 pub fn parse_index_line(line: &str) -> Option<IndexLineRec> {
@@ -34,9 +39,27 @@ fn parse_canonical_index_line(line: &[u8]) -> Option<IndexLineRec> {
         if !rest.starts_with(br#","m":"#) {
             return None;
         }
-        let (mtime, rest) = parse_u64_prefix(&rest[5..])?;
-        let extra_hardlink = rest == br#","h":1}"#;
-        if rest != b"}" && !extra_hardlink {
+        let (mtime, mut rest) = parse_u64_prefix(&rest[5..])?;
+        let extra_hardlink = rest.starts_with(br#","h":1"#);
+        if extra_hardlink {
+            rest = &rest[6..];
+        }
+        let mut link_id = None;
+        if rest.starts_with(br#","i":""#) {
+            let (id, after) = parse_link_id(&rest[6..])?;
+            link_id = Some(id);
+            rest = after.strip_prefix(b"\"")?;
+        }
+        // APFS clone accounting suffix. Nothing downstream of the
+        // baseline reader needs it, so skip rather than store.
+        if rest.starts_with(br#","v":"#) {
+            let (_private, after) = parse_u64_prefix(&rest[5..])?;
+            rest = after;
+        }
+        if rest.starts_with(br#","k":1"#) {
+            rest = &rest[6..];
+        }
+        if rest != b"}" {
             return None;
         }
         return Some(IndexLineRec {
@@ -45,6 +68,7 @@ fn parse_canonical_index_line(line: &[u8]) -> Option<IndexLineRec> {
             mtime: Some(mtime),
             is_dir: false,
             extra_hardlink,
+            link_id,
         });
     }
     if rest.starts_with(br#","t":"d","m":"#) {
@@ -58,6 +82,7 @@ fn parse_canonical_index_line(line: &[u8]) -> Option<IndexLineRec> {
             mtime: Some(mtime),
             is_dir: true,
             extra_hardlink: false,
+            link_id: None,
         });
     }
     None
@@ -76,15 +101,27 @@ fn parse_index_line_by_fields(line: &[u8]) -> Option<IndexLineRec> {
             mtime,
             is_dir: true,
             extra_hardlink: false,
+            link_id: None,
         });
     }
+    let link_id = find_bytes(line, br#""i":""#)
+        .and_then(|at| parse_link_id(&line[at + 5..]))
+        .map(|(id, _)| id);
     Some(IndexLineRec {
         path,
         size,
         mtime,
         is_dir: false,
         extra_hardlink,
+        link_id,
     })
+}
+
+/// `<dev>:<ino>` up to (not including) the closing quote.
+fn parse_link_id(bytes: &[u8]) -> Option<((u64, u64), &[u8])> {
+    let (dev, rest) = parse_u64_prefix(bytes)?;
+    let (ino, rest) = parse_u64_prefix(rest.strip_prefix(b":")?)?;
+    Some(((dev, ino), rest))
 }
 
 fn extract_json_string_field(line: &[u8], key: &[u8]) -> Option<String> {
@@ -209,6 +246,42 @@ mod tests {
         let rec = parse_index_line(line).unwrap();
         assert!(rec.extra_hardlink);
         assert_eq!(rec.size, Some(10));
+    }
+
+    #[test]
+    fn canonical_file_accepts_apfs_clone_suffix() {
+        for line in [
+            r#"{"p":"/u/a.js","s":4096,"m":1,"v":0,"k":1}"#,
+            r#"{"p":"/u/a.js","s":4096,"m":1,"v":12}"#,
+            r#"{"p":"/u/a.js","s":4096,"m":1,"k":1}"#,
+            r#"{"p":"/u/a.js","s":4096,"m":1,"h":1,"v":0,"k":1}"#,
+        ] {
+            assert!(parse_canonical_index_line(line.as_bytes()).is_some(), "{line}");
+            let rec = parse_index_line(line).unwrap();
+            assert_eq!(rec.size, Some(4096));
+            assert_eq!(rec.extra_hardlink, line.contains(r#""h":1"#));
+        }
+        assert!(parse_canonical_index_line(br#"{"p":"/u/a","s":1,"m":1,"k":1,"v":0}"#).is_none());
+    }
+
+    #[test]
+    fn canonical_file_reads_link_id() {
+        for (line, extra) in [
+            (r#"{"p":"/s/a.js","s":4096,"m":1,"i":"16777232:4815"}"#, false),
+            (r#"{"p":"/p/a.js","s":4096,"m":1,"h":1,"i":"16777232:4815"}"#, true),
+            (r#"{"p":"/p/a.js","s":4096,"m":1,"h":1,"i":"16777232:4815","v":0,"k":1}"#, true),
+        ] {
+            assert!(parse_canonical_index_line(line.as_bytes()).is_some(), "{line}");
+            let rec = parse_index_line(line).unwrap();
+            assert_eq!(rec.link_id, Some((16777232, 4815)), "{line}");
+            assert_eq!(rec.extra_hardlink, extra);
+        }
+        // Odd order falls back to the field scan and still finds it.
+        let rec = parse_index_line(r#"{"i":"1:2","p":"/a","s":1,"m":1}"#).unwrap();
+        assert_eq!(rec.link_id, Some((1, 2)));
+        assert_eq!(parse_index_line(r#"{"p":"/a","s":1,"m":1}"#).unwrap().link_id, None);
+        // Malformed ids don't parse as canonical.
+        assert!(parse_canonical_index_line(br#"{"p":"/a","s":1,"m":1,"i":"12"}"#).is_none());
     }
 
     #[test]

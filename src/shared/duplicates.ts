@@ -28,6 +28,8 @@ import {
   persistHashCache,
   setCachedHash,
 } from "./duplicateHashCache";
+import { fileReclaim, groupReclaim } from "./duplicateReclaim";
+import { parseIndexLine, type ParsedIndexLine } from "./indexLineParse";
 import { normPath } from "./pathUtils";
 
 const PROGRESS_INTERVAL_MS = 200;
@@ -443,6 +445,10 @@ interface FileCandidate {
   path: string;
   size: number;
   mtime: number;
+  /** `dev:ino` when the file has more than one name (index `i` or walk stat). */
+  linkId?: string;
+  /** APFS clone private bytes from the index (`v`). */
+  privateBytes?: number;
 }
 
 export function runDuplicateScan(
@@ -593,6 +599,8 @@ export function runDuplicateScan(
     }
 
     if (cancelled) return;
+    const foldedLinks = foldHardlinks(sizeMap);
+    if (foldedLinks > 0) debugLog(`hardlinks: folded ${foldedLinks} extra names before hashing`);
     // Final count of candidate-bearing sizes after the map is built.
     candidateGroups = 0;
     let totalCandidateFiles = 0;
@@ -607,14 +615,20 @@ export function runDuplicateScan(
 
     // ── Phase 2: Hash candidates ──
     const candidateEntries: [number, FileCandidate[]][] = [];
+    // Potential waste per bucket: what keeping one copy and deleting the
+    // rest could free, with hardlinks and clones already counted at what
+    // they free (the index says so before any hashing). Plain copies give
+    // size × (count − 1). Without this, pnpm clone buckets that free
+    // nothing would use up a reduced hash depth.
+    const potential = new Map<FileCandidate[], number>();
     for (const [size, files] of sizeMap) {
-      if (files.length >= 2) candidateEntries.push([size, files]);
+      if (files.length < 2) continue;
+      candidateEntries.push([size, files]);
+      potential.set(files, groupReclaim(files.map((file) => ({ reclaimableBytes: fileReclaim(file).bytes })), size));
     }
     // Largest-potential-waste-first so early cancellation still yields
-    // the most useful results. potential-waste = size × (count − 1).
-    // count − 1 because keeping ONE copy of each group is the floor —
-    // we can only reclaim the extra copies.
-    candidateEntries.sort((a, b) => b[0] * (b[1].length - 1) - a[0] * (a[1].length - 1));
+    // the most useful results.
+    candidateEntries.sort((a, b) => potential.get(b[1])! - potential.get(a[1])!);
 
     // v0.5.38: optional depth-clamp. User-facing setting: "Hash depth"
     // 1–100% in Storage settings. Default 100 (full scan, unchanged
@@ -634,7 +648,7 @@ export function runDuplicateScan(
           const entry = candidateEntries[i]!;
           droppedBuckets++;
           droppedFiles += entry[1].length;
-          droppedPotentialBytes += entry[0] * (entry[1].length - 1);
+          droppedPotentialBytes += potential.get(entry[1])!;
         }
         candidateEntries.length = keep;
       }
@@ -787,11 +801,7 @@ export function runDuplicateScan(
         // Prefix hash == full hash for these; derive the hash from
         // the bucket key for deterministic output.
         const hash = key.substring(key.indexOf(":") + 1);
-        const group: DuplicateGroup = {
-          hash,
-          size,
-          files: bucket.map(toEntry),
-        };
+        const group = makeGroup(hash, size, bucket);
         confirmedGroups.push(group);
         confirmGroup(group); // buffer for the next progress emit
         continue;
@@ -856,11 +866,7 @@ export function runDuplicateScan(
       const sep = key.indexOf(":");
       const size = Number(key.substring(0, sep));
       const hash = key.substring(sep + 1);
-      const group: DuplicateGroup = {
-        hash,
-        size,
-        files: bucket.map(toEntry),
-      };
+      const group = makeGroup(hash, size, bucket);
       confirmedGroups.push(group);
       confirmGroup(group);
       // Flush the progress emit on every ~10 groups so the UI sees
@@ -877,12 +883,10 @@ export function runDuplicateScan(
 
     if (cancelled) return;
 
-    confirmedGroups.sort(
-      (a, b) => (b.files.length - 1) * b.size - (a.files.length - 1) * a.size,
-    );
+    confirmedGroups.sort((a, b) => (b.reclaimableBytes ?? 0) - (a.reclaimableBytes ?? 0));
 
     const totalWastedBytes = confirmedGroups.reduce(
-      (sum, g) => sum + (g.files.length - 1) * g.size,
+      (sum, g) => sum + (g.reclaimableBytes ?? 0),
       0,
     );
     const totalDuplicateFiles = confirmedGroups.reduce(
@@ -1074,7 +1078,12 @@ async function collectFromIndex(
     const candidate: FileCandidate = {
       path: rec.p,
       size,
-      mtime: typeof rec.m === "number" ? rec.m : 0,
+      mtime: rec.m,
+      // Sharing as of the scan that wrote the index (see duplicateReclaim.ts).
+      ...(rec.i ? { linkId: rec.i } : {}),
+      // `k` without `v`: a clone whose private size the scan couldn't
+      // read. Count it as freeing nothing, as Dev Artifacts does.
+      ...(typeof rec.v === "number" ? { privateBytes: rec.v } : rec.k === 1 ? { privateBytes: 0 } : {}),
     };
     if (bucket) bucket.push(candidate);
     else sizeMap.set(size, [candidate]);
@@ -1094,7 +1103,7 @@ async function collectFromIndex(
 async function streamIndex(
   indexPath: string,
   isCancelled: () => boolean,
-  onRec: (rec: { p: string; s?: number; m?: number; t?: string }) => boolean,
+  onRec: (rec: ParsedIndexLine) => boolean,
 ): Promise<void> {
   const gunzip = createGunzip();
   const source = createReadStream(indexPath);
@@ -1112,10 +1121,9 @@ async function streamIndex(
     for await (const line of rl) {
       if (isCancelled()) break;
       if (!line) continue;
-      let rec: { p?: string; s?: number; m?: number; t?: string };
-      try { rec = JSON.parse(line); } catch { continue; }
-      if (!rec || typeof rec.p !== "string") continue;
-      const cont = onRec(rec as { p: string; s?: number; m?: number; t?: string });
+      const rec = parseIndexLine(line);
+      if (!rec) continue;
+      const cont = onRec(rec);
       if (!cont) break;
     }
   } catch {
@@ -1179,7 +1187,7 @@ async function collectFromWalk(
   rootPath: string,
   cbs: WalkCallbacks,
 ): Promise<Map<number, FileCandidate[]>> {
-  const entries: { path: string; size: number; mtime: number }[] = [];
+  const entries: FileCandidate[] = [];
   const sizeCounts = new Map<number, number>();
   const directoryStack = [Path.resolve(rootPath)];
   let walked = 0;
@@ -1211,7 +1219,10 @@ async function collectFromWalk(
 
       walked++;
       sizeCounts.set(stat.size, (sizeCounts.get(stat.size) ?? 0) + 1);
-      entries.push({ path: fullPath, size: stat.size, mtime: stat.mtimeMs });
+      // No index: this walk is the scan, so read link identity from the
+      // stat it already did. APFS clone data needs the native scanner.
+      const linkId = stat.nlink > 1 ? await linkIdOf(fullPath, stat) : undefined;
+      entries.push({ path: fullPath, size: stat.size, mtime: stat.mtimeMs, ...(linkId ? { linkId } : {}) });
       if (walked % 500 === 0) {
         let candGroups = 0;
         for (const c of sizeCounts.values()) if (c >= 2) candGroups++;
@@ -1238,9 +1249,8 @@ async function collectFromWalk(
     const count = sizeCounts.get(e.size) ?? 0;
     if (count < 2) continue;
     const bucket = sizeMap.get(e.size);
-    const candidate: FileCandidate = { path: e.path, size: e.size, mtime: e.mtime };
-    if (bucket) bucket.push(candidate);
-    else sizeMap.set(e.size, [candidate]);
+    if (bucket) bucket.push(e);
+    else sizeMap.set(e.size, [e]);
   }
 
   return sizeMap;
@@ -1743,10 +1753,59 @@ async function hashFileSample(
 function toEntry(c: FileCandidate): DuplicateFileEntry {
   const name = Path.basename(c.path);
   const parentPath = Path.dirname(c.path);
+  const reclaim = fileReclaim({ size: c.size, linkId: c.linkId, privateBytes: c.privateBytes });
   return {
     path: c.path,
     name,
     parentPath,
     modifiedAt: c.mtime,
+    ...(reclaim.sharing ? { reclaimableBytes: reclaim.bytes, sharing: reclaim.sharing } : {}),
   };
+}
+
+/**
+ * `dev:ino` for a walked file with several names. Inode numbers past
+ * 2^53 lose precision as JS numbers, so those take a bigint stat (as the
+ * scan worker's `linkStat` does); a rounded id could merge two files.
+ */
+async function linkIdOf(path: string, stat: FS.Stats): Promise<string> {
+  if (Number.isSafeInteger(stat.ino) && Number.isSafeInteger(stat.dev)) return `${stat.dev}:${stat.ino}`;
+  try {
+    const exact = await FSP.stat(path, { bigint: true });
+    return `${exact.dev}:${exact.ino}`;
+  } catch {
+    return `${stat.dev}:${stat.ino}`;
+  }
+}
+
+function makeGroup(hash: string, size: number, bucket: FileCandidate[]): DuplicateGroup {
+  const files = bucket.map(toEntry);
+  return { hash, size, files, reclaimableBytes: groupReclaim(files, size) };
+}
+
+/**
+ * Hardlinks of one file aren't duplicates: list the first name per link
+ * id (index order, which is the scan's walk order) and drop the rest.
+ * The kept name keeps its `linkId`, so it counts as freeing nothing: its
+ * other names, in this folder or outside it, still hold the data.
+ *
+ * Runs on the candidate map before hashing, so extra names are never
+ * hashed. Buckets that fold down to one file drop out as non-candidates.
+ */
+export function foldHardlinks<T extends { linkId?: string }>(sizeMap: Map<number, T[]>): number {
+  let folded = 0;
+  for (const [size, bucket] of sizeMap) {
+    if (!bucket.some((file) => file.linkId)) continue;
+    const seen = new Set<string>();
+    const kept = bucket.filter((file) => {
+      if (!file.linkId) return true;
+      if (seen.has(file.linkId)) return false;
+      seen.add(file.linkId);
+      return true;
+    });
+    folded += bucket.length - kept.length;
+    if (kept.length < 2) sizeMap.delete(size);
+    else sizeMap.set(size, kept);
+  }
+  return folded;
 }
