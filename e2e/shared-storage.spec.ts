@@ -163,7 +163,14 @@ test.describe("APFS clones", () => {
     const handle = await launch();
     await scanFolderFromPicker(handle, root);
     const { page } = handle;
-    await openTab(page, "Dev Artifacts");
+    const tile = page.locator(".metric-dev-tile");
+    await expect(tile).toContainText("0 B – 33.6 MB");
+    await expect(tile).toContainText("dev artifacts reclaimable");
+    await expect(tile).toContainText("101 MB listed");
+    await expect(tile).toHaveAttribute("title", /Local snapshots can delay/);
+    const tileValue = await tile.locator(".metric-value").textContent();
+    await tile.click();
+    await expect(page.locator(".tab-bar").getByRole("button", { name: "Dev Artifacts" })).toHaveClass(/active/);
 
     for (const tree of trees) {
       const row = page.locator(".dev-row").filter({ has: page.locator(`.dev-row-name[title="${tree}"]`) });
@@ -175,7 +182,7 @@ test.describe("APFS clones", () => {
     // 96 MB listed is 32 MB of blocks. No one tree frees any of it, and
     // deleting all three frees it once.
     const summary = page.locator(".dev-summary-net");
-    await expect(summary.locator(".changes-delta-big")).toHaveText("0 B – 33.6 MB");
+    await expect(summary.locator(".changes-delta-big")).toHaveText(tileValue ?? "");
     await expect(summary.locator(".changes-delta-label")).toHaveText("reclaimable on this scan · 101 MB listed");
     // The kind rail tells the same story as the header.
     const rail = page.locator(".dev-kind-rail");

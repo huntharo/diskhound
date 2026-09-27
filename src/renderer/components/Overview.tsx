@@ -17,6 +17,7 @@ import {
   type DeletedPathRecord,
 } from "../lib/deletedPaths";
 import { basename, formatBytes, formatCount, formatElapsed, humanAge, relativeTime } from "../lib/format";
+import { overviewDevTileDisplay } from "../lib/devReclaimDisplay";
 import { overviewStorageTotal } from "../lib/overviewStorageTotal";
 import { useConfirmPermanentDelete, useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { saveLocalPreference } from "../lib/localPreference";
@@ -939,20 +940,20 @@ function DevCleanupTile({ snapshot, onViewDev }: { snapshot: ScanSnapshot; onVie
   const display = dev
     ? mergeDiagLogHotspots(dev, snapshot.hottestDirectories ?? [])
     : null;
-  if (!display || display.totalBytes <= 0) return null;
-  const topKind = display.kindTotals[0]?.kind;
+  if (!display) return null;
+  const tile = overviewDevTileDisplay(display.artifacts);
+  if (!tile) return null;
   return (
     <button
       type="button"
       className="metric metric-dev-tile"
       onClick={() => onViewDev?.()}
-      title="Open Dev Artifacts to permanently delete worktrees, node_modules, build caches, and RDP traces"
+      title={tile.title}
     >
-      <span className="metric-value accent">{formatBytes(display.totalBytes)}</span>
-      <span className="metric-label">dev artifacts</span>
+      <span className="metric-value accent">{tile.value}</span>
+      <span className="metric-label">{tile.label}</span>
       <span className="metric-dev-meta">
-        {formatCount(display.projectCount)} proj
-        {topKind ? ` · ${formatCount(display.kindTotals[0]!.count)} trees` : ""}
+        {tile.secondary ?? `${formatCount(display.projectCount)} proj`}
       </span>
     </button>
   );
