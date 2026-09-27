@@ -107,7 +107,14 @@ describe("DiagnosticsManager", () => {
     });
     manager.start();
     manager.applySettings({ ...off(), hotCpuProfiling: true });
-    await vi.waitUntil(async () => (await manager.status()).hotCpu.state === (timing === "during" ? "profiling" : "capped"), { timeout: 5_000 });
+    if (timing === "during") {
+      await vi.waitUntil(async () => (await manager.status()).hotCpu.state === "profiling", { timeout: 5_000 });
+    } else {
+      // The cap counts triggered profiles, before their async writes finish.
+      // Wait for the saved line, which follows the artifact and manifest commit.
+      await vi.waitUntil(() => log.mock.calls.some(([tag, message]) =>
+        tag === "hot-cpu" && /^saved .*main-hot-0001\.cpuprofile \(\d+ KB\): /.test(String(message))), { timeout: 5_000 });
+    }
     expect((await manager.status()).hotCpu.profilesWritten).toBe(timing === "during" ? 0 : 1);
 
     manager.applySettings({ ...off(), hotCpuProfiling: true, hotCpuThresholdPercent: 90 });
@@ -118,7 +125,7 @@ describe("DiagnosticsManager", () => {
     const [session] = status.sessions;
     expect(session.artifacts.map((artifact) => artifact.filename)).toEqual(["main-hot-0001.cpuprofile"]);
     expect(session.path.startsWith(root)).toBe(true);
-    // "capped" counts the commit; the saved line follows it.
+    // The settings restart also waits for the active capture to finish saving.
     await vi.waitUntil(() => log.mock.calls.some(([tag, message]) =>
       tag === "hot-cpu" && /^saved .*main-hot-0001\.cpuprofile \(\d+ KB\): /.test(String(message))), { timeout: 5_000 });
   });
