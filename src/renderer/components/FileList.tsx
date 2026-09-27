@@ -10,6 +10,7 @@ import {
   type DeletedPathAction,
   type DeletedPathRecord,
 } from "../lib/deletedPaths";
+import { runBulkPathAction } from "../lib/bulkPathAction";
 import { formatBytes, formatCount, humanAge, relativePath } from "../lib/format";
 import {
   checkFreedSpace,
@@ -54,6 +55,7 @@ const PAGE_SIZE = 1000;
 interface Props {
   snapshot: ScanSnapshot;
   initialFilter?: string;
+  onRescan: () => void;
 }
 
 function compareFn(field: SortField, dir: SortDir) {
@@ -68,7 +70,7 @@ function compareFn(field: SortField, dir: SortDir) {
   };
 }
 
-export function FileList({ snapshot, initialFilter }: Props) {
+export function FileList({ snapshot, initialFilter, onRescan }: Props) {
   const [filterText, setFilterText] = useState(initialFilter ?? "");
   const [quickFilter, setQuickFilter] = useState<QuickFilter>("all");
   // Only meaningful when quickFilter === "recent". Persists across
@@ -81,6 +83,10 @@ export function FileList({ snapshot, initialFilter }: Props) {
   // but pull the other helpers from the shared hook.
   const { busy, markBusy, clearBusy, handleEasyMove, handleEasyMoveBatch } = usePathActions();
   const confirmDelete = useConfirmPermanentDelete();
+  const bulkRunningRef = useRef(false);
+  const bulkCancelRef = useRef(false);
+  const [bulkStatus, setBulkStatus] = useState("");
+  const [bulkRunning, setBulkRunning] = useState(false);
   const [sortField, setSortField] = useState<SortField>("size");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [focusIndex, setFocusIndex] = useState(-1);
@@ -227,6 +233,7 @@ export function FileList({ snapshot, initialFilter }: Props) {
         }
         case "Delete": {
           e.preventDefault();
+          if (bulkRunningRef.current) return;
           setFocusIndex((i) => {
             const f = files[i];
             if (f && isProtectedPath(f.path)) {
@@ -324,6 +331,7 @@ export function FileList({ snapshot, initialFilter }: Props) {
     label: "trash" | "delete",
     action: (p: string) => Promise<PathActionResult>,
   ) => {
+    if (bulkRunningRef.current) return;
     // Bulk acts on every selected file, not just the currently-
     // rendered page. Otherwise scrolling to the next page would
     // silently drop earlier selections from the operation, which
@@ -343,33 +351,37 @@ export function FileList({ snapshot, initialFilter }: Props) {
         `This SKIPS the trash and CANNOT be undone — ${permanentDeleteFreesNote()}.`;
       if (!confirm(msg)) return;
     }
-    const expectedBytes = label === "delete" ? targets.reduce((sum, f) => sum + f.size, 0) : 0;
-    const checkPath = targets[0]!.path;
-    const freeBefore = await freeBytesBeforeDelete(checkPath, expectedBytes);
+    bulkRunningRef.current = true;
+    bulkCancelRef.current = false;
+    setBulkStatus(`${label === "trash" ? "Moving to Trash" : "Deleting"}: 0 of ${formatCount(targets.length)} files`);
+    setBulkRunning(true);
+    try {
+      const expectedBytes = label === "delete" ? targets.reduce((sum, f) => sum + f.size, 0) : 0;
+      const checkPath = targets[0]!.path;
+      const freeBefore = await freeBytesBeforeDelete(checkPath, expectedBytes);
 
-    const ok: string[] = [];
-    for (const f of targets) {
-      markBusy(f.path);
-      const r = await action(f.path);
-      clearBusy(f.path);
-      if (r.ok) ok.push(f.path);
-    }
-    if (ok.length > 0 && freeBefore !== null) {
-      const okSet = new Set(ok);
-      void checkFreedSpace({
-        path: checkPath,
-        expectedBytes: targets.filter((f) => okSet.has(f.path)).reduce((sum, f) => sum + f.size, 0),
-        freeBefore,
+      const ok = await runBulkPathAction(targets.map((f) => f.path), label, action, blocked, {
+        isCancelled: () => bulkCancelRef.current,
+        onComplete: setBulkStatus,
+        onProgress: (completed, total) => setBulkStatus(
+          bulkCancelRef.current ? "Cancelling — waiting for active files to finish…" : `${label === "trash" ? "Moving to Trash" : "Deleting"}: ${formatCount(completed)} of ${formatCount(total)} files`,
+        ),
       });
-    }
-    if (ok.length > 0) {
-      markDeletedPaths(ok, label);
-      setSelected((s) => { const next = new Set(s); ok.forEach((p) => next.delete(p)); return next; });
-      toast(
-        blocked > 0 ? "warning" : "success",
-        `${label === "trash" ? "Trashed" : "Deleted"} ${ok.length} file(s)`,
-        blocked > 0 ? `${blocked} protected or already-deleted file(s) skipped.` : undefined,
-      );
+      if (ok.length > 0 && freeBefore !== null) {
+        const okSet = new Set(ok);
+        void checkFreedSpace({
+          path: checkPath,
+          expectedBytes: targets.filter((f) => okSet.has(f.path)).reduce((sum, f) => sum + f.size, 0),
+          freeBefore,
+        });
+      }
+      if (ok.length > 0) {
+        markDeletedPaths(ok, label);
+        setSelected((s) => { const next = new Set(s); ok.forEach((p) => next.delete(p)); return next; });
+      }
+    } finally {
+      bulkRunningRef.current = false;
+      setBulkRunning(false);
     }
   };
 
@@ -444,7 +456,7 @@ export function FileList({ snapshot, initialFilter }: Props) {
         </button>
         <button
           className="bulk-btn"
-          disabled={selectedActionableTotal === 0}
+          disabled={bulkRunning || selectedActionableTotal === 0}
           onClick={() => void bulkMove()}
           title="Move selected files to another location and leave a symlink so they still open from here"
         >
@@ -452,7 +464,7 @@ export function FileList({ snapshot, initialFilter }: Props) {
         </button>
         <button
           className="bulk-btn warn"
-          disabled={selectedActionableTotal === 0}
+          disabled={bulkRunning || selectedActionableTotal === 0}
           onClick={() => void bulkAction("trash", nativeApi.trashPath)}
           title="Send to OS trash — recoverable until emptied"
         >
@@ -460,13 +472,27 @@ export function FileList({ snapshot, initialFilter }: Props) {
         </button>
         <button
           className="bulk-btn danger"
-          disabled={selectedActionableTotal === 0}
+          disabled={bulkRunning || selectedActionableTotal === 0}
           onClick={() => void bulkAction("delete", nativeApi.permanentlyDeletePath)}
           title={`Permanently delete — skips trash, ${permanentDeleteFreesNote()}, cannot be undone`}
         >
           Delete selected
         </button>
       </div>
+
+      {bulkStatus && (
+        <div className="bulk-bar" role="status" aria-live="polite">
+          <span>{bulkStatus}</span>
+          <div className="bulk-spacer" />
+          {bulkRunning ? <button className="bulk-btn" onClick={() => {
+            bulkCancelRef.current = true;
+            setBulkStatus("Cancelling — waiting for active files to finish…");
+          }}>Cancel</button> : <button className="bulk-btn" onClick={() => {
+            setBulkStatus("");
+            onRescan();
+          }}>Rescan to refresh</button>}
+        </div>
+      )}
 
       {/* ── Column headers ── */}
       <div className="file-col-header">
@@ -494,7 +520,7 @@ export function FileList({ snapshot, initialFilter }: Props) {
                 focused={focusIndex === idx}
                 rootPath={snapshot.rootPath}
                 selected={selected.has(file.path)}
-                isBusy={busy.has(file.path)}
+                isBusy={bulkRunning || busy.has(file.path)}
                 protectedBy={findProtectedFolder(file.path)}
                 deletedRecord={getDeletedRecord(file.path)}
                 onToggle={() => toggleSelected(file.path)}
@@ -514,7 +540,7 @@ export function FileList({ snapshot, initialFilter }: Props) {
                     expectedBytes: file.size,
                   });
                 }}
-                onContextMenu={(x, y) => setContextMenu({ x, y, path: file.path })}
+                onContextMenu={(x, y) => { if (!bulkRunningRef.current) setContextMenu({ x, y, path: file.path }); }}
               />
             ))}
             {/* Load-more footer. Shown only when there's another
