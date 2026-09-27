@@ -6047,16 +6047,18 @@ button, input, select, textarea { font: inherit; }
   border-bottom: 1px solid rgba(255,255,255,0.03);
 }
 .duplicate-file-row {
+  position: relative;
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 10px;
   padding: 5px 12px 5px 42px;
   transition: background 0.1s;
 }
-.duplicate-file-row:hover { background: var(--bg-row-hover); }
+.duplicate-file-row:hover,
+.duplicate-file-row:has(:focus-visible) { background: var(--bg-row-hover); }
 
 .duplicate-file-info {
+  flex: 1;
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -6087,14 +6089,31 @@ button, input, select, textarea { font: inherit; }
   color: var(--blue);
   font-weight: 600;
 }
+/* The actions float over the end of the path while the row is hovered,
+ * so hidden buttons don't cut every path ~250px short. The background
+ * repaints the hovered row's layers (page, group card, hover tint) so the
+ * path doesn't show through, and the mask fades it in from the left. */
 .duplicate-file-actions {
+  position: absolute;
+  top: 0;
+  right: 12px;
+  bottom: 0;
   display: flex;
+  align-items: center;
   gap: 4px;
-  flex-shrink: 0;
+  padding-left: 24px;
+  background:
+    linear-gradient(var(--bg-row-hover), var(--bg-row-hover)),
+    linear-gradient(var(--bg-row), var(--bg-row)),
+    var(--bg);
+  mask-image: linear-gradient(90deg, transparent, #000 24px);
   opacity: 0;
   transition: opacity 0.1s;
 }
-.duplicate-file-row:hover .duplicate-file-actions { opacity: 1; }
+.duplicate-file-row:hover .duplicate-file-actions,
+.duplicate-file-row:has(:focus-visible) .duplicate-file-actions { opacity: 1; }
+/* Every action is disabled on a deleted copy; don't cover its path. */
+.duplicate-file-row.deleted .duplicate-file-actions { display: none; }
 
 /* Empty states */
 .duplicates-empty {
