@@ -11,7 +11,7 @@ export const DEV_KIND_LABEL: Record<DevArtifactKind, string> = {
   "js-build": "JS / frontend build output",
   python: "Python venv & caches",
   "go-module": "Go module cache",
-  jvm: "Gradle / Maven",
+  jvm: "JVM / Java / Scala (Gradle, Maven, sbt)",
   dotnet: "NuGet / .NET",
   "compiler-cache": "Compiler caches",
   "cmake-build": "CMake build trees",
@@ -29,7 +29,7 @@ export const DEV_KIND_SHORT: Record<DevArtifactKind, string> = {
   "js-build": "JS build",
   python: "Python",
   "go-module": "Go cache",
-  jvm: "Gradle",
+  jvm: "JVM / Scala",
   dotnet: ".NET",
   "compiler-cache": "ccache",
   "cmake-build": "CMake",
@@ -88,9 +88,6 @@ export const ARTIFACT_SEGMENT_NAMES: ReadonlySet<string> = new Set([
   ".cache",
   ".terraform",
   ".terraform.d",
-  "dist",
-  "build",
-  "out",
 ]);
 
 function splitSegments(filePath: string): string[] {
@@ -111,9 +108,9 @@ function joinSegments(original: string, count: number): string {
 }
 
 /**
- * Every root ends at the matched segment or one past it. The folder-tree
+ * Every root ends at most three segments past the matched segment. The folder-tree
  * fallback (devArtifactFolderTree.ts) relies on that to skip rows whose
- * last two segments aren't in ARTIFACT_SEGMENT_NAMES, so a rule that
+ * last four segments aren't in ARTIFACT_SEGMENT_NAMES, so a rule that
  * reaches further needs that reader changed too.
  */
 export function classifyArtifactPath(filePath: string): { root: string; kind: DevArtifactKind } | null {
@@ -125,13 +122,24 @@ export function classifyArtifactPath(filePath: string): { root: string; kind: De
     if (!ARTIFACT_SEGMENT_NAMES.has(lower)) continue;
 
     if (lower === "target") {
-      if (i + 1 < parts.length) {
-        const next = parts[i + 1]!.toLowerCase();
-        if (next === "debug" || next === "release" || next === "doc" || next === "incremental") {
-          return { root: joinSegments(filePath, i + 2), kind: "rust-target" };
-        }
+      // Shared by Cargo, sbt, Maven and arbitrary user folders. Never
+      // infer a language from target, a profile name, or an ancestor's
+      // project marker. Keep only the subtree carrying the evidence.
+      const next = parts[i + 1]?.toLowerCase() ?? "";
+      if (/^scala-(?:2\.[0-9]+|3)(?:\.[0-9]+)*$/.test(next)
+        || next === "maven-status" || next === "maven-archiver") {
+        return { root: joinSegments(filePath, i + 2), kind: "jvm" };
       }
-      return { root: joinSegments(filePath, i + 1), kind: "rust-target" };
+      // Cargo's normal and cross-compilation layouts. A target triple
+      // must have at least arch/vendor/os; arbitrary intermediate dirs
+      // do not strengthen the evidence.
+      const profile = /^(?:debug|release)$/.test(next) ? i + 1
+        : /^[a-z0-9_]+-[a-z0-9_]+-[a-z0-9_][a-z0-9_-]*$/.test(next) ? i + 2 : -1;
+      if (profile >= 0 && /^(?:debug|release)$/.test(parts[profile]?.toLowerCase() ?? "")
+        && /^(?:deps|incremental|\.fingerprint)$/.test(parts[profile + 1]?.toLowerCase() ?? "")) {
+        return { root: joinSegments(filePath, profile + 2), kind: "rust-target" };
+      }
+      continue;
     }
 
     if (lower === ".cargo" && i + 1 < parts.length && parts[i + 1]!.toLowerCase() === "registry") {
@@ -180,10 +188,6 @@ export function classifyArtifactPath(filePath: string): { root: string; kind: De
     if (mapped) {
       const depth = mapped === "worktree" && i + 1 < parts.length ? i + 2 : i + 1;
       return { root: joinSegments(filePath, depth), kind: mapped };
-    }
-
-    if (lower === "dist" || lower === "build" || lower === "out") {
-      return { root: joinSegments(filePath, i + 1), kind: "js-build" };
     }
   }
   return null;

@@ -1,0 +1,202 @@
+[
+  {
+    "path": "/mono/target",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/a.txt",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/classes/Foo.class",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/test-classes/Foo.class",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/doc/index.html",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/debug/notes.txt",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/release/app",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/incremental/notes",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/build/Foo.class",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/dist/app.jar",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/out/native.o",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/scala-source/main.scala",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/scala-3x/classes/Foo.class",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/scala-2/classes/Foo.class",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/scala-2.13backup/Foo",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/scala-3./Foo",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/not-a-triple/debug/notes",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/debug/deps-backup/a",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/targeted/debug/deps/a",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/scala-2.13/debug/deps/a",
+    "root": "/mono/target/scala-2.13",
+    "kind": "jvm"
+  },
+  {
+    "path": "/mono/src/jvm/public-api/target/scala-2.13/classes/Foo.class",
+    "root": "/mono/src/jvm/public-api/target/scala-2.13",
+    "kind": "jvm"
+  },
+  {
+    "path": "/mono/project/target/scala-2.12/sbt-1.0/classes/Build.class",
+    "root": "/mono/project/target/scala-2.12",
+    "kind": "jvm"
+  },
+  {
+    "path": "/mono/target/scala-3.3.1/test-classes/Foo.class",
+    "root": "/mono/target/scala-3.3.1",
+    "kind": "jvm"
+  },
+  {
+    "path": "/mono/target/scala-3/classes/Foo.class",
+    "root": "/mono/target/scala-3",
+    "kind": "jvm"
+  },
+  {
+    "path": "/mono/target/maven-status/compiler/x",
+    "root": "/mono/target/maven-status",
+    "kind": "jvm"
+  },
+  {
+    "path": "/mono/target/maven-archiver/pom.properties",
+    "root": "/mono/target/maven-archiver",
+    "kind": "jvm"
+  },
+  {
+    "path": "/mono/target/debug/deps/libfoo.rlib",
+    "root": "/mono/target/debug/deps",
+    "kind": "rust-target"
+  },
+  {
+    "path": "/mono/target/release/.fingerprint/foo/x",
+    "root": "/mono/target/release/.fingerprint",
+    "kind": "rust-target"
+  },
+  {
+    "path": "/mono/target/debug/incremental/foo/x",
+    "root": "/mono/target/debug/incremental",
+    "kind": "rust-target"
+  },
+  {
+    "path": "/mono/target/aarch64-apple-darwin/release/deps/libfoo.rlib",
+    "root": "/mono/target/aarch64-apple-darwin/release/deps",
+    "kind": "rust-target"
+  },
+  {
+    "path": "/mono/target/x86_64-unknown-linux-gnu/debug/incremental/foo/x",
+    "root": "/mono/target/x86_64-unknown-linux-gnu/debug/incremental",
+    "kind": "rust-target"
+  },
+  {
+    "path": "/mono/target/node_modules/x/index.js",
+    "root": "/mono/target/node_modules",
+    "kind": "node-modules"
+  },
+  {
+    "path": "/mono/build/.next/cache/x",
+    "root": "/mono/build/.next",
+    "kind": "js-build"
+  },
+  {
+    "path": "/mono/node_modules/x/target/scala-3/classes/Foo.class",
+    "root": "/mono/node_modules",
+    "kind": "node-modules"
+  },
+  {
+    "path": "/mono/target/a-b--/debug/deps/a",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/-b-c/debug/deps/a",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/a--c/debug/deps/a",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/a-b-/debug/deps/a",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/a-b-c.txt/debug/deps/a",
+    "root": null,
+    "kind": null
+  },
+  {
+    "path": "/mono/target/scala-2.13-backup/debug/deps/a",
+    "root": null,
+    "kind": null
+  }
+]

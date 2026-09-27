@@ -273,6 +273,10 @@ fn is_project_marker(name: &str) -> bool {
         name.to_ascii_lowercase().as_str(),
         "package.json"
             | "cargo.toml"
+            | "build.sbt"
+            | "pom.xml"
+            | "build.gradle"
+            | "build.gradle.kts"
             | "go.mod"
             | "pyproject.toml"
             | "composer.json"
@@ -288,13 +292,52 @@ fn classify(path: &str) -> Option<(String, Kind)> {
     for i in 0..parts.len() {
         let lower = parts[i].to_ascii_lowercase();
         if lower == "target" {
-            if i + 1 < parts.len() {
-                let next = parts[i + 1].to_ascii_lowercase();
-                if matches!(next.as_str(), "debug" | "release" | "doc" | "incremental") {
-                    return Some((join_segments(path, &parts, i + 2), Kind::RustTarget));
-                }
+            // Match only tool-specific subtrees, never a whole ambiguous
+            // target/profile tree or an ancestor's project language.
+            let next = parts
+                .get(i + 1)
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_default();
+            let scala = next.strip_prefix("scala-").is_some_and(|version| {
+                let mut components = version.split('.');
+                let major = components.next().unwrap_or_default();
+                let rest: Vec<_> = components.collect();
+                (major == "3" || (major == "2" && !rest.is_empty()))
+                    && rest
+                        .iter()
+                        .all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            });
+            if scala || matches!(next.as_str(), "maven-status" | "maven-archiver") {
+                return Some((join_segments(path, &parts, i + 2), Kind::Jvm));
             }
-            return Some((join_segments(path, &parts, i + 1), Kind::RustTarget));
+            let triple = next.split('-').count() >= 3
+                && next.split('-').take(2).all(|s| !s.is_empty())
+                && next.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-'
+                })
+                && next.splitn(3, '-').nth(2).is_some_and(|s| {
+                    s.as_bytes()
+                        .first()
+                        .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                });
+            let profile = if matches!(next.as_str(), "debug" | "release") {
+                i + 1
+            } else if triple {
+                i + 2
+            } else {
+                continue;
+            };
+            if parts.get(profile).is_some_and(|s| {
+                s.eq_ignore_ascii_case("debug") || s.eq_ignore_ascii_case("release")
+            }) && parts.get(profile + 1).is_some_and(|s| {
+                matches!(
+                    s.to_ascii_lowercase().as_str(),
+                    "deps" | "incremental" | ".fingerprint"
+                )
+            }) {
+                return Some((join_segments(path, &parts, profile + 2), Kind::RustTarget));
+            }
+            continue;
         }
         if lower == ".cargo" && i + 1 < parts.len() && parts[i + 1].eq_ignore_ascii_case("registry")
         {
@@ -345,13 +388,9 @@ fn classify(path: &str) -> Option<(String, Kind)> {
             };
             return Some((join_segments(path, &parts, depth), kind));
         }
-        if matches!(lower.as_str(), "dist" | "build" | "out") {
-            return Some((join_segments(path, &parts, i + 1), Kind::JsBuild));
-        }
     }
     None
 }
-
 
 fn mapped_kind(lower: &str) -> Option<Kind> {
     Some(match lower {
@@ -434,6 +473,115 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mixed_monorepo_is_independent_of_marker_order() {
+        let files = [
+            "/mono/Cargo.toml",
+            "/mono/package.json",
+            "/mono/jvm/build.sbt",
+            "/mono/jvm/api/target/scala-2.13/classes/A.class",
+            "/mono/jvm/api/target/scala-2.13/classes/B.class",
+            "/mono/native/target/debug/deps/libapp.rlib",
+            "/mono/jvm/api/target/classes/C.class",
+            "/mono/unrelated/target/notes.txt",
+            "/mono/jvm/build/notes.txt",
+        ];
+        for reverse in [false, true] {
+            let mut ordered = files.to_vec();
+            if reverse {
+                ordered.reverse();
+            }
+            let mut acc = DevArtifactAcc::new();
+            for path in ordered {
+                acc.add(path, 100, false, None);
+            }
+            assert_eq!(acc.artifacts.len(), 2);
+            let jvm = &acc.artifacts["/mono/jvm/api/target/scala-2.13"];
+            assert_eq!(jvm.kind.as_str(), "jvm");
+            assert_eq!((jvm.size, jvm.files), (200, 2));
+            assert_eq!(
+                acc.artifacts["/mono/native/target/debug/deps"]
+                    .kind
+                    .as_str(),
+                "rust-target"
+            );
+            assert!(acc.projects.contains("/mono/jvm"));
+        }
+    }
+
+    #[test]
+    fn shared_adversarial_corpus_and_path_spellings() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../src/test/fixtures/devArtifactClassification.json"
+        ))
+        .unwrap();
+        for case in cases.as_array().unwrap() {
+            for prefix in ["/", "C:/", "//nas/share/"] {
+                for sep in ["/", "\\"] {
+                    if prefix == "/" && sep == "\\" {
+                        continue;
+                    }
+                    for upper in [false, true] {
+                        let spell = |path: &str| {
+                            let value = format!("{prefix}{}", &path[1..]).replace('/', sep);
+                            if upper {
+                                value.to_ascii_uppercase()
+                            } else {
+                                value
+                            }
+                        };
+                        let path = spell(case["path"].as_str().unwrap());
+                        let expected = case["root"].as_str().map(|root| {
+                            let root = spell(root);
+                            let root = if prefix.starts_with("//") {
+                                root.replace('/', "\\")
+                            } else {
+                                root
+                            };
+                            (root, case["kind"].as_str().unwrap().to_string())
+                        });
+                        assert_eq!(
+                            classify(&path).map(|(r, k)| (r, k.as_str().to_string())),
+                            expected,
+                            "{path}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fuzz_ambiguous_names_with_fixed_seed() {
+        let mut seed = 0x5ca1ab1eu32;
+        let mut random = |n: usize| {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            seed as usize % n
+        };
+        let names = [
+            "target",
+            "build",
+            "dist",
+            "out",
+            "debug",
+            "release",
+            "doc",
+            "classes",
+            "scala-source",
+            "scala-3x",
+            "deps-old",
+        ];
+        for _ in 0..2000 {
+            let mut path = String::from("/mono");
+            for _ in 0..1 + random(24) {
+                path.push('/');
+                path.push_str(names[random(names.len())]);
+            }
+            path.push_str("/notes.txt");
+            assert!(classify(&path).is_none(), "{path}");
+        }
+    }
+
+    #[test]
     fn classifies_node_modules() {
         let (root, kind) = classify(r"C:\proj\app\node_modules\preact\dist\preact.js").unwrap();
         assert_eq!(root, r"C:\proj\app\node_modules");
@@ -442,8 +590,8 @@ mod tests {
 
     #[test]
     fn classifies_rust_target() {
-        let (root, kind) = classify("/home/dev/diskhound/target/debug/diskhound").unwrap();
-        assert_eq!(root, "/home/dev/diskhound/target/debug");
+        let (root, kind) = classify("/home/dev/diskhound/target/debug/deps/diskhound").unwrap();
+        assert_eq!(root, "/home/dev/diskhound/target/debug/deps");
         assert!(matches!(kind, Kind::RustTarget));
     }
 

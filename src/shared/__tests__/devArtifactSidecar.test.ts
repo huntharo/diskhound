@@ -52,7 +52,7 @@ describe("noteDevFile with Terraform", () => {
 });
 
 describe("noteDirectoryRoot", () => {
-  it("keeps the outer target folder and skips target/debug", async () => {
+  it("ignores ambiguous target rollups", async () => {
     const { createDevAcc, dropNestedRoots, noteDirectoryRoot, reportFromSidecar, sidecarFromAcc } =
       await import("../devArtifactSidecar");
     const acc = createDevAcc();
@@ -63,10 +63,9 @@ describe("noteDirectoryRoot", () => {
     noteDirectoryRoot(acc, "C:\\proj\\node_modules\\preact", 1_000_000, 10);
     dropNestedRoots(acc);
     const report = reportFromSidecar(sidecarFromAcc(acc, "C:\\"));
-    expect(report.totalBytes).toBe(100_000_000);
+    expect(report.totalBytes).toBe(20_000_000);
     expect(report.artifacts.map((a) => a.path).sort()).toEqual([
       "C:\\proj\\node_modules",
-      "C:\\proj\\target",
     ]);
   });
 });
@@ -183,7 +182,7 @@ describe("loadDevArtifactReport", () => {
       version: 1,
       rootPath: "C:\\",
       generatedAt: 5,
-      roots: [{ path: "C:\\proj\\target", kind: "rust-target", size: 80, files: 4 }],
+      roots: [{ path: "C:\\proj\\target\\debug\\deps", kind: "rust-target", size: 80, files: 4 }],
       projects: ["C:\\proj"],
     });
     const report = await loadDevArtifactReport(dest, "C:\\", [pending]);
@@ -225,7 +224,7 @@ describe("compactDevArtifactSidecar", () => {
 });
 
 describe("reportFromSidecar", () => {
-  it("keeps dist/ only when a project marker exists", async () => {
+  it("rejects old dist guesses even when a project marker exists", async () => {
     const { reportFromSidecar } = await import("../devArtifactSidecar");
     const report = reportFromSidecar({
       version: 1,
@@ -237,8 +236,8 @@ describe("reportFromSidecar", () => {
       ],
       projects: ["C:\\proj"],
     });
-    expect(report.totalBytes).toBe(14_000_000);
-    expect(report.artifacts.map((a) => a.kind).sort()).toEqual(["js-build", "node-modules"]);
+    expect(report.totalBytes).toBe(5_000_000);
+    expect(report.artifacts.map((a) => a.kind).sort()).toEqual(["node-modules"]);
   });
 
   it("picks the nearest project among thousands", async () => {
@@ -274,7 +273,7 @@ describe("planRescanTargets", () => {
       ],
       projects,
     });
-    expect(targets).toEqual(["C:\\a\\node_modules", "C:\\b\\target"]);
+    expect(targets).toEqual(["C:\\a\\node_modules"]);
     expect(targets.length).toBeLessThan(projects.length);
   });
 
@@ -334,11 +333,11 @@ describe("dropSidecarRoots", () => {
       generatedAt: 1,
       roots: [
         { path: "C:\\proj\\node_modules", kind: "node-modules", size: 80, files: 4 },
-        { path: "C:\\proj\\target", kind: "rust-target", size: 20, files: 2 },
+        { path: "C:\\proj\\target\\debug\\deps", kind: "rust-target", size: 20, files: 2 },
       ],
       projects: ["C:\\proj"],
     }, ["C:\\PROJ\\node_modules"]);
-    expect(dropped.roots.map((r) => r.path)).toEqual(["C:\\proj\\target"]);
+    expect(dropped.roots.map((r) => r.path)).toEqual(["C:\\proj\\target\\debug\\deps"]);
     expect(dropped.droppedPaths).toEqual(["C:\\PROJ\\node_modules"]);
     const report = reportFromSidecar(dropped);
     expect(report.totalBytes).toBe(20);
@@ -406,7 +405,7 @@ describe("APFS clone info in the Dev sidecar", () => {
       generatedAt: 1,
       roots: [
         { path: "/Users/me/app/node_modules", kind: "node-modules", size: 500, files: 3, clone },
-        { path: "/Users/me/app/target", kind: "rust-target", size: 100, files: 1 },
+        { path: "/Users/me/app/target/debug/deps", kind: "rust-target", size: 100, files: 1 },
       ],
       projects: ["/Users/me/app"],
     });
@@ -438,5 +437,45 @@ describe("APFS clone info in the Dev sidecar", () => {
     expect(carryCloneInfo({ ...previous, roots: [{ ...previous.roots[0]!, size: 250, clone: undefined }] }, withBlocks)
       .roots[0]!.clone?.cloneSharedBlocks).toBe(20);
     expect(next.roots[1]!.clone).toBeUndefined();
+  });
+});
+
+describe("mixed-language evidence", () => {
+  it("does not let Cargo or JS markers label sibling JVM and unknown output", async () => {
+    const { createDevAcc, noteDevFile, reportFromSidecar, sidecarFromAcc } = await import("../devArtifactSidecar");
+    const files = [
+      "/mono/Cargo.toml", "/mono/package.json", "/mono/jvm/build.sbt",
+      "/mono/jvm/api/target/scala-2.13/classes/A.class",
+      "/mono/jvm/api/target/scala-2.13/classes/B.class",
+      "/mono/native/target/debug/deps/libapp.rlib",
+      "/mono/jvm/api/target/classes/C.class",
+      "/mono/unrelated/target/notes.txt", "/mono/jvm/build/notes.txt",
+    ];
+    for (const ordered of [files, [...files].reverse()]) {
+      const acc = createDevAcc();
+      for (const path of ordered) noteDevFile(acc, path, 100, false);
+      const report = reportFromSidecar(sidecarFromAcc(acc, "/mono"));
+      expect(report.totalBytes).toBe(300);
+      expect(report.totalFiles).toBe(3);
+      expect(report.artifacts).toEqual([
+        expect.objectContaining({ path: "/mono/jvm/api/target/scala-2.13", kind: "jvm", size: 200, projectPath: "/mono/jvm" }),
+        expect.objectContaining({ path: "/mono/native/target/debug/deps", kind: "rust-target", size: 100 }),
+      ]);
+    }
+  });
+
+  it("rejects legacy guesses in both reports and rescan plans", async () => {
+    const { reportFromSidecar, planRescanTargets } = await import("../devArtifactSidecar");
+    const sidecar = {
+      version: 1 as const, rootPath: "/mono", generatedAt: 1, projects: ["/mono"],
+      roots: [
+        { path: "/mono/jvm/target", kind: "rust-target" as const, size: 100, files: 1 },
+        { path: "/mono/target/debug", kind: "rust-target" as const, size: 100, files: 1 },
+        { path: "/mono/jvm/build", kind: "js-build" as const, size: 100, files: 1 },
+        { path: "/mono/web/.next", kind: "js-build" as const, size: 20, files: 1 },
+      ],
+    };
+    expect(reportFromSidecar(sidecar).totalBytes).toBe(20);
+    expect(planRescanTargets(sidecar)).toEqual(["/mono/web/.next"]);
   });
 });

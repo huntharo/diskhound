@@ -88,12 +88,34 @@ describe("sidecarFromFolderTreeFile", () => {
     const { sidecar } = await classify(treePath, "C:\\");
     expect(sidecar).not.toBeNull();
     const report = reportFromSidecar(sidecar!);
-    expect(report.totalBytes).toBe(100_000_000);
+    expect(report.totalBytes).toBe(20_000_000);
     expect(report.artifacts.map((a) => a.path).sort()).toEqual([
       "C:\\proj\\node_modules",
-      "C:\\proj\\target",
     ]);
     expect(report.projectCount).toBe(1);
+  });
+
+  it("keeps only evidenced subtrees in a mixed Cargo/sbt monorepo", async () => {
+    const rows = [
+      line("/mono", [["/mono/target", 9999, 100]], [["Cargo.toml", 1, 1]]),
+      line("/mono/jvm", [], [["build.sbt", 1, 1]]),
+      line("/mono/jvm/api", [["/mono/jvm/api/target", 500, 5]]),
+      line("/mono/jvm/api/target", [["/mono/jvm/api/target/scala-2.13", 400, 4]]),
+      line("/mono/target", [["/mono/target/debug", 700, 7]]),
+      line("/mono/target/debug", [["/mono/target/debug/deps", 300, 3]]),
+      line("/mono/target/aarch64-apple-darwin/release", [["/mono/target/aarch64-apple-darwin/release/incremental", 200, 2]]),
+    ];
+    for (const ordered of [rows, [...rows].reverse()]) {
+      const { sidecar } = await classify(await writeTree(ordered.join("\n")), "/mono");
+      const report = reportFromSidecar(sidecar!);
+      expect(report.totalBytes).toBe(900);
+      expect(report.artifacts.map(({ path, kind }) => [path, kind])).toEqual([
+        ["/mono/jvm/api/target/scala-2.13", "jvm"],
+        ["/mono/target/debug/deps", "rust-target"],
+        ["/mono/target/aarch64-apple-darwin/release/incremental", "rust-target"],
+      ]);
+      expect(report.artifacts[0]?.projectPath).toBe("/mono/jvm");
+    }
   });
 
   it("finds pnpm's global store from its folder row", async () => {
@@ -167,13 +189,9 @@ describe("sidecarFromFolderTreeFile", () => {
       "C:\\Users\\me\\go\\pkg\\mod",
       "C:\\Users\\zoë\\app\\.wor\u212Atrees",
       "C:\\Users\\zoë\\app\\node_modules",
-      "C:\\Users\\zoë\\app\\ñ\\out",
       "C:\\Windows\\Temp\\DiagOutputDir",
-      "C:\\src\\app\\Build",
       "C:\\src\\app\\node_modules",
-      "C:\\src\\app\\target",
       "C:\\src\\bell\u0007\\__pycache__",
-      "C:\\src\\half\ud800\\dist",
       "C:\\src\\tab\there\\.venv",
       "C:\\src\\we\"ird\\node_modules",
     ]);
@@ -328,6 +346,8 @@ function syntheticTree(projects: number, packages: number, plain: number): strin
       [`${app}/src`, 10, 1],
     ], [["package.json", 1, 1], ["README.md", 1, 1]]));
     lines.push(line(`${app}/target`, [[`${app}/target/debug`, 1_500, 15], [`${app}/target/release`, 400, 4]]));
+    lines.push(line(`${app}/target/debug`, [[`${app}/target/debug/deps`, 1_500, 15]]));
+    lines.push(line(`${app}/target/release`, [[`${app}/target/release/incremental`, 400, 4]]));
     lines.push(line(
       `${app}/node_modules`,
       Array.from({ length: packages }, (_, j): Row => [`${app}/node_modules/pkg${j}`, 5, 2]),
@@ -354,14 +374,14 @@ describe("sidecarFromFolderTreeFile memory", () => {
     }
     for (const { plain, sidecar, stats } of runs) {
       expect(stats.rows, `rows at ${plain}`).toBeGreaterThan(plain * 4);
-      // node_modules, target, target/debug, target/release per app.
-      expect(stats.retainedRoots, `roots at ${plain}`).toBe(40);
+      // node_modules and the two evidenced Cargo subtrees per app.
+      expect(stats.retainedRoots, `roots at ${plain}`).toBe(30);
       // The app folders. The 500 package.json folders in node_modules can't own a root.
       expect(stats.retainedProjects, `projects at ${plain}`).toBe(10);
-      // Rows whose last two segments name an artifact: 4 + 50 packages per app.
-      expect(stats.decodedRows, `decoded at ${plain}`).toBe(540);
+      // Four-segment prefilter: 6 candidate roots + 50 packages per app.
+      expect(stats.decodedRows, `decoded at ${plain}`).toBe(560);
       expect(stats.parsedLines).toBe(0);
-      expect(sidecar!.roots).toHaveLength(20);
+      expect(sidecar!.roots).toHaveLength(30);
     }
   });
 });
