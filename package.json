@@ -53,6 +53,7 @@
     "wait-on": "^8.0.2"
   },
   "trustedDependencies": [
-    "blake2"
+    "blake2",
+    "electron"
   ]
 }

@@ -25,6 +25,7 @@
     },
   },
   "trustedDependencies": [
+    "electron",
     "blake2",
   ],
   "packages": {
