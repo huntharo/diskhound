@@ -6,7 +6,7 @@
     "baselinePasses": 0
   },
   "native-linux/walk": {
-    "note": "4 dirs, 4 files (one a second hardlink), 2 symlinks: 1 listing per dir, 1 fstatat per entry, symlinks included (jwalk took 8: no stat for symlinks)",
+    "note": "dua-core: 4 dirs, 4 files (one a second hardlink), 2 symlinks: 1 listing per dir, 1 fstatat per entry, symlinks included",
     "readdir": 4,
     "stat": 10,
     "baselinePasses": 0
@@ -18,7 +18,7 @@
     "baselinePasses": 0
   },
   "native-macos/walk": {
-    "note": "4 dirs, 4 files (one a second hardlink), 2 symlinks: 1 listing per dir, 1 lstat per dir (its index mtime); getattrlistbulk gives files and symlinks theirs. jwalk took 8 stats: it also lstat'ed every file",
+    "note": "dua-core: 4 dirs, 4 files (one a second hardlink), 2 symlinks: 1 listing per dir, 1 lstat per dir (its index mtime); getattrlistbulk gives files and symlinks theirs",
     "readdir": 4,
     "stat": 4,
     "baselinePasses": 0

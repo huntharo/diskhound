@@ -165,8 +165,12 @@ src/
     └── lib/             Shared utilities, hooks, treemap algorithm
 
 native/diskhound-native-scanner/
-└── src/main.rs          Rust scanner (Win32 APIs + jwalk)
+└── src/main.rs          Rust scanner (Win32 APIs + dua-core)
 ```
+
+The native scanner uses Win32 APIs on Windows and [dua-core](https://crates.io/crates/dua-core),
+the directory-walking library from [dua-cli](https://github.com/Byron/dua-cli), on macOS and Linux.
+See [PR #37](https://github.com/tzarebczan/diskhound/pull/37) for the migration and scan benchmarks.
 
 ## How it works
 
