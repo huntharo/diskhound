@@ -5,7 +5,13 @@ import { join } from "node:path";
 import type { Locator, Page } from "@playwright/test";
 
 import { expect, test } from "./fixtures/electron-app";
-import { openTab, scanFolderFromPicker, waitForScanComplete } from "./fixtures/steps";
+import {
+  expectHiddenActionsPassClicks,
+  expectShownActionsCatchClicks,
+  openTab,
+  scanFolderFromPicker,
+  waitForScanComplete,
+} from "./fixtures/steps";
 
 // Row buttons that show only on hover (Largest Files, Changes) hold no
 // column of their own. They float over the end of the name and path, so
@@ -32,9 +38,9 @@ function near(actual: number, expected: number, what: string) {
 
 async function hoverShows(page: Page, row: Locator, actions: Locator) {
   await page.mouse.move(0, 0);
-  await expect(actions).toHaveCSS("opacity", "0");
+  await expectHiddenActionsPassClicks(page, actions);
   await row.hover();
-  await expect(actions).toHaveCSS("opacity", "1");
+  await expectShownActionsCatchClicks(page, actions);
 }
 
 test("Largest Files columns line up with their header", async ({ launch }, testInfo) => {

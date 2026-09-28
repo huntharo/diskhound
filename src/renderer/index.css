@@ -3089,7 +3089,8 @@ button, input, select, textarea { font: inherit; }
  * layered down to the opaque page, so the text under the buttons
  * doesn't show through, and the mask fades it in from the left. The
  * overlay spans the row's full height; the name and path are two lines
- * and the buttons are one. */
+ * and the buttons are one. While the buttons are hidden they take no
+ * clicks, so a press on the name under them hits the name. */
 .hover-actions {
   display: flex;
   align-items: center;
@@ -3098,6 +3099,7 @@ button, input, select, textarea { font: inherit; }
   background: var(--hover-actions-bg);
   mask-image: linear-gradient(90deg, transparent, #000 24px);
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.1s;
 }
 
@@ -3111,7 +3113,10 @@ button, input, select, textarea { font: inherit; }
   justify-self: end;
   align-self: stretch;
 }
-.file-row:is(:hover, .focused, :has(:focus-visible)) .file-actions { opacity: 1; }
+.file-row:is(:hover, .focused, :has(:focus-visible)) .file-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
 /* Every action is disabled on a deleted file; don't cover its name. */
 .file-row.deleted .file-actions { display: none; }
 
@@ -6136,7 +6141,10 @@ button, input, select, textarea { font: inherit; }
     var(--bg);
 }
 .duplicate-file-row:hover .duplicate-file-actions,
-.duplicate-file-row:has(:focus-visible) .duplicate-file-actions { opacity: 1; }
+.duplicate-file-row:has(:focus-visible) .duplicate-file-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
 /* Every action is disabled on a deleted copy; don't cover its path. */
 .duplicate-file-row.deleted .duplicate-file-actions { display: none; }
 
@@ -6845,7 +6853,10 @@ button, input, select, textarea { font: inherit; }
   justify-self: end;
   align-self: stretch;
 }
-.changes-row:is(:hover, :has(:focus-visible)) .changes-row-actions { opacity: 1; }
+.changes-row:is(:hover, :has(:focus-visible)) .changes-row-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
 /* Every action is disabled on a deleted file; don't cover its name. */
 .changes-row.deleted .changes-row-actions { display: none; }
 

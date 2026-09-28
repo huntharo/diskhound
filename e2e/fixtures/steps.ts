@@ -1,4 +1,4 @@
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 
 import type { ScanSnapshot } from "../../src/shared/contracts";
 import { expect, type AppHandle } from "./electron-app";
@@ -9,6 +9,34 @@ const SCAN_TIMEOUT_MS = 45_000;
 
 export function tab(page: Page, label: string) {
   return page.locator(".tab-bar").getByRole("button", { name: label, exact: true });
+}
+
+/** A point in the middle of the last hidden action button must miss the
+ *  overlay. Opacity alone still hit-tests, so this is what keeps a click
+ *  on the name under the buttons from pressing one. */
+export async function expectHiddenActionsPassClicks(page: Page, actions: Locator): Promise<void> {
+  await expect(actions).toHaveCSS("opacity", "0");
+  await expect(actions).toHaveCSS("pointer-events", "none");
+  const box = await actions.locator("button").last().boundingBox();
+  expect(box, "action button has no box").not.toBeNull();
+  const hitsActions = await page.evaluate(({ x, y }) => {
+    const el = document.elementFromPoint(x, y);
+    return Boolean(el?.closest(".hover-actions"));
+  }, { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2 });
+  expect(hitsActions).toBe(false);
+}
+
+/** Once the buttons are shown, that same point presses a button. */
+export async function expectShownActionsCatchClicks(page: Page, actions: Locator): Promise<void> {
+  await expect(actions).toHaveCSS("opacity", "1");
+  await expect(actions).toHaveCSS("pointer-events", "auto");
+  const box = await actions.locator("button").last().boundingBox();
+  expect(box, "action button has no box").not.toBeNull();
+  const hitsActions = await page.evaluate(({ x, y }) => {
+    const el = document.elementFromPoint(x, y);
+    return Boolean(el?.closest(".hover-actions"));
+  }, { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2 });
+  expect(hitsActions).toBe(true);
 }
 
 export async function openTab(page: Page, label: string): Promise<void> {

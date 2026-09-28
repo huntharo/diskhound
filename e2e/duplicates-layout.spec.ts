@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { Locator } from "@playwright/test";
 
 import { expect, test } from "./fixtures/electron-app";
-import { openTab, scanFolderFromPicker } from "./fixtures/steps";
+import { expectHiddenActionsPassClicks, expectShownActionsCatchClicks, openTab, scanFolderFromPicker } from "./fixtures/steps";
 
 // The Duplicates view with the content that broke its layout: paths of
 // very different lengths in one group, and the bulk bar under a short
@@ -69,14 +69,14 @@ test("lays out", async ({ launch }, testInfo) => {
   // truncated path runs to the row's padding.
   await page.mouse.move(0, 0);
   const actions = longRow.locator(".duplicate-file-actions");
-  await expect(actions).toHaveCSS("opacity", "0");
+  await expectHiddenActionsPassClicks(page, actions);
   const row = await rect(longRow);
   const padding = await longRow.evaluate((el) => parseFloat(getComputedStyle(el).paddingRight));
   expect(Math.abs((await rect(longPath)).right - (row.right - padding))).toBeLessThan(2);
 
   // On hover they sit at the row's end, over the path.
   await longRow.hover();
-  await expect(actions).toHaveCSS("opacity", "1");
+  await expectShownActionsCatchClicks(page, actions);
   expect(Math.abs((await rect(actions)).right - (row.right - padding))).toBeLessThan(2);
   await longRow.getByRole("button", { name: "Reveal" }).hover();
   await expect(actions).toHaveCSS("opacity", "1");
