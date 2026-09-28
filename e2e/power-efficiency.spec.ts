@@ -16,11 +16,11 @@ test("a Power Efficiency choice reaches the next scan's walker", async ({ launch
     .match(/walking with dua-core, \d+ threads/g) ?? []);
 
   await scanFolderFromPicker(handle, scanTree.root);
-  // Aggressive by default: 8 workers, or every CPU on a smaller machine.
-  expect(await walking()).toEqual([`walking with dua-core, ${Math.min(8, cpus)} threads`]);
+  // Balanced by default: 4 workers, or every CPU on a smaller machine.
+  expect(await walking()).toEqual([`walking with dua-core, ${Math.min(4, cpus)} threads`]);
 
   const gauge = page.locator(".header .power-btn");
-  await expect(gauge).toHaveAttribute("aria-label", /^Power Efficiency: (Aggressive|Balanced|Miser), /);
+  await expect(gauge).toHaveAttribute("aria-label", /^Power Efficiency: (Balanced|Miser), /);
   await gauge.click();
   await expect(page.getByRole("menu", { name: "Power Efficiency" })).toBeVisible();
   await page.getByRole("menuitemradio", { name: /^Miser/ }).click();
@@ -31,7 +31,7 @@ test("a Power Efficiency choice reaches the next scan's walker", async ({ launch
 
   await page.getByRole("button", { name: "Rescan now" }).click();
   await expect.poll(walking, { timeout: 45_000 }).toEqual([
-    `walking with dua-core, ${Math.min(8, cpus)} threads`,
+    `walking with dua-core, ${Math.min(4, cpus)} threads`,
     `walking with dua-core, ${miser} threads`,
   ]);
   const settings = await page.evaluate(() => window.diskhound.getSettings());

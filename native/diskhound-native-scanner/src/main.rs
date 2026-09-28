@@ -1541,11 +1541,13 @@ fn scan_generic_with_plan(
     // Directory enumeration is embarrassingly parallel at the I/O layer,
     // since reads of separate directories hit different inode blocks.
     //
-    // At most 8 threads, like the Windows walker. On an 18-core M5 Max a
-    // full `/` scan (21.4M files) took 2m 51s at 16 threads and 3m 22s at
-    // 8, but 16 used 31% more CPU time (995 s vs 759 s) and peaked near
-    // 1,000% CPU instead of 650%. Past 8, extra threads mostly add kernel
-    // time. DISKHOUND_PARALLEL_THREADS overrides it.
+    // The app passes the Power Efficiency choice as --workers (Balanced,
+    // 4, by default). On an 18-core M5 Max a full `/` scan (20.8M files,
+    // index and sidecars written) took 258 s and 674 CPU-s at 4 workers,
+    // 248 s and 849 CPU-s at 8, 264 s and 1,085 CPU-s at 18, and 344 s
+    // and 572 CPU-s at 2. Past 4, extra workers mostly add kernel time.
+    // Without --workers (the CLI), at most 8, like the Windows walker.
+    // DISKHOUND_PARALLEL_THREADS overrides both.
     let thread_count = walk_workers(state.input.workers, {
         let logical = num_cpus::get().max(1);
         if logical <= 2 {

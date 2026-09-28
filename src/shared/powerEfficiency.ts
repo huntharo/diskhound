@@ -14,8 +14,14 @@ export const POWER_EFFICIENCY_PRESETS: readonly PowerEfficiency[] = [
   "drain-my-battery",
 ];
 
-/** Settings without a saved choice get this: the scanner's old cap of 8. */
-export const DEFAULT_POWER_EFFICIENCY: PowerEfficiency = "aggressive";
+/**
+ * Settings without a saved choice get this. On an 18-CPU M5 Max, a whole
+ * `/` scan (20.8M files, two warm rounds) took 258 s and 674 CPU-s at 4
+ * workers, 248 s and 849 CPU-s at 8 (the scanner's old cap), 264 s and
+ * 1,085 CPU-s at 18, and 344 s and 572 CPU-s at 2. Past 4 the walk
+ * barely gets faster; the CPU keeps climbing.
+ */
+export const DEFAULT_POWER_EFFICIENCY: PowerEfficiency = "balanced";
 
 const NAMES: Record<PowerEfficiency, string> = {
   miser: "Miser",
