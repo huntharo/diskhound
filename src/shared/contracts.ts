@@ -632,6 +632,7 @@ export type DevArtifactKind =
   | "compiler-cache"
   | "cmake-build"
   | "terraform"
+  | "git-repo"
   | "diag-logs";
 
 /**
@@ -675,6 +676,39 @@ export interface DevArtifact {
   deltaBytes: number | null;
   /** Present when the scanner measured APFS clones under this tree. */
   clone?: DevArtifactCloneInfo;
+  /** `git-repo` rows only: what main read from the repo's `.git/config`. */
+  git?: DevGitRepoInfo;
+}
+
+/**
+ * A `git-repo` row's remotes, read from `.git/config` when main builds
+ * the report. No `git` process runs for it.
+ */
+export interface DevGitRepoInfo {
+  /** Remote names in config order. Empty when none is configured. */
+  remotes: string[];
+  /** `origin`'s URL (else the first remote's), without any user or password. */
+  remoteUrl: string | null;
+  /** False when `.git/config` could not be read: remotes are unknown. */
+  readable: boolean;
+}
+
+/**
+ * What `git` reports about a checkout just before the Dev tab offers to
+ * remove it. Counts are null when that command failed.
+ */
+export interface DevGitRepoCheck {
+  /** False when `git` could not run here at all (not on PATH, or not a repo). */
+  gitAvailable: boolean;
+  remotes: string[];
+  remoteUrl: string | null;
+  /** Commits on local branches that no remote-tracking branch has. */
+  unpushedCommits: number | null;
+  /** Modified, staged and untracked paths. Ignored files are not counted. */
+  changedFiles: number | null;
+  stashes: number | null;
+  /** Other checkouts that use this repo's `.git` (`git worktree add`). */
+  linkedWorktrees: string[];
 }
 
 export interface DevArtifactReport {
@@ -1418,6 +1452,8 @@ export interface DiskhoundNativeApi {
   cancelDevArtifactsRescan: (rootPath: string) => Promise<void>;
   /** Drop deleted trees from the Dev sidecar and in-memory cache. JSON only. */
   forgetDevArtifactPaths: (rootPath: string, paths: string[]) => Promise<DevArtifactReport | null>;
+  /** Run `git` in a `git-repo` row's checkout to find work that is not on a remote. */
+  checkGitRepo: (checkoutPath: string) => Promise<DevGitRepoCheck>;
   onDevArtifactsProgress: (listener: (progress: DevArtifactsRescanProgress) => void) => () => void;
 
   // Easy Move
