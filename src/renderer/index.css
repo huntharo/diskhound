@@ -5891,6 +5891,8 @@ button, input, select, textarea { font: inherit; }
   flex-direction: column;
   gap: 6px;
   pointer-events: none;
+  max-height: calc(100vh - 60px);
+  overflow-y: auto;
 }
 
 .toast {
@@ -5907,6 +5909,7 @@ button, input, select, textarea { font: inherit; }
   max-width: 400px;
   pointer-events: auto;
   animation: toast-in 0.25s ease-out;
+  flex-shrink: 0;
   box-shadow: 0 4px 20px rgba(0,0,0,0.3);
 }
 :root.light .toast {
@@ -5930,7 +5933,8 @@ button, input, select, textarea { font: inherit; }
 
 .toast-content { flex: 1; min-width: 0; }
 .toast-title { font-weight: 600; color: var(--text); }
-.toast-body { color: var(--text-secondary); margin-top: 2px; font-size: 11px; }
+.toast-body { color: var(--text-secondary); margin-top: 2px; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.toast-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 
 .toast-close {
   flex-shrink: 0;

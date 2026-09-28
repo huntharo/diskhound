@@ -880,6 +880,8 @@ export interface ToastMessage {
   title: string;
   body?: string;
   dismissAfterMs?: number;
+  /** Adds a Copy details action without dismissing the toast. */
+  copyText?: string;
 }
 
 // ── Easy Move (symlink) Types ─────────────────────────────

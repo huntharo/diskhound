@@ -659,8 +659,8 @@ function DiagnosticsSection({
     setBusy("snapshot");
     try {
       const result = await nativeApi.captureHeapSnapshot();
-      if (result?.ok) toast("success", "Heap snapshot saved", result.path);
-      else toast("warning", "Heap snapshot skipped", result?.message);
+      // Main sends the saved-capture toast, including Copy details.
+      if (!result?.ok) toast("warning", "Heap snapshot skipped", result?.message);
     } finally {
       setBusy(null);
       await refresh();

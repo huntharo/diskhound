@@ -49,6 +49,9 @@ test("saves a hot-CPU profile that reaches back past the live window", async ({ 
   expect(session?.artifacts).toHaveLength(1);
   const artifact = session!.artifacts[0];
   expect(artifact.filename).toBe("main-hot-0001.cpuprofile");
+  const captureToast = handle.page.locator(".toast", { hasText: "CPU profile saved" });
+  await expect(captureToast).toContainText(artifact.path);
+  await expect(captureToast.getByRole("button", { name: "Copy details" })).toBeVisible();
   expect(status.handoffText).toContain(artifact.path);
   // crash.log is buffered for up to 2 s.
   await expect.poll(() => crashLog(handle)).toContain(`[hot-cpu] saved ${artifact.path}`);
@@ -87,6 +90,9 @@ test("saves an allocation profile when the main heap passes the gate", async ({ 
   const artifact = session?.artifacts.find((entry) => entry.kind === "heapprofile");
   expect(artifact?.filename).toBe("main-gate-0001.heapprofile");
   expect(artifact?.summary).toMatch(/^live allocations at [\d,]+ MB, sampled for \d+ s from [\d,]+ MB$/);
+  const captureToast = handle.page.locator(".toast", { hasText: "Heap allocation profile saved" });
+  await expect(captureToast).toContainText(artifact!.path);
+  await expect(captureToast.getByRole("button", { name: "Copy details" })).toBeVisible();
   await expect.poll(() => crashLog(handle)).toMatch(/\[heap-gate\] main heap [\d,]+ MB of [\d,]+ MB passed the 128 MB gate .*; saved /);
 
   type Node = { callFrame: { functionName: string }; selfSize: number; children: Node[] };
@@ -131,8 +137,74 @@ test("takes a heap snapshot from Settings and deletes it", async ({ launch }) =>
   };
   expect(snapshot.nodes.length / snapshot.snapshot.meta.node_fields.length).toBe(snapshot.snapshot.node_count);
 
+  const captureToast = page.locator(".toast", { hasText: "Heap snapshot saved" });
+  // Main owns manual-capture notifications too: no second Settings toast.
+  await expect(captureToast).toHaveCount(1);
+  await expect(captureToast).toContainText(artifact.path);
+  await page.clock.install();
+  // New transient messages must not evict a sticky capture.
+  await handle.app.evaluate(({ BrowserWindow }) => {
+    const webContents = BrowserWindow.getAllWindows()[0].webContents;
+    for (let i = 0; i < 8; i++) webContents.send("diskhound:notification", {
+      id: `test-notice-${i}`, level: "info", title: `Notice ${i}`, dismissAfterMs: 4000,
+    });
+  });
+  await page.clock.fastForward(6000);
+  await expect(captureToast).toBeVisible();
+  const previousClipboard = await handle.app.evaluate(({ clipboard }) => clipboard.readText());
+  try {
+    await page.bringToFront();
+    // A denied clipboard write leaves a retryable toast, then succeeds.
+    await page.evaluate(() => {
+      const write = navigator.clipboard.writeText.bind(navigator.clipboard);
+      let failOnce = true;
+      navigator.clipboard.writeText = async (text) => {
+        if (failOnce) { failOnce = false; throw new Error("clipboard unavailable"); }
+        await write(text);
+      };
+    });
+    await captureToast.getByRole("button", { name: "Copy details" }).click();
+    await expect(captureToast.getByRole("status")).toHaveText("Couldn't copy. Try again.");
+    await captureToast.getByRole("button", { name: "Copy details" }).click();
+    await expect(captureToast.getByRole("button", { name: "Copied!" })).toBeVisible();
+    const copied = await handle.app.evaluate(({ clipboard }) => clipboard.readText());
+    expect(copied).toContain("Heap snapshot saved");
+    expect(copied).toContain(artifact.path);
+    expect(copied).toContain(artifact.summary);
+    expect(copied).toContain("Size:");
+    expect(copied).toContain("Electron");
+    await expect(captureToast).toBeVisible();
+  } finally {
+    await handle.app.evaluate(({ clipboard }, text) => clipboard.writeText(text), previousClipboard);
+  }
+  await captureToast.getByRole("button", { name: "Dismiss" }).click();
+  await page.clock.fastForward(250);
+  await expect(captureToast).toHaveCount(0);
+  await page.clock.resume();
+
   await section.getByRole("button", { name: "Delete all" }).click();
   await expect(section.getByText("Nothing captured yet.")).toBeVisible();
   const root = join(handle.userDataDir, "diagnostics");
   expect(readdirSync(root).filter((name) => name.startsWith("heap-"))).toEqual([]);
+});
+
+test("an updated sticky toast survives its previous auto-dismiss timer", async ({ launch }) => {
+  const handle = await launch();
+  await handle.page.clock.install();
+  await handle.app.evaluate(({ BrowserWindow }) => {
+    BrowserWindow.getAllWindows()[0].webContents.send("diskhound:notification", {
+      id: "updating-toast", level: "info", title: "Capture starting", dismissAfterMs: 4000,
+    });
+  });
+  await expect(handle.page.getByText("Capture starting", { exact: true })).toBeVisible();
+  await handle.app.evaluate(({ BrowserWindow }) => {
+    BrowserWindow.getAllWindows()[0].webContents.send("diskhound:notification", {
+      id: "updating-toast", level: "success", title: "Capture saved", dismissAfterMs: 0, copyText: "capture details",
+    });
+  });
+  const updated = handle.page.locator(".toast", { hasText: "Capture saved" });
+  await expect(updated).toBeVisible();
+  await handle.page.clock.fastForward(6000);
+  await expect(updated).toBeVisible();
+  await expect(handle.page.getByText("Capture starting", { exact: true })).toHaveCount(0);
 });

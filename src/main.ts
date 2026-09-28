@@ -943,6 +943,29 @@ void (async () => {
       arch: process.arch,
     },
     log: writeCrashLog,
+    onCapture: (capture) => {
+      if (isQuitting || !mainWindow || mainWindow.isDestroyed()) return;
+      const title = capture.kind === "cpuprofile" ? "CPU profile saved"
+        : capture.kind === "heapprofile" ? "Heap allocation profile saved" : "Heap snapshot saved";
+      const notification: ToastMessage = {
+        id: `diagnostics:${capture.path}`,
+        level: "success",
+        title,
+        body: `${capture.summary}\n${capture.path}`,
+        dismissAfterMs: 0,
+        copyText: [
+          `DiskHound ${app.getVersion()} — ${title}`,
+          `Electron ${process.versions.electron}, Node ${process.versions.node}, ${process.platform} ${process.arch}`,
+          capture.summary,
+          `Size: ${capture.bytes.toLocaleString("en-US")} bytes`,
+          `Path: ${capture.path}`,
+          capture.kind === "cpuprofile"
+            ? "Open in Chrome DevTools > Performance > Load profile, or https://www.speedscope.app."
+            : "Open in Chrome DevTools > Memory > Load.",
+        ].join("\n"),
+      };
+      mainWindow.webContents.send(NOTIFICATION_CHANNEL, notification);
+    },
   });
   diagnostics.start();
 

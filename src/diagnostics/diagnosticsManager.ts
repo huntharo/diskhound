@@ -28,7 +28,7 @@ import {
   type DiagnosticsLog,
   type DiagnosticsVersions,
 } from "./diagnosticsSession";
-import { HeapMonitor, type HeapReading } from "./heapMonitor";
+import { HeapMonitor, type HeapCapture, type HeapReading } from "./heapMonitor";
 import { HotCpuProfiler, type CpuReading } from "./hotCpuProfiler";
 import { createMainInspector, type InspectorTarget } from "./mainInspector";
 
@@ -50,6 +50,8 @@ export interface DiagnosticsManagerOptions {
   env?: Record<string, string | undefined>;
   /** writeCrashLog in main. */
   log?: DiagnosticsLog;
+  /** Fired only after an artifact and its manifest have been saved. */
+  onCapture?: (capture: HeapCapture) => void;
   retention?: RetentionLimits;
   // Seams for tests.
   createInspector?: () => InspectorTarget;
@@ -111,7 +113,7 @@ export class DiagnosticsManager {
       writeHeapSnapshot: options.writeHeapSnapshot,
       now: options.now,
       log: this.log,
-      onCapture: () => this.afterCapture(),
+      onCapture: (capture) => this.afterCapture(capture),
       afterBlockingCapture: () => this.profiler?.discountBlockedInterval(),
     });
   }
@@ -241,7 +243,7 @@ export class DiagnosticsManager {
       readCpu: this.options.readCpu,
       now: this.options.now,
       log: this.log,
-      onProfileWritten: () => this.afterCapture(),
+      onProfileWritten: (capture) => this.afterCapture({ ...capture, kind: "cpuprofile" }),
     });
     this.profiler = profiler;
     // After the previous profiler has let go of its recording.
@@ -252,9 +254,10 @@ export class DiagnosticsManager {
       });
   }
 
-  private afterCapture(): void {
+  private afterCapture(capture: HeapCapture): void {
     this.listing = null;
     void this.runRetention();
+    this.options.onCapture?.(capture);
   }
 
   /**
