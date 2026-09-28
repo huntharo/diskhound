@@ -10,6 +10,7 @@ import { processMetadataParts, processSearchText } from "../lib/processMetadata"
 import { squarify } from "../lib/treemap";
 import { useVisibleInterval } from "../lib/visiblePoll";
 import { nativeApi } from "../nativeApi";
+import { DisclosureToggle } from "./Disclosure";
 import { GpuView } from "./GpuView";
 import {
   ProcessHeatmap,
@@ -792,14 +793,8 @@ function ProcessGroupRows(props: {
         onClick={onToggle}
         title={`${group.processes.length} instances · click to ${isExpanded ? "collapse" : "expand"}`}
       >
-        <div className="memory-row-icon memory-row-chevron">
-          <svg
-            width="10" height="10" viewBox="0 0 10 10"
-            fill="none" stroke="currentColor" strokeWidth="1.5"
-            style={{ transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.12s" }}
-          >
-            <path d="M3 2L7 5L3 8" />
-          </svg>
+        <div className="memory-row-icon">
+          <DisclosureToggle expanded={isExpanded} label={`Instances of ${group.name}`} onToggle={onToggle} />
         </div>
         <div className="memory-row-mem">
           <span className={`memory-row-mem-value ${memClass}`}>{formatBytes(group.totalMemory)}</span>

@@ -8,6 +8,7 @@ import { formatScanRoot } from "../../shared/pathUtils";
 import { formatBytes, formatCount } from "../lib/format";
 import { useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
+import { DisclosureToggle } from "./Disclosure";
 import { FileIcon } from "./FileIcon";
 import { FOLDER_LOADING_STAGES, IndexLoadingPanel } from "./IndexLoadingPanel";
 import { PathContextMenu } from "./PathContextMenu";
@@ -434,16 +435,11 @@ export function FolderList({ snapshot, onStartScan, otherScannedRoots = [] }: Pr
                   onClick={() => setShowOtherFiles(!showOtherFiles)}
                 >
                   <div className="folder-row-icon folder-row-icon-other">
-                    <svg
-                      width="12" height="12" viewBox="0 0 12 12" fill="none"
-                      stroke="currentColor" strokeWidth="1.5"
-                      style={{
-                        transition: "transform 0.15s",
-                        transform: showOtherFiles ? "rotate(90deg)" : "rotate(0deg)",
-                      }}
-                    >
-                      <path d="M4.5 2L8.5 6L4.5 10" />
-                    </svg>
+                    <DisclosureToggle
+                      expanded={showOtherFiles}
+                      label="Files in this folder"
+                      onToggle={() => setShowOtherFiles(!showOtherFiles)}
+                    />
                   </div>
                   <div className="folder-row-info">
                     <div className="folder-row-name folder-row-name-other">
