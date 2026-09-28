@@ -4,7 +4,6 @@ import type {
   DevArtifact,
   DevArtifactKind,
   DevArtifactReport,
-  DevArtifactsRescanProgress,
   ScanSnapshot,
   StorageAccountingReport,
 } from "../../shared/contracts";
@@ -44,7 +43,7 @@ import { formatBytes, formatBytesRange, formatCount, relativeTime } from "../lib
 import { checkFreedSpace, freeBytesBeforeDelete } from "../lib/freedSpaceCheck";
 import { dispatchDevArtifactsUpdated, STORAGE_ACCOUNTING_STALE_EVENT } from "../lib/uiEvents";
 import { nativeApi } from "../nativeApi";
-import { DEV_FOLDER_TREE_STAGES, DEV_RESCAN_STAGES, DEV_SIDECAR_STAGES, IndexLoadingPanel } from "./IndexLoadingPanel";
+import { DEV_FOLDER_TREE_STAGES, DEV_SIDECAR_STAGES, IndexLoadingPanel } from "./IndexLoadingPanel";
 import { toast } from "./Toasts";
 
 interface Props {
@@ -205,12 +204,8 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
   const [bulkBusy, setBulkBusy] = useState(false);
   const [deleteProgress, setDeleteProgress] = useState<DeleteProgress | null>(null);
   const [deleteElapsedSec, setDeleteElapsedSec] = useState(0);
-  const [rescanning, setRescanning] = useState(false);
-  const [rescanProgress, setRescanProgress] = useState<DevArtifactsRescanProgress | null>(null);
   const [loadPath, setLoadPath] = useState<"sidecar" | "folder-tree">("sidecar");
   const [storageReport, setStorageReport] = useState<StorageAccountingReport | null>(null);
-  const rescanningRef = useRef(false);
-  const rescanGenRef = useRef(0);
   const loadGenRef = useRef(0);
 
   if (heldKey !== key) {
@@ -307,29 +302,6 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
 
   useEffect(() => {
     if (snapshot.status !== "done") return;
-    if (rescanningRef.current) {
-      if (!root) return;
-      const scanRoot = root;
-      void (async () => {
-        const next = await nativeApi.getDevArtifacts(scanRoot, { sidecarOnly: true });
-        if (!next || next.artifacts.length === 0 || !rescanningRef.current) return;
-        rescanGenRef.current += 1;
-        await nativeApi.cancelDevArtifactsRescan(scanRoot);
-        const scanKey = reportKey(scanRoot, snapshot.finishedAt);
-        const adopted = overlayForgotten(next, scanKey);
-        setReport(adopted);
-        rememberReport(scanRoot, scanKey, adopted, adopted.artifacts.length === 0);
-        sessionLoadStarted = null;
-        rescanningRef.current = false;
-        setRescanning(false);
-        setRescanProgress(null);
-        setLoading(false);
-        setSettled(true);
-        setLoadingStartedAt(null);
-        toast("info", "Scan finished", "Using the new sidecar for this drive.");
-      })();
-      return;
-    }
     void load();
   }, [load, snapshot.status, root, snapshot.finishedAt]);
 
@@ -340,13 +312,6 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     }, 500);
     return () => window.clearInterval(id);
   }, [loadingStartedAt]);
-
-  useEffect(() => {
-    return nativeApi.onDevArtifactsProgress((progress) => {
-      if (progress.rootPath !== root) return;
-      setRescanProgress(progress);
-    });
-  }, [root]);
 
   useEffect(() => {
     return nativeApi.onPermanentDeleteProgress((progress) => {
@@ -645,55 +610,6 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     await deleteMany([path], "Delete this tree permanently?");
   };
 
-  const rescan = async () => {
-    if (!root) return;
-    const hadReport = Boolean(report);
-    const gen = ++rescanGenRef.current;
-    rescanningRef.current = true;
-    setRescanning(true);
-    setRescanProgress(null);
-    if (!hadReport) setLoading(true);
-    setLoadError(null);
-    setLoadingStartedAt(Date.now());
-    setLoadingElapsedSec(0);
-    try {
-      const next = await nativeApi.rescanDevArtifacts(root);
-      if (gen !== rescanGenRef.current) return;
-      if (isUsefulDevReport(next)) {
-        const adopted = overlayForgotten(next, reportKey(root, snapshot.finishedAt));
-        setReport(adopted);
-        rememberReport(root, reportKey(root, snapshot.finishedAt), adopted, adopted.artifacts.length === 0);
-        setSelected(new Set());
-        setSettled(true);
-        toast("success", "Dev artifacts refreshed from disk");
-      } else if (next) {
-        const adopted = overlayForgotten(next, reportKey(root, snapshot.finishedAt));
-        rememberReport(root, reportKey(root, snapshot.finishedAt), adopted, true);
-        setReport(adopted);
-        setSelected(new Set());
-        setSettled(true);
-        toast("success", "Dev artifacts refreshed from disk");
-      } else if (!hadReport) {
-        setLoadError("Rescan failed. Try a full drive scan.");
-      } else {
-        toast("error", "Rescan failed", "Try a full drive scan.");
-      }
-    } catch (err) {
-      if (gen !== rescanGenRef.current) return;
-      const message = err instanceof Error ? err.message : String(err);
-      if (message.includes("aborted")) return;
-      if (!hadReport) setLoadError(message);
-      else toast("error", "Rescan failed", message);
-    } finally {
-      if (gen !== rescanGenRef.current) return;
-      rescanningRef.current = false;
-      setRescanning(false);
-      setRescanProgress(null);
-      setLoading(false);
-      setLoadingStartedAt(null);
-    }
-  };
-
   const rootLabel = root ? formatScanRoot(root) : null;
   const otherDriveNote = otherScannedRoots.length > 0
     ? "A finished scan is on another drive. Switch with the header drive pills."
@@ -749,12 +665,8 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
       <div className="dev-view">
         <IndexLoadingPanel
           eyebrow={rootLabel ?? undefined}
-          title={rescanning ? "Refreshing artifact trees on this scan" : "Reading developer artifacts on this scan"}
-          stages={rescanning
-            ? (rescanProgress
-              ? [{ afterSec: 0, label: `Walking ${formatCount(rescanProgress.treesWalked)} of ${formatCount(rescanProgress.treesTotal)} trees… ${truncatePath(rescanProgress.currentPath)}` }]
-              : DEV_RESCAN_STAGES)
-            : loadPath === "folder-tree" ? DEV_FOLDER_TREE_STAGES : DEV_SIDECAR_STAGES}
+          title="Reading developer artifacts on this scan"
+          stages={loadPath === "folder-tree" ? DEV_FOLDER_TREE_STAGES : DEV_SIDECAR_STAGES}
           elapsedSec={loadingElapsedSec}
         />
       </div>
@@ -784,14 +696,14 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
           <span className="scan-root-chip">{rootLabel}</span>
           <span>No developer artifacts left on this scan.</span>
           <span className="empty-view-sub">Looks for worktrees, package trees, Rust targets, venvs, compiler caches, and DiagOutputDir RDP traces on this scan. Switch drives in the header to see another root.</span>
-          {report ? (
+          {report && onStartScan ? (
             <button
               className="action-btn"
-              disabled={rescanning}
-              onClick={() => void rescan()}
-              title="Re-walk known artifact trees on disk. Does not scan the whole drive."
+              disabled={snapshot.status === "running"}
+              onClick={onStartScan}
+              title="Refresh artifacts with a drive scan. Stop it from the header."
             >
-              Rescan trees
+              Rescan drive
             </button>
           ) : (
             <button className="action-btn" onClick={() => void load()}>Retry</button>
@@ -846,16 +758,16 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
             <div className="summary-item-value">{formatCount(summary.totalFiles)}</div>
           </div>
         </div>
-        <div className="dev-summary-actions">
+        {onStartScan && <div className="dev-summary-actions">
           <button
             className="action-btn"
-            disabled={bulkBusy || rescanning}
-            onClick={() => void rescan()}
-            title="Re-walk known artifact trees on disk. Does not scan the whole drive."
+            disabled={bulkBusy || snapshot.status === "running"}
+            onClick={onStartScan}
+            title="Refresh artifacts with a drive scan. Stop it from the header."
           >
-            Rescan trees
+            Rescan drive
           </button>
-        </div>
+        </div>}
       </div>
 
       {(showSharedNote || devSnapshots.length > 0) && (
@@ -925,28 +837,6 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                 </>}
             {` · ${deleteElapsedSec}s`}
           </div>
-        </div>
-      )}
-      {rescanning && (
-        <div className="dev-rescan-banner" role="status" aria-live="polite">
-          {rescanProgress
-            ? (
-              <>
-                <div>
-                  Walking {formatCount(rescanProgress.treesWalked)} of {formatCount(rescanProgress.treesTotal)} trees on this scan
-                </div>
-                <div className="dev-rescan-banner-detail">
-                  {truncatePath(rescanProgress.currentPath)}
-                  {` · ${formatCount(rescanProgress.filesSoFar)} files · ${formatBytes(rescanProgress.bytesSoFar)} · ${loadingElapsedSec}s`}
-                </div>
-              </>
-            )
-            : (
-              <>
-                Walking {formatCount(summary.trees)} trees on this scan…
-                {` ${loadingElapsedSec}s`}
-              </>
-            )}
         </div>
       )}
       <div className="dev-toolbar">
