@@ -1542,12 +1542,14 @@ fn scan_generic_with_plan(
     // since reads of separate directories hit different inode blocks.
     //
     // The app passes the Power Efficiency choice as --workers (Balanced,
-    // 4, by default). On an 18-core M5 Max a full `/` scan (20.8M files,
-    // index and sidecars written) took 258 s and 674 CPU-s at 4 workers,
-    // 248 s and 849 CPU-s at 8, 264 s and 1,085 CPU-s at 18, and 344 s
-    // and 572 CPU-s at 2. Past 4, extra workers mostly add kernel time.
-    // Without --workers (the CLI), at most 8, like the Windows walker.
-    // DISKHOUND_PARALLEL_THREADS overrides both.
+    // 4, by default). On an 18-core M5 Max a full `/` scan (20.7M files,
+    // index and sidecars written; medians of 3 from
+    // scripts/bench-scan-workers.py) took 250 s and 661 CPU-s at 4
+    // workers, 267 s and 913 CPU-s at 8, 234 s and 1,088 CPU-s at 18, and
+    // 334 s and 558 CPU-s at 2. The loop below takes every entry on one
+    // thread and runs near a full core, so past 4 more walkers mostly add
+    // CPU time. Without --workers (the CLI), at most 8, like the Windows
+    // walker. DISKHOUND_PARALLEL_THREADS overrides both.
     let thread_count = walk_workers(state.input.workers, {
         let logical = num_cpus::get().max(1);
         if logical <= 2 {
