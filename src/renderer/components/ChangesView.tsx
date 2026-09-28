@@ -1200,7 +1200,7 @@ function FileDeltaList({ deltas, busy, onReveal, onOpen, onTrash, onEasyMove }: 
               )}
             </div>
             {isActionable && (
-              <div className="changes-row-actions">
+              <div className="changes-row-actions hover-actions">
                 <button className="action-btn" disabled={unavailableDisabled} onClick={() => onReveal(d.path)} title={deletedTitle}>Reveal</button>
                 <button className="action-btn" disabled={unavailableDisabled} onClick={() => onOpen(d.path)} title={deletedTitle}>Open</button>
                 {onTrash && <button className="action-btn warn" disabled={destructiveDisabled} onClick={() => onTrash(d.path)} title={deletedTitle ?? (protectedBy ? `Protected by ${protectedBy}` : undefined)}>Trash</button>}
@@ -1272,7 +1272,7 @@ function DirDeltaList({ deltas, busy, onReveal, onOpen, onEasyMove }: { deltas: 
               )}
             </div>
             {isActionable && (
-              <div className="changes-row-actions">
+              <div className="changes-row-actions hover-actions">
                 <button className="action-btn" disabled={isBusy} onClick={() => onReveal(d.path)}>Reveal</button>
                 <button className="action-btn" disabled={isBusy} onClick={() => onOpen(d.path)}>Open</button>
                 <button className="action-btn" disabled={moveDisabled} onClick={() => onEasyMove(d.path)} title={protectionTitle}>Move</button>
@@ -1425,7 +1425,7 @@ function FullDiffList({ diff, busy, onReveal, onOpen, onTrash, onEasyMove }: {
               )}
             </div>
             {isActionable && (
-              <div className="changes-row-actions">
+              <div className="changes-row-actions hover-actions">
                 <button className="action-btn" disabled={unavailableDisabled} onClick={() => onReveal(change.path)} title={deletedTitle}>Reveal</button>
                 <button className="action-btn" disabled={unavailableDisabled} onClick={() => onOpen(change.path)} title={deletedTitle}>Open</button>
                 <button className="action-btn warn" disabled={destructiveDisabled} onClick={() => onTrash(change.path)} title={deletedTitle ?? (protectedBy ? `Protected by ${protectedBy}` : undefined)}>Trash</button>
