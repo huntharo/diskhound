@@ -128,9 +128,26 @@ it("keeps enforcing while hidden, sharing fresh UI samples without writes", asyn
 });
 
 it("stops the harness and deletes its entire profile, restoring argv and timers", async () => {
+  const { app } = await import("electron");
   const root = Path.dirname(main.userData);
   expect(FS.existsSync(root)).toBe(true);
-  await main.dispose();
+  let allowQuit = false;
+  let quitEvents = 0;
+  let started!: () => void;
+  const quitStarted = new Promise<void>((resolve) => { started = resolve; });
+  app.on("before-quit", (event) => {
+    quitEvents += 1;
+    if (!allowQuit) event.preventDefault();
+    started();
+  });
+  const disposed = main.dispose();
+  await quitStarted;
+  // A deferred flush still owns the profile until app.quit() resumes exit.
+  expect(FS.existsSync(root)).toBe(true);
+  allowQuit = true;
+  app.quit();
+  await disposed;
+  expect(quitEvents).toBeGreaterThanOrEqual(2);
   expect(FS.existsSync(root)).toBe(false);
   expect(process.argv).toBe(argv);
   expect(globalThis.setTimeout).toBe(originalTimeout);
