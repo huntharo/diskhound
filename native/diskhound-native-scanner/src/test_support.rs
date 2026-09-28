@@ -73,6 +73,7 @@ pub fn scan_input(root: &Path, index_output: &Path) -> ScanInput {
         folder_tree_output: None,
         dev_artifacts_output: None,
         expected_total_files: None,
+        workers: None,
     }
 }
 

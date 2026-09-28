@@ -102,6 +102,9 @@ export function createNativeScannerSession(
   if (input.devArtifactsOutput) {
     args.push("--dev-artifacts-output", input.devArtifactsOutput);
   }
+  if (input.workers) {
+    args.push("--workers", String(input.workers));
+  }
 
   let child: ChildProcessByStdio<null, Readable, Readable>;
   try {

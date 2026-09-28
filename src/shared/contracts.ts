@@ -4,6 +4,11 @@ import {
   getDefaultExcludedFolderPaths,
   normalizeExcludedFolderPaths,
 } from "./pathProtection";
+import {
+  DEFAULT_POWER_EFFICIENCY,
+  isPowerEfficiency,
+  type PowerEfficiency,
+} from "./powerEfficiency";
 
 export type ScanStatus = "idle" | "running" | "done" | "cancelled" | "error";
 export type ScanEngine = "js-worker" | "native-sidecar" | "usn-journal";
@@ -326,6 +331,12 @@ export interface ScanStartInput {
   folderTreeOutput?: string;
   /** Compact Dev Artifacts sidecar written during the scan. */
   devArtifactsOutput?: string;
+  /**
+   * How many workers the native scanner walks with (Power Efficiency).
+   * Unset leaves the scanner's own default. DISKHOUND_PARALLEL_THREADS
+   * still overrides both, for experiments.
+   */
+  workers?: number;
 }
 
 export type WorkerToMainMessage =
@@ -428,6 +439,8 @@ export interface ScanningSettings {
   excludedFolderPaths: string[];
   /** Hide excluded folders from Folders while still counting their bytes. */
   hideExcludedFoldersFromFolderResults: boolean;
+  /** How many workers the native scanner walks with, from the next scan. */
+  powerEfficiency: PowerEfficiency;
 }
 
 export interface MonitoringSettings {
@@ -1285,6 +1298,9 @@ export interface DiskhoundNativeApi {
    *  renderer gate Windows-only UI (MFT elevation, CPU affinity rules,
    *  GPU counters) without relying on user-agent sniffing. */
   platform: DiskhoundPlatform;
+  /** Logical CPUs, resolved once at preload time. The Power Efficiency
+   *  presets are capped by it, as main caps the scanner's workers. */
+  cpuCount: number;
 
   // Scan
   pickRootPath: () => Promise<string | null>;
@@ -1364,6 +1380,10 @@ export interface DiskhoundNativeApi {
   // Settings
   getSettings: () => Promise<AppSettings>;
   updateSettings: (settings: AppSettings) => Promise<void>;
+  /** Saves the Power Efficiency choice on its own, so a stale copy of
+   *  the rest of the settings can't overwrite a newer one. The next scan
+   *  uses it; a running scan keeps its workers. */
+  setPowerEfficiency: (preset: PowerEfficiency) => Promise<AppSettings>;
   getRecentScans: () => Promise<RecentScan[]>;
 
   // Monitoring
@@ -1642,6 +1662,7 @@ export function defaultSettings(): AppSettings {
       defaultRootPath: "",
       excludedFolderPaths: getDefaultExcludedFolderPaths(),
       hideExcludedFoldersFromFolderResults: true,
+      powerEfficiency: DEFAULT_POWER_EFFICIENCY,
     },
     monitoring: {
       enabled: true, // cheap free-space polls; full rescans are opt-in-cadence
@@ -1767,6 +1788,9 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
         merged.scanning.hideExcludedFoldersFromFolderResults === undefined
           ? defaults.scanning.hideExcludedFoldersFromFolderResults
           : Boolean(merged.scanning.hideExcludedFoldersFromFolderResults),
+      powerEfficiency: isPowerEfficiency(merged.scanning.powerEfficiency)
+        ? merged.scanning.powerEfficiency
+        : defaults.scanning.powerEfficiency,
     },
     monitoring: {
       enabled: Boolean(merged.monitoring.enabled),

@@ -1,5 +1,6 @@
 import * as FS from "node:fs/promises";
 import * as FS_SYNC from "node:fs";
+import * as OS from "node:os";
 import * as Path from "node:path";
 import { getHeapStatistics } from "node:v8";
 import { Worker } from "node:worker_threads";
@@ -53,6 +54,7 @@ import {
   type WorkerToMainMessage,
 } from "./shared/contracts";
 import { platformTerminology } from "./shared/platformTerminology";
+import { isPowerEfficiency, powerEfficiencyWorkers } from "./shared/powerEfficiency";
 import {
   checkDiskDeltas,
   flushDiskMonitor,
@@ -1365,6 +1367,12 @@ void (async () => {
       ? undefined
       : getScanHistory(rootPath).find((entry) => entry.filesVisited > 0)?.filesVisited;
 
+    // Power Efficiency, read here so a new choice reaches the next scan
+    // and never the one already running.
+    const cpus = OS.availableParallelism();
+    const powerEfficiency = settingsStore?.get().scanning.powerEfficiency;
+    const workers = powerEfficiency ? powerEfficiencyWorkers(powerEfficiency, cpus) : undefined;
+
     // Buffer for messages that arrive before the session is fully wired
     const earlyMessages: WorkerToMainMessage[] = [];
     let earlyErrors: Error[] = [];
@@ -1380,6 +1388,7 @@ void (async () => {
         expectedTotalFiles,
         folderTreeOutput: tempFolderTreePath,
         devArtifactsOutput: tempDevArtifactsPath,
+        workers,
       },
       {
         onMessage: (message) => {
@@ -2240,6 +2249,19 @@ void (async () => {
 
     restartMonitoring(normalizedSettings);
     handleUpdateSettingsChanged?.(previousSettings, normalizedSettings);
+  });
+
+  // Only the one field, so a renderer's older copy of the rest can't
+  // overwrite it. Nothing restarts: createPreferredScanSession reads it
+  // when the next scan starts.
+  ipcMain.handle("diskhound:set-power-efficiency", async (_event, preset: unknown) => {
+    if (!isPowerEfficiency(preset)) {
+      throw new Error(`Unknown Power Efficiency preset: ${String(preset)}`);
+    }
+    return settingsStore!.update((current) => ({
+      ...current,
+      scanning: { ...current.scanning, powerEfficiency: preset },
+    }));
   });
 
   ipcMain.handle("diskhound:get-recent-scans", () => settingsStore!.get().recentScans ?? []);

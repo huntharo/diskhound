@@ -42,6 +42,7 @@ import { EasyMoveView } from "./components/EasyMoveView";
 import { FileList } from "./components/FileList";
 import { FolderList } from "./components/FolderList";
 import { Overview } from "./components/Overview";
+import { PowerEfficiencyControl } from "./components/PowerEfficiencyControl";
 import { StartupSplash } from "./components/StartupSplash";
 import { SettingsView } from "./components/SettingsView";
 import { ToastProvider, dismissToast, toast } from "./components/Toasts";
@@ -1121,6 +1122,12 @@ export function App() {
                 New Scan
               </button>
             )}
+            {/* Power Efficiency: how many workers the next scan walks
+             *  with. Beside Rescan, the action it changes. */}
+            <PowerEfficiencyControl
+              scanning={snapshot.status === "running"}
+              onRescan={rootPath ? () => void doScan() : undefined}
+            />
           </div>
 
           <div

@@ -118,6 +118,10 @@ struct ScanInput {
     /// which it has no other use for.
     #[cfg_attr(windows, allow(dead_code))]
     expected_total_files: Option<u64>,
+    /// Walker workers, from the app's Power Efficiency setting
+    /// (`--workers`). None keeps the walker's own default. See
+    /// [`walk_workers`].
+    workers: Option<usize>,
 }
 
 /// Disk touches one scan makes. The visit-once tests check these against
@@ -1542,11 +1546,7 @@ fn scan_generic_with_plan(
     // 8, but 16 used 31% more CPU time (995 s vs 759 s) and peaked near
     // 1,000% CPU instead of 650%. Past 8, extra threads mostly add kernel
     // time. DISKHOUND_PARALLEL_THREADS overrides it.
-    let thread_override = std::env::var("DISKHOUND_PARALLEL_THREADS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n >= 1);
-    let thread_count = thread_override.unwrap_or_else(|| {
+    let thread_count = walk_workers(state.input.workers, {
         let logical = num_cpus::get().max(1);
         if logical <= 2 {
             logical
@@ -3018,11 +3018,7 @@ fn try_scan_windows_parallel(root_path: &Path, state: &mut ScanState) -> Paralle
     }
 
     // Step 2 — set up parallel walk.
-    let worker_count = std::env::var("DISKHOUND_PARALLEL_THREADS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n >= 1)
-        .unwrap_or_else(|| num_cpus::get().clamp(2, 8));
+    let worker_count = walk_workers(state.input.workers, num_cpus::get().clamp(2, 8));
     // Don't clamp to root_children.len(). Extra workers block on the
     // Condvar waiting for subdirs to appear in the queue, then steal
     // them as the initial workers enumerate. Clamping here would starve
@@ -3980,6 +3976,7 @@ fn parse_args() -> Result<ScanInput, String> {
     let mut folder_tree_output: Option<PathBuf> = None;
     let mut dev_artifacts_output: Option<PathBuf> = None;
     let mut expected_total_files: Option<u64> = None;
+    let mut workers: Option<usize> = None;
     let mut args = std::env::args().skip(1);
 
     while let Some(argument) = args.next() {
@@ -4038,6 +4035,18 @@ fn parse_args() -> Result<ScanInput, String> {
                     value.parse::<u64>().map_err(|_| format!("Invalid --expected-files: {value}"))?,
                 );
             }
+            "--workers" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| String::from("Expected a number after --workers"))?;
+                workers = Some(
+                    value
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|&n| n >= 1)
+                        .ok_or_else(|| format!("Invalid --workers: {value}"))?,
+                );
+            }
             unknown => {
                 return Err(format!("Unknown argument: {unknown}"));
             }
@@ -4058,7 +4067,23 @@ fn parse_args() -> Result<ScanInput, String> {
         folder_tree_output,
         dev_artifacts_output,
         expected_total_files,
+        workers,
     })
+}
+
+/// How many workers a walker runs. `DISKHOUND_PARALLEL_THREADS` wins, for
+/// experiments; then `--workers`, the app's Power Efficiency choice; then
+/// the walker's own `default`.
+fn walk_workers(requested: Option<usize>, default: usize) -> usize {
+    let env = std::env::var("DISKHOUND_PARALLEL_THREADS").ok();
+    choose_walk_workers(env.as_deref(), requested, default)
+}
+
+fn choose_walk_workers(env: Option<&str>, requested: Option<usize>, default: usize) -> usize {
+    let from_env = env
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|&n| n >= 1);
+    from_env.or(requested).unwrap_or(default).max(1)
 }
 
 fn file_extension(file_name: &str) -> String {
@@ -4851,6 +4876,24 @@ fn windows_extended_path(path: &Path) -> String {
 }
 
 #[cfg(test)]
+mod walk_workers_tests {
+    use super::choose_walk_workers;
+
+    #[test]
+    fn the_env_override_wins_then_the_app_choice_then_the_walker_default() {
+        assert_eq!(choose_walk_workers(None, None, 8), 8);
+        assert_eq!(choose_walk_workers(None, Some(2), 8), 2);
+        assert_eq!(choose_walk_workers(None, Some(18), 8), 18);
+        assert_eq!(choose_walk_workers(Some("12"), Some(2), 8), 12);
+        assert_eq!(choose_walk_workers(Some(" 3 "), None, 8), 3);
+        // A bad or zero override is ignored, as before.
+        assert_eq!(choose_walk_workers(Some("0"), Some(4), 8), 4);
+        assert_eq!(choose_walk_workers(Some("lots"), None, 8), 8);
+        assert_eq!(choose_walk_workers(None, None, 0), 1);
+    }
+}
+
+#[cfg(test)]
 mod index_line_parse_tests {
     use super::index_line::parse_index_line;
     use super::{append_json_escaped, append_u64_decimal};
@@ -4989,6 +5032,7 @@ mod scaling_tests {
             folder_tree_output: None,
             dev_artifacts_output: None,
             expected_total_files: None,
+            workers: None,
         };
         let mut state = ScanState::new(input, root, None, None, Arc::new(IoStats::default()));
         // Never emit: tests call refresh_hottest_directories directly.
