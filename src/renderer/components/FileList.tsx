@@ -400,7 +400,7 @@ export function FileList({ snapshot, initialFilter, onRescan }: Props) {
   };
 
   return (
-    <div className={`file-view${bulkStatus ? " has-bulk-status" : ""}`}>
+    <div className={`file-view${bulkStatus ? " has-bulk-status" : ""}${quickFilter === "virtual-machines" ? " has-category-note" : ""}`}>
       <div className="file-toolbar">
         <input
           className="filter-input"
