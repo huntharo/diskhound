@@ -553,7 +553,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
             </span>
           </div>
           <div className="duplicates-walk-hint">
-            Using MFT on Windows — usually a couple of minutes. Duplicate check starts automatically when this finishes.
+            Duplicate check starts automatically when the scan index is ready.
           </div>
         </div>
       )}

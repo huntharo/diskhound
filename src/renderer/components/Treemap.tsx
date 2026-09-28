@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 
 import type { PathActionResult, ScanFileRecord } from "../../shared/contracts";
+import { platformTerminology } from "../../shared/platformTerminology";
 import { parentFolderOfPath } from "../../shared/pathProtection";
 import {
   deletedPathLabel,
@@ -461,7 +462,7 @@ function TreemapContextMenu({ x, y, file, onClose }: {
         <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2">
           <path d="M1.5 3.5V11.5C1.5 12.05 1.95 12.5 2.5 12.5H11.5C12.05 12.5 12.5 12.05 12.5 11.5V5.5C12.5 4.95 12.05 4.5 11.5 4.5H7L5.5 2.5H2.5C1.95 2.5 1.5 2.95 1.5 3.5Z" />
         </svg>
-        Open in Explorer
+        Show in {platformTerminology(nativeApi.platform).fileManager}
       </button>
       <button
         className="treemap-ctx-item"
@@ -550,7 +551,7 @@ function TreemapContextMenu({ x, y, file, onClose }: {
           <path d="M1.5 4.5H12.5" />
           <path d="M5 2.5H9" />
         </svg>
-        Move to Recycle Bin
+        Move to {platformTerminology(nativeApi.platform).trash}
       </button>
       <button
         className="treemap-ctx-item treemap-ctx-danger"
