@@ -46,7 +46,7 @@ describe("choosing a Power Efficiency preset", () => {
     expect(settingsOnDisk().scanning.powerEfficiency).toBe("balanced");
     expectIoBudget({
       scenario: "main-power-efficiency-choose",
-      note: "a menu choice: one settings.json rewrite (~2 KB), no process; only on a click, so a handful of writes a day at most, at any monitoring interval",
+      note: "a menu choice: one settings.json rewrite (~1.2 KB) and its mkdir, no process; only on a click, so a handful of writes a day at most, at any monitoring interval",
       io: choose.io,
     });
 
