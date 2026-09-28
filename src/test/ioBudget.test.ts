@@ -81,6 +81,11 @@ describe("measureFsIo", () => {
     await measureFsIo(() => undefined);
   });
 
+  it("refuses to count processes when node:child_process is not instrumented", async () => {
+    await expect(measureFsIo(() => undefined, { countProcesses: true }))
+      .rejects.toThrow(/Process counting is not live/);
+  });
+
   it("treats a stream opened without autoClose as finished when it finishes", async () => {
     const { io } = await measureFsIo(async () => {
       const out = FS.createWriteStream(Path.join(dir, "manual"), { autoClose: false });

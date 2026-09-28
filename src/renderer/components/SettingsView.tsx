@@ -15,6 +15,7 @@ import { formatBytes } from "../lib/format";
 import { reportPollFailure } from "../lib/pollFailure";
 import { nativeApi } from "../nativeApi";
 import { dispatchSettingsUpdated } from "../lib/uiEvents";
+import { startVisiblePoll } from "../lib/visiblePoll";
 import { toast } from "./Toasts";
 import { normPath } from "../../shared/pathUtils";
 import {
@@ -51,17 +52,14 @@ export function SettingsView() {
       }
     };
 
-    void refreshMonitoring();
-    const intervalId = window.setInterval(() => {
-      void refreshMonitoring();
-    }, 15_000);
+    const stopPolling = startVisiblePoll(() => void refreshMonitoring(), 15_000, { immediate: true });
     const unsubscribe = nativeApi.onDiskDelta(() => {
       void refreshMonitoring();
     });
 
     return () => {
       cancelled = true;
-      window.clearInterval(intervalId);
+      stopPolling();
       unsubscribe();
     };
   }, []);

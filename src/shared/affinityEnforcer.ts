@@ -5,9 +5,10 @@ import type { AffinityRule, AppSettings, ProcessInfo } from "./contracts";
  * Drives the affinity-rule engine from the memory sampler, and keeps
  * what it learns off the disk unless something changed.
  *
- * The renderer asks for a memory sample every 2-5 s (SystemWidget
- * every 4 s, even while hidden), and each sample offers a pass here,
- * for as long as the app runs in the tray. Saving settings.json and
+ * The renderer asks for a memory sample every 2-5 s; main also samples
+ * every 4 s when Windows has enabled rules and no fresh UI sample.
+ * Each sample offers a pass here, including while running in the tray.
+ * Saving settings.json and
  * writing a crash.log line for every result of every pass cost a save
  * and a synchronous append every 4 s for a process that resets its
  * own affinity, or one DiskHound is denied access to: about 21,600 of

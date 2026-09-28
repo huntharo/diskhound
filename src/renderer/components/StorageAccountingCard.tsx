@@ -9,6 +9,7 @@ import {
 import { formatBytes, formatCount, relativeTime } from "../lib/format";
 import { saveLocalPreference } from "../lib/localPreference";
 import { STORAGE_ACCOUNTING_STALE_EVENT } from "../lib/uiEvents";
+import { startVisiblePoll } from "../lib/visiblePoll";
 import { nativeApi } from "../nativeApi";
 import { toast } from "./Toasts";
 
@@ -62,18 +63,17 @@ export function StorageAccountingCard({ snapshot, onViewDev }: {
       }).catch(() => { /* keep the last report */ });
     };
     load();
-    // Each collection runs five subprocesses: skip ticks while the window
-    // is hidden, and let focus use the main-process cache (not `fresh`).
-    const id = window.setInterval(() => {
-      if (!document.hidden) load();
-    }, REFRESH_MS);
+    // Each collection runs five subprocesses: no ticks while the window
+    // is hidden, including to the tray, where document.hidden stays
+    // false. Focus uses the main-process cache (not `fresh`).
+    const stopPolling = startVisiblePoll(() => load(), REFRESH_MS);
     const onStale = () => load(true);
     const onFocus = () => load();
     window.addEventListener(STORAGE_ACCOUNTING_STALE_EVENT, onStale);
     window.addEventListener("focus", onFocus);
     return () => {
       cancelled = true;
-      window.clearInterval(id);
+      stopPolling();
       window.removeEventListener(STORAGE_ACCOUNTING_STALE_EVENT, onStale);
       window.removeEventListener("focus", onFocus);
     };

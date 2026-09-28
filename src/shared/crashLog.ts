@@ -72,6 +72,8 @@ export interface CrashLogOptions {
   path: () => string;
   /** Clock for timestamps and repeat windows. Defaults to `Date.now`. */
   now?: () => number;
+  /** How long a buffered line waits before the append. Defaults to `CRASH_LOG_FLUSH_DELAY_MS`. */
+  flushDelayMs?: number;
   fs?: CrashLogFs;
   syncTags?: ReadonlySet<string>;
   repeatTags?: ReadonlySet<string>;
@@ -108,6 +110,7 @@ export function createCrashLog(options: CrashLogOptions): CrashLog {
   const now = options.now ?? (() => Date.now());
   const syncTags = options.syncTags ?? CRASH_LOG_SYNC_TAGS;
   const repeatTags = options.repeatTags ?? CRASH_LOG_REPEAT_TAGS;
+  const flushDelayMs = options.flushDelayMs ?? CRASH_LOG_FLUSH_DELAY_MS;
   const archivePath = () => `${options.path()}.old`;
 
   let pending: string[] = [];
@@ -172,7 +175,7 @@ export function createCrashLog(options: CrashLogOptions): CrashLog {
     if (sync || pendingBytes >= CRASH_LOG_MAX_BUFFERED_BYTES) {
       flush();
     } else if (!flushTimer) {
-      flushTimer = setTimeout(flush, CRASH_LOG_FLUSH_DELAY_MS);
+      flushTimer = setTimeout(flush, flushDelayMs);
       flushTimer.unref?.();
     }
   };

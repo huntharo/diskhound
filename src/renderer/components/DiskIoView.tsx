@@ -5,6 +5,7 @@ import { formatBytes, relativeTime } from "../lib/format";
 import { saveLocalPreference } from "../lib/localPreference";
 import { reportPollFailure } from "../lib/pollFailure";
 import { processMetadataParts, processSearchText } from "../lib/processMetadata";
+import { useVisibleInterval } from "../lib/visiblePoll";
 import { nativeApi } from "../nativeApi";
 import { ProcessIcon } from "./ProcessIcon";
 import { toast } from "./Toasts";
@@ -66,11 +67,7 @@ export function DiskIoView() {
     return () => { cancelled = true; };
   }, []);
 
-  useEffect(() => {
-    if (paused) return;
-    const id = window.setInterval(() => void refresh(), REFRESH_MS);
-    return () => window.clearInterval(id);
-  }, [paused, refresh]);
+  useVisibleInterval(() => void refresh(), paused ? null : REFRESH_MS);
 
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase();
