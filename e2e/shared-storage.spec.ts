@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { linkSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 
 import { expect, test } from "./fixtures/electron-app";
 import { openTab, scanFolderFromPicker } from "./fixtures/steps";
@@ -54,9 +54,34 @@ async function findOneDuplicateGroup(page: Page) {
   // Hashing waits on the index stream, slow on a cold Windows runner.
   await expect(page.locator(".duplicates-title")).toHaveText("1 duplicate group", { timeout: 45_000 });
   const group = page.locator(".duplicate-group");
-  await group.locator(".duplicate-group-header").click();
+  const toggle = group.getByRole("button", { name: "Copies of", exact: false });
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expectChevronLeadsHeader(group);
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
   await expect(group.locator(".duplicate-file-row").first()).toBeVisible();
+  await expectChevronLeadsHeader(group);
   return group;
+}
+
+/** The header is one line and the chevron leads it, before the
+ *  checkbox. A fixed-column grid once pushed the chevron onto a second
+ *  line whenever the shared-storage badge showed, which every group
+ *  here has. */
+async function expectChevronLeadsHeader(group: Locator) {
+  const header = group.locator(".duplicate-group-header");
+  await expect(header.locator(".duplicate-shared-badge")).toBeVisible();
+  const box = async (selector: string) => {
+    const b = await header.locator(selector).boundingBox();
+    expect(b, selector).not.toBeNull();
+    return { left: b!.x, right: b!.x + b!.width, middle: b!.y + b!.height / 2 };
+  };
+  const toggle = await box(".disclosure-toggle");
+  const checkbox = await box(".duplicate-group-checkbox");
+  expect(toggle.right).toBeLessThanOrEqual(checkbox.left);
+  for (const selector of [".duplicate-group-checkbox", ".duplicate-shared-badge", ".duplicate-group-actions"]) {
+    expect(Math.abs((await box(selector)).middle - toggle.middle), selector).toBeLessThan(2);
+  }
 }
 
 test("lists a hardlinked file once and counts it as freeing nothing", async ({ launch }, testInfo) => {

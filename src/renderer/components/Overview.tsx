@@ -35,6 +35,7 @@ import {
 } from "../lib/fileQuickFilters";
 import { nativeApi } from "../nativeApi";
 import { DEV_ARTIFACTS_UPDATED_EVENT } from "../lib/uiEvents";
+import { DisclosureChevron } from "./Disclosure";
 import { FileIcon } from "./FileIcon";
 import { StorageAccountingCard } from "./StorageAccountingCard";
 import { toast } from "./Toasts";
@@ -487,14 +488,7 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
                   onClick={() => setDominantExpanded((v) => !v)}
                   aria-expanded={dominantExpanded}
                 >
-                  <svg
-                    className="treemap-featured-chevron"
-                    width="10" height="10" viewBox="0 0 10 10"
-                    fill="none" stroke="currentColor" strokeWidth="1.5"
-                    style={{ transform: dominantExpanded ? "rotate(90deg)" : "rotate(0deg)" }}
-                  >
-                    <path d="M3.5 2L7 5L3.5 8" />
-                  </svg>
+                  <DisclosureChevron expanded={dominantExpanded} />
                   <div className="treemap-featured-title">
                     {treemapComposition.featuredFiles.length} dominant file{treemapComposition.featuredFiles.length === 1 ? "" : "s"}
                   </div>

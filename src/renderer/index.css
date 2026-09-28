@@ -277,6 +277,52 @@ button, input, select, textarea { font: inherit; }
 .file-row.focused .file-actions { opacity: 1; }
 .file-list-scroll:focus { outline: none; }
 
+/* ── Disclosure chevron (Disclosure.tsx) ──────
+ * One expand/collapse chevron for the app. It leads its row, so it
+ * cannot wrap or move when badges come and go. --text-tertiary gives
+ * 3.6:1 or better on rows in every theme, above the 3:1 WCAG 1.4.11
+ * asks of an icon that is the only sign a row opens; --text-muted
+ * gave 2.4:1. Stroke settings live here because Preact without compat
+ * writes strokeWidth as a literal attribute that SVG ignores. */
+.disclosure-chevron {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 0.15s, color 0.12s;
+}
+.disclosure-chevron.expanded { transform: rotate(90deg); }
+.disclosure-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  cursor: pointer;
+}
+.treemap-featured-header:hover .disclosure-chevron,
+.duplicate-group-header:hover .disclosure-chevron,
+.memory-row-group:hover .disclosure-chevron,
+.folder-row-other:hover .disclosure-chevron {
+  color: var(--text-secondary);
+}
+.disclosure-toggle:hover { background: var(--bg-row-hover); }
+.disclosure-toggle:hover .disclosure-chevron { color: var(--text); }
+.disclosure-toggle:focus-visible,
+.treemap-featured-header:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 1px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .disclosure-chevron { transition: none; }
+}
+
 /* ── App Shell ─────────────────────────────── */
 .app-shell {
   display: grid;
@@ -2210,11 +2256,6 @@ button, input, select, textarea { font: inherit; }
 }
 .treemap-featured.expanded .treemap-featured-header {
   padding: 10px 12px 6px;
-}
-.treemap-featured-chevron {
-  color: var(--text-muted);
-  transition: transform 0.15s;
-  flex-shrink: 0;
 }
 .treemap-featured-actions {
   display: flex;
@@ -5463,9 +5504,6 @@ button, input, select, textarea { font: inherit; }
   background: rgba(59,130,246,0.05);
 }
 :root.light .memory-row-group.expanded { background: rgba(59,130,246,0.04); }
-.memory-row-chevron {
-  color: var(--text-muted);
-}
 .memory-row-name-group {
   font-weight: 500;
 }
@@ -5849,9 +5887,10 @@ button, input, select, textarea { font: inherit; }
 .duplicate-group:hover { border-color: rgba(255,255,255,0.1); }
 .duplicate-group.expanded { border-color: rgba(245,158,11,0.2); }
 
+/* Flex, not a fixed-column grid: the sharing badge is optional, and an
+ * extra child in a grid wraps the chevron onto a second row. */
 .duplicate-group-header {
-  display: grid;
-  grid-template-columns: auto auto 1fr auto auto auto auto auto;
+  display: flex;
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
@@ -5923,6 +5962,7 @@ button, input, select, textarea { font: inherit; }
   align-items: center;
 }
 .duplicate-group-info {
+  flex: 1;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -5992,20 +6032,18 @@ button, input, select, textarea { font: inherit; }
   display: flex;
   gap: 4px;
 }
-.duplicate-group-chevron {
-  flex-shrink: 0;
-  color: var(--text-muted);
-}
 
 /* Expanded file list */
 .duplicate-group-files {
   border-top: 1px solid var(--border);
   padding: 6px 0;
 }
+/* Copies indent past the header's chevron (12px pad + 20px toggle +
+ * 10px gap) so their checkboxes line up under the group's. */
 .duplicate-files-toolbar {
   display: flex;
   gap: 6px;
-  padding: 4px 12px 8px;
+  padding: 4px 12px 8px 42px;
   border-bottom: 1px solid rgba(255,255,255,0.03);
 }
 .duplicate-file-row {
@@ -6013,7 +6051,7 @@ button, input, select, textarea { font: inherit; }
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 5px 12px;
+  padding: 5px 12px 5px 42px;
   transition: background 0.1s;
 }
 .duplicate-file-row:hover { background: var(--bg-row-hover); }
