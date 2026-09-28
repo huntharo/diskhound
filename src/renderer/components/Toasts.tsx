@@ -39,7 +39,7 @@ export function toast(
   level: ToastMessage["level"],
   title: string,
   body?: string,
-  opts?: { id?: string; dismissAfterMs?: number; action?: ToastAction },
+  opts?: { id?: string; dismissAfterMs?: number; action?: ToastAction; copyText?: string },
 ) {
   const msg: RendererToast = {
     id: opts?.id ?? `local-${++toastSeq}`,
@@ -48,6 +48,7 @@ export function toast(
     body,
     dismissAfterMs: opts?.dismissAfterMs ?? (opts?.action ? 8000 : 4000),
     action: opts?.action,
+    copyText: opts?.copyText,
   };
   externalAddToast?.(msg);
 }
@@ -86,7 +87,9 @@ export function ToastProvider({ children }: { children: any }) {
         next[existing] = t;
         return next;
       }
-      return [...prev.slice(-6), t];
+      // Bound transient messages without evicting sticky captures/progress.
+      const recent = new Set(prev.filter((x) => (x.dismissAfterMs ?? 0) > 0).slice(-6).map((x) => x.id));
+      return [...prev.filter((x) => !(x.dismissAfterMs && x.dismissAfterMs > 0) || recent.has(x.id)), t];
     });
     // Sticky toasts pass 0 — don't auto-dismiss. Non-positive is
     // treated the same so callers can pass 0, null, or undefined.
@@ -120,28 +123,57 @@ export function ToastProvider({ children }: { children: any }) {
       {toasts.length > 0 && (
         <div className="toast-container">
           {toasts.map((t) => (
-            <div key={t.id} className={`toast ${t.exiting ? "exiting" : ""}`}>
-              <div className={`toast-icon ${t.level}`} />
-              <div className="toast-content">
-                <div className="toast-title">{t.title}</div>
-                {t.body && <div className="toast-body">{t.body}</div>}
-                {t.action && (
-                  <button
-                    className="toast-action"
-                    onClick={() => {
-                      dismiss(t.id);
-                      t.action?.run();
-                    }}
-                  >
-                    {t.action.label}
-                  </button>
-                )}
-              </div>
-              <button className="toast-close" onClick={() => dismiss(t.id)} aria-label="Dismiss">&times;</button>
-            </div>
+            <ToastCard key={t.id} message={t} dismiss={dismiss} />
           ))}
         </div>
       )}
     </>
+  );
+}
+
+function ToastCard({ message, dismiss }: {
+  message: RendererToast & { exiting?: boolean };
+  dismiss: (id: string) => void;
+}) {
+  const [copyState, setCopyState] = useState<"idle" | "copying" | "copied" | "failed">("idle");
+  useEffect(() => setCopyState("idle"), [message.copyText]);
+  const copy = async () => {
+    if (message.copyText === undefined) return;
+    setCopyState("copying");
+    try {
+      await navigator.clipboard.writeText(message.copyText);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+  };
+  return (
+    <div className={`toast ${message.exiting ? "exiting" : ""}`}>
+      <div className={`toast-icon ${message.level}`} />
+      <div className="toast-content">
+        <div className="toast-title">{message.title}</div>
+        {message.body && <div className="toast-body">{message.body}</div>}
+        {message.action && (
+          <button
+            className="toast-action"
+            onClick={() => {
+              dismiss(message.id);
+              message.action?.run();
+            }}
+          >
+            {message.action.label}
+          </button>
+        )}
+        {message.copyText !== undefined && (
+          <div className="toast-actions">
+            <button className="btn btn-sm" onClick={() => void copy()} disabled={copyState === "copying"}>
+              {copyState === "copied" ? "Copied!" : "Copy details"}
+            </button>
+            {copyState === "failed" && <span role="status">Couldn't copy. Try again.</span>}
+          </div>
+        )}
+      </div>
+      <button className="toast-close" onClick={() => dismiss(message.id)} aria-label="Dismiss">&times;</button>
+    </div>
   );
 }
