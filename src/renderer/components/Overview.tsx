@@ -17,6 +17,8 @@ import {
   type DeletedPathRecord,
 } from "../lib/deletedPaths";
 import { basename, formatBytes, formatCount, formatElapsed, humanAge, relativeTime } from "../lib/format";
+import { overviewDevTileDisplay } from "../lib/devReclaimDisplay";
+import { overviewStorageTotal } from "../lib/overviewStorageTotal";
 import { useConfirmPermanentDelete, useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { saveLocalPreference } from "../lib/localPreference";
 import {
@@ -123,6 +125,7 @@ const DENSE_TREEMAP_LIMIT = 5_000;
 
 export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev, scanPercent, drives, onOpenDrive }: Props) {
   const { bytesSeen, filesVisited, directoriesVisited, skippedEntries } = snapshot;
+  const storageTotal = overviewStorageTotal(snapshot);
   // Live-ticking elapsed: during a running scan the snapshot only updates
   // ~5x/second via progress messages, so the "elapsed" metric would
   // freeze between ticks — users reported seeing "0.0s" stuck on screen.
@@ -317,11 +320,18 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
       <MonitoringNudge />
       <div className="metrics-strip">
         <Metric
-          value={formatBytes(bytesSeen)}
-          label="on disk"
+          value={formatBytes(storageTotal.primaryBytes)}
+          label={storageTotal.primaryLabel}
           accent
-          title="Size on disk after sparse holes and filesystem compression"
+          title={storageTotal.primaryTitle}
         />
+        {storageTotal.adjustedBytes !== null && (
+          <Metric
+            value={`≈ ${formatBytes(storageTotal.adjustedBytes)}`}
+            label={storageTotal.adjustedLabel!}
+            title={storageTotal.adjustedTitle!}
+          />
+        )}
         <Metric value={formatCount(filesVisited)} label="files" />
         <Metric value={formatCount(directoriesVisited)} label="dirs" />
         <Metric value={formatCount(skippedEntries)} label="skipped" />
@@ -930,20 +940,20 @@ function DevCleanupTile({ snapshot, onViewDev }: { snapshot: ScanSnapshot; onVie
   const display = dev
     ? mergeDiagLogHotspots(dev, snapshot.hottestDirectories ?? [])
     : null;
-  if (!display || display.totalBytes <= 0) return null;
-  const topKind = display.kindTotals[0]?.kind;
+  if (!display) return null;
+  const tile = overviewDevTileDisplay(display.artifacts);
+  if (!tile) return null;
   return (
     <button
       type="button"
       className="metric metric-dev-tile"
       onClick={() => onViewDev?.()}
-      title="Open Dev Artifacts to permanently delete worktrees, node_modules, build caches, and RDP traces"
+      title={tile.title}
     >
-      <span className="metric-value accent">{formatBytes(display.totalBytes)}</span>
-      <span className="metric-label">dev artifacts</span>
+      <span className="metric-value accent">{tile.value}</span>
+      <span className="metric-label">{tile.label}</span>
       <span className="metric-dev-meta">
-        {formatCount(display.projectCount)} proj
-        {topKind ? ` · ${formatCount(display.kindTotals[0]!.count)} trees` : ""}
+        {tile.secondary ?? `${formatCount(display.projectCount)} proj`}
       </span>
     </button>
   );

@@ -133,10 +133,21 @@ test.describe("APFS clones", () => {
       cloneDuplicateBytes: DATA_BYTES,
     });
 
+    const primary = handle.page.locator(".metrics-strip .metric").filter({
+      has: handle.page.locator(".metric-label", { hasText: "scanned file bytes" }),
+    });
+    await expect(primary).toContainText("4.5 MB");
+    await expect(primary).toHaveAttribute("title", /Shared clone blocks count for each file/);
+    const adjusted = handle.page.locator(".metrics-strip .metric").filter({
+      has: handle.page.locator(".metric-label", { hasText: "after known clone repeats" }),
+    });
+    await expect(adjusted).toContainText("≈ 2.4 MB");
+    await expect(adjusted).toHaveAttribute("title", /not physical disk usage/);
+
     const card = handle.page.getByRole("region", { name: "Space macOS is holding back" });
     await expect(card).toBeVisible();
     await expect(card.locator(".storage-card-col").nth(1)).toContainText("4.2 MB in 2 cloned files");
-    await expect(card).toContainText("The 4.5 MB total counts 2.1 MB of it more than once");
+    await expect(card).toContainText("The 4.5 MB scanned file bytes count 2.1 MB of known full clones more than once");
   });
 
   test("Dev Artifacts marks node_modules trees cloned from each other", async ({ launch }, testInfo) => {
@@ -152,7 +163,14 @@ test.describe("APFS clones", () => {
     const handle = await launch();
     await scanFolderFromPicker(handle, root);
     const { page } = handle;
-    await openTab(page, "Dev Artifacts");
+    const tile = page.locator(".metric-dev-tile");
+    await expect(tile).toContainText("0 B – 33.6 MB");
+    await expect(tile).toContainText("dev artifacts reclaimable");
+    await expect(tile).toContainText("101 MB listed");
+    await expect(tile).toHaveAttribute("title", /Local snapshots can delay/);
+    const tileValue = await tile.locator(".metric-value").textContent();
+    await tile.click();
+    await expect(page.locator(".tab-bar").getByRole("button", { name: "Dev Artifacts" })).toHaveClass(/active/);
 
     for (const tree of trees) {
       const row = page.locator(".dev-row").filter({ has: page.locator(`.dev-row-name[title="${tree}"]`) });
@@ -164,7 +182,7 @@ test.describe("APFS clones", () => {
     // 96 MB listed is 32 MB of blocks. No one tree frees any of it, and
     // deleting all three frees it once.
     const summary = page.locator(".dev-summary-net");
-    await expect(summary.locator(".changes-delta-big")).toHaveText("0 B – 33.6 MB");
+    await expect(summary.locator(".changes-delta-big")).toHaveText(tileValue ?? "");
     await expect(summary.locator(".changes-delta-label")).toHaveText("reclaimable on this scan · 101 MB listed");
     // The kind rail tells the same story as the header.
     const rail = page.locator(".dev-kind-rail");

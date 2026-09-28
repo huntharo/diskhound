@@ -27,6 +27,7 @@ import {
   type DevArtifactSharing,
 } from "../../shared/storageSharing";
 import { artifactDeltaLabel, artifactHeadline, artifactTail } from "../lib/devArtifactDisplay";
+import { devReclaimDisplay } from "../lib/devReclaimDisplay";
 import {
   artifactsAtPaths,
   effectiveDevSort,
@@ -437,10 +438,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
   // APFS clones count at full size in every tree that holds a copy, so
   // the trees' sizes add up to more than deleting them frees. Lead with
   // what comes back once the gap is worth a second number.
-  const cloneAwareTotal = sharingSummary.measuredTrees > 0
-    && summary.totalBytes - sharingSummary.freesBytes >= Math.max(64 * 1024 * 1024, summary.totalBytes * 0.02);
-  const reclaimRange = formatBytesRange(sharingSummary.freesBytes, sharingSummary.freesAtMostBytes);
-  const reclaimIsRange = reclaimRange !== formatBytes(sharingSummary.freesBytes);
+  const { cloneAwareTotal, reclaimRange, reclaimIsRange, value: reclaimValue } = devReclaimDisplay(sharingSummary);
   // Only worth saying when the copies stand for noticeably fewer blocks
   // (older sidecars report no blocks, and then the two are equal).
   const showSharedBlocks = sharingSummary.sharedBlocks < sharingSummary.sharedBytes * 0.9;
@@ -821,7 +819,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                   + " A local snapshot holds the space until it expires."
                 }
               >
-                {reclaimIsRange ? reclaimRange : `≈ ${reclaimRange}`}
+                {reclaimValue}
               </span>
               <span className="changes-delta-label">
                 reclaimable on this scan · {formatBytes(summary.totalBytes)} listed
@@ -829,7 +827,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
             </>
           ) : (
             <>
-              <span className="changes-delta-big">{formatBytes(summary.totalBytes)}</span>
+              <span className="changes-delta-big">{reclaimValue}</span>
               <span className="changes-delta-label">reclaimable on this scan</span>
             </>
           )}
