@@ -2022,15 +2022,16 @@ fn emit_mft_records_into_state(
     // merging at end remains correct because the global top-K is
     // guaranteed to be contained in the union of all shards' top-Ks.
     //
-    // Shard count: env override or num_cpus(), clamped to [1, 8] to
-    // match the pre-seed parallel walker's tuning. 8 threads on a
-    // 16-logical-core box gives good speedup without saturating L3.
-    let shard_count = std::env::var("DISKHOUND_EMIT_THREADS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n >= 1)
-        .unwrap_or_else(|| num_cpus::get().clamp(1, 8));
-    let shard_count = shard_count.max(1);
+    // Shard count: the MFT-specific env override wins for experiments,
+    // then the app's Power Efficiency choice, then num_cpus() clamped
+    // to [1, 8]. 8 threads on a 16-logical-core box gives good speedup
+    // without saturating L3.
+    let emit_override = std::env::var("DISKHOUND_EMIT_THREADS").ok();
+    let shard_count = choose_mft_emit_workers(
+        emit_override.as_deref(),
+        state.input.workers,
+        num_cpus::get().clamp(1, 8),
+    );
 
     // Slice the Vec into contiguous chunks. Using split_off shuffles
     // Strings between heaps unnecessarily; Vec::chunks_mut would work
@@ -4090,6 +4091,17 @@ fn choose_walk_workers(env: Option<&str>, requested: Option<usize>, default: usi
     from_env.or(requested).unwrap_or(default).max(1)
 }
 
+/// MFT emission uses its own diagnostic override, but otherwise honors
+/// the same Power Efficiency worker count as the directory walkers.
+#[cfg(any(windows, test))]
+fn choose_mft_emit_workers(
+    emit_env: Option<&str>,
+    requested: Option<usize>,
+    default: usize,
+) -> usize {
+    choose_walk_workers(emit_env, requested, default)
+}
+
 fn file_extension(file_name: &str) -> String {
     Path::new(file_name)
         .extension()
@@ -4881,7 +4893,7 @@ fn windows_extended_path(path: &Path) -> String {
 
 #[cfg(test)]
 mod walk_workers_tests {
-    use super::choose_walk_workers;
+    use super::{choose_mft_emit_workers, choose_walk_workers};
 
     #[test]
     fn the_env_override_wins_then_the_app_choice_then_the_walker_default() {
@@ -4894,6 +4906,15 @@ mod walk_workers_tests {
         assert_eq!(choose_walk_workers(Some("0"), Some(4), 8), 4);
         assert_eq!(choose_walk_workers(Some("lots"), None, 8), 8);
         assert_eq!(choose_walk_workers(None, None, 0), 1);
+    }
+
+    #[test]
+    fn mft_emit_honors_the_app_choice_but_keeps_its_explicit_override() {
+        assert_eq!(choose_mft_emit_workers(None, Some(2), 8), 2);
+        assert_eq!(choose_mft_emit_workers(None, Some(4), 8), 4);
+        assert_eq!(choose_mft_emit_workers(Some("6"), Some(2), 8), 6);
+        assert_eq!(choose_mft_emit_workers(Some("bad"), Some(4), 8), 4);
+        assert_eq!(choose_mft_emit_workers(None, None, 8), 8);
     }
 }
 

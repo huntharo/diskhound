@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "preact/hooks";
+import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 
 import type { ToastMessage } from "../../shared/contracts";
 import { nativeApi } from "../nativeApi";
@@ -23,6 +23,14 @@ interface ToastAction {
   run: () => void;
 }
 type RendererToast = ToastMessage & { action?: ToastAction };
+type ToastTimer = ReturnType<typeof setTimeout>;
+
+function clearToastTimer(timers: Map<string, ToastTimer>, id: string): void {
+  const timer = timers.get(id);
+  if (timer === undefined) return;
+  clearTimeout(timer);
+  timers.delete(id);
+}
 
 let externalAddToast: ((toast: RendererToast) => void) | null = null;
 let externalDismissToast: ((id: string) => void) | null = null;
@@ -50,13 +58,25 @@ export function dismissToast(id: string): void {
 
 export function ToastProvider({ children }: { children: any }) {
   const [toasts, setToasts] = useState<(RendererToast & { exiting?: boolean })[]>([]);
+  const dismissTimers = useRef(new Map<string, ToastTimer>());
+  const removeTimers = useRef(new Map<string, ToastTimer>());
 
   const dismiss = useCallback((id: string) => {
+    clearToastTimer(dismissTimers.current, id);
+    clearToastTimer(removeTimers.current, id);
     setToasts((t) => t.map((x) => (x.id === id ? { ...x, exiting: true } : x)));
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 220);
+    const timer = setTimeout(() => {
+      removeTimers.current.delete(id);
+      setToasts((t) => t.filter((x) => x.id !== id));
+    }, 220);
+    removeTimers.current.set(id, timer);
   }, []);
 
   const addToast = useCallback((t: RendererToast) => {
+    // An upsert starts a fresh lifetime. Also cancel a pending exit
+    // removal in case the replacement arrived during the fade-out.
+    clearToastTimer(dismissTimers.current, t.id);
+    clearToastTimer(removeTimers.current, t.id);
     setToasts((prev) => {
       // Upsert by id: if the id already exists, replace the entry
       // in-place. Keeps progress toasts to a single visible card.
@@ -71,14 +91,27 @@ export function ToastProvider({ children }: { children: any }) {
     // Sticky toasts pass 0 — don't auto-dismiss. Non-positive is
     // treated the same so callers can pass 0, null, or undefined.
     if (t.dismissAfterMs && t.dismissAfterMs > 0) {
-      setTimeout(() => dismiss(t.id), t.dismissAfterMs);
+      const timer = setTimeout(() => {
+        dismissTimers.current.delete(t.id);
+        dismiss(t.id);
+      }, t.dismissAfterMs);
+      dismissTimers.current.set(t.id, timer);
     }
   }, [dismiss]);
 
   useEffect(() => {
     externalAddToast = addToast;
     externalDismissToast = dismiss;
-    return nativeApi.onNotification(addToast);
+    const unsubscribe = nativeApi.onNotification(addToast);
+    return () => {
+      unsubscribe();
+      if (externalAddToast === addToast) externalAddToast = null;
+      if (externalDismissToast === dismiss) externalDismissToast = null;
+      for (const timer of dismissTimers.current.values()) clearTimeout(timer);
+      for (const timer of removeTimers.current.values()) clearTimeout(timer);
+      dismissTimers.current.clear();
+      removeTimers.current.clear();
+    };
   }, [addToast, dismiss]);
 
   return (

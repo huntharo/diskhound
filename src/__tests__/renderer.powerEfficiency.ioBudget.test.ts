@@ -11,7 +11,7 @@ import {
   PowerEfficiencyControl,
   PowerEfficiencyMenuButton,
 } from "../renderer/components/PowerEfficiencyControl";
-import { ToastProvider } from "../renderer/components/Toasts";
+import { toast, ToastProvider } from "../renderer/components/Toasts";
 import type { AppSettings } from "../shared/contracts";
 import {
   DEFAULT_POWER_EFFICIENCY,
@@ -236,6 +236,35 @@ describe("the Power Efficiency button", () => {
 });
 
 describe("the saved Power Efficiency control", () => {
+  it("gives a replacement confirmation a fresh dismissal window", async () => {
+    const view = ui.mount(h(ToastProvider, null, h("span", null)));
+    await ui.settle();
+
+    toast("success", "First choice", undefined, {
+      id: "power-efficiency",
+      dismissAfterMs: 120,
+      action: { label: "Old rescan", run: () => {} },
+    });
+    await wait(80);
+    toast("success", "Latest choice", undefined, {
+      id: "power-efficiency",
+      dismissAfterMs: 120,
+      action: { label: "Rescan now", run: () => {} },
+    });
+
+    // The first toast's original deadline has passed, but the replacement
+    // keeps its complete lifetime and its latest action.
+    await wait(60);
+    expect(one(view, ".toast-title").textContent).toBe("Latest choice");
+    expect(button(view, "Rescan now")).toBeTruthy();
+    expect(one(view, ".toast").classList.contains("exiting")).toBe(false);
+
+    await wait(70);
+    expect(one(view, ".toast").classList.contains("exiting")).toBe(true);
+    await wait(230);
+    expect(view.querySelector(".toast")).toBeNull();
+  });
+
   it("saves a choice through main, says when it applies, and offers a rescan", async () => {
     const cpus = window.diskhound!.cpuCount;
     const rescans: string[] = [];
