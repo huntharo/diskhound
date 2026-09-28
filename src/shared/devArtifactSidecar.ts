@@ -150,7 +150,7 @@ function dirsEqual(a: string, b: string): boolean {
  */
 export function noteDirectoryRoot(acc: DevAcc, path: string, size: number, files: number): void {
   if (size <= 0) return;
-  const match = classifyArtifactPath(path);
+  const match = classifyArtifactPath(path, true);
   if (!match || !dirsEqual(match.root, path)) return;
   const existing = acc.artifacts.get(match.root);
   if (!existing || size > existing.size) {
@@ -329,7 +329,10 @@ export function reportFromSidecar(
   const artifacts: DevArtifact[] = [];
   for (const rec of current.roots) {
     if (!keepArtifact(rec.path, projects)) continue;
-    const projectPath = nearestProject(rec.path, projects);
+    // A repo belongs to its checkout, marker file or not.
+    const projectPath = rec.kind === "git-repo"
+      ? dirnameOf(rec.path)
+      : nearestProject(rec.path, projects);
     const previousSize = prevByPath.get(rec.path) ?? null;
     artifacts.push({
       path: rec.path,

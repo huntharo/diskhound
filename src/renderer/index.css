@@ -9312,6 +9312,7 @@ body.system-widget-body #app {
   --dev-k-compiler-cache: #64748b;
   --dev-k-cmake-build: #38bdf8;
   --dev-k-terraform: #d946ef;
+  --dev-k-git-repo: #84cc16;
   --dev-k-diag-logs: #f59e0b;
 }
 .dev-summary {
@@ -9742,6 +9743,24 @@ body.system-widget-body #app {
   font-weight: 600;
   line-height: 15px;
   cursor: help;
+}
+.dev-git-badge {
+  color: var(--text-secondary);
+}
+.dev-git-badge.warn {
+  display: inline-block;
+  padding: 0 5px;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: var(--radius-sm);
+  background: rgba(245, 158, 11, 0.08);
+  color: var(--amber);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 15px;
+  cursor: help;
+}
+.action-btn.is-blocked {
+  opacity: 0.55;
 }
 .dev-share-badge.likely {
   border-style: dashed;

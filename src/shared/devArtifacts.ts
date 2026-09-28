@@ -16,6 +16,7 @@ export const DEV_KIND_LABEL: Record<DevArtifactKind, string> = {
   "compiler-cache": "Compiler caches",
   "cmake-build": "CMake build trees",
   terraform: "Terraform providers",
+  "git-repo": "Git repos (.git)",
   "diag-logs": "RDP / diag traces",
 };
 
@@ -34,6 +35,7 @@ export const DEV_KIND_SHORT: Record<DevArtifactKind, string> = {
   "compiler-cache": "ccache",
   "cmake-build": "CMake",
   terraform: "Terraform",
+  "git-repo": "Git repos",
   "diag-logs": "RDP / diag",
 };
 
@@ -88,6 +90,7 @@ export const ARTIFACT_SEGMENT_NAMES: ReadonlySet<string> = new Set([
   ".cache",
   ".terraform",
   ".terraform.d",
+  ".git",
   "dist",
   "build",
   "out",
@@ -115,8 +118,15 @@ function joinSegments(original: string, count: number): string {
  * fallback (devArtifactFolderTree.ts) relies on that to skip rows whose
  * last two segments aren't in ARTIFACT_SEGMENT_NAMES, so a rule that
  * reaches further needs that reader changed too.
+ *
+ * `isDirectory` says `filePath` itself is a folder. Only `.git` needs it:
+ * a repo's `.git` is a folder, while a linked worktree's or a submodule's
+ * is a one-line file pointing at the real one.
  */
-export function classifyArtifactPath(filePath: string): { root: string; kind: DevArtifactKind } | null {
+export function classifyArtifactPath(
+  filePath: string,
+  isDirectory = false,
+): { root: string; kind: DevArtifactKind } | null {
   const parts = splitSegments(filePath);
   for (let i = 0; i < parts.length; i++) {
     const lower = parts[i]!.toLowerCase();
@@ -174,6 +184,15 @@ export function classifyArtifactPath(filePath: string): { root: string; kind: De
     // providers installed by hand, so it stays.
     if (lower === ".terraform.d" && i + 1 < parts.length && parts[i + 1]!.toLowerCase() === "plugin-cache") {
       return { root: joinSegments(filePath, i + 2), kind: "terraform" };
+    }
+
+    // The repo's history, not its working files. Anything below a
+    // `.git` folder counts toward it; a `.git` file never does.
+    if (lower === ".git") {
+      if (i + 1 < parts.length || isDirectory) {
+        return { root: joinSegments(filePath, i + 1), kind: "git-repo" };
+      }
+      continue;
     }
 
     const mapped = SEGMENT_KIND[lower];
