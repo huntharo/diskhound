@@ -9322,12 +9322,6 @@ body.system-widget-body #app {
   border-bottom: 1px solid var(--border);
   flex-wrap: wrap;
 }
-.dev-summary-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-left: auto;
-}
 .dev-summary-net {
   display: flex;
   flex-direction: column;
@@ -9814,6 +9808,5 @@ body.system-widget-body #app {
   .overview-insight-row { grid-template-columns: 1fr; }
   .dev-row { grid-template-columns: auto auto 1fr; }
   .metric-dev-tile { margin-left: 0; }
-  .dev-summary-actions { margin-left: 0; }
   .dev-select-bar { padding-left: 12px; padding-right: 12px; }
 }

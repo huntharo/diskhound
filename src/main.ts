@@ -152,7 +152,6 @@ import { dropArtifactsFromReport } from "./shared/devArtifacts";
 import {
   resolveBundledDevArtifactsWorkerPath,
   runDevArtifactsClassifyWorker,
-  runDevArtifactsRescanWorker,
 } from "./shared/devArtifactsWorkerRuntime";
 import {
   deleteFullDiffCachesForScan,
@@ -180,7 +179,6 @@ const DISK_DELTA_CHANNEL = "diskhound:disk-delta";
 const NOTIFICATION_CHANNEL = "diskhound:notification";
 const DUPLICATE_PROGRESS_CHANNEL = "diskhound:duplicate-progress";
 const DUPLICATE_RESULT_CHANNEL = "diskhound:duplicate-result";
-const DEV_ARTIFACTS_PROGRESS_CHANNEL = "diskhound:dev-artifacts-progress";
 const PERMANENT_DELETE_PROGRESS_CHANNEL = "diskhound:permanent-delete-progress";
 /** Broadcast from main to every renderer window after settings
  *  are persisted. Replaces the widget's prior 12 s poll — see the
@@ -3333,7 +3331,6 @@ void (async () => {
   // ask on every mount.
   const devArtifactCache = new Map<string, DevArtifactReport>();
   const devArtifactInflight = new Map<string, Promise<DevArtifactReport | null>>();
-  const devRescanAbort = new Map<string, AbortController>();
   // Scans whose sidecar load found no sidecar, and scans whose full
   // load found nothing to classify or failed to. Both answer null from
   // memory for a while, instead of listing scan-indexes and reading
@@ -3454,12 +3451,6 @@ void (async () => {
     return pending;
   });
 
-  ipcMain.handle("diskhound:cancel-dev-artifacts-rescan", (_event, rootPath: string) => {
-    const key = scanKey(rootPath);
-    const ac = devRescanAbort.get(key);
-    if (ac) ac.abort();
-  });
-
   ipcMain.handle("diskhound:forget-dev-artifact-paths", async (_event, rootPath: string, paths: unknown) => {
     const list = Array.isArray(paths)
       ? paths.filter((path): path is string => typeof path === "string" && path.trim().length > 0)
@@ -3494,54 +3485,6 @@ void (async () => {
     setDevReport(current.id, report);
     writeCrashLog("dev-artifacts", `forgot ${list.length} tree(s) scanId=${current.id}`);
     return report;
-  });
-
-  ipcMain.handle("diskhound:rescan-dev-artifacts", async (_event, rootPath: string) => {
-    const history = getScanHistory(rootPath);
-    const current = history[0];
-    if (!current) return null;
-    const key = scanKey(rootPath);
-    devRescanAbort.get(key)?.abort();
-    const ac = new AbortController();
-    devRescanAbort.set(key, ac);
-    try {
-      const report = await runDevArtifactsRescanWorker(
-        {
-          rootPath,
-          sidecarPath: devArtifactsSidecarPath(current.id),
-          indexPath: indexFilePath(current.id),
-        },
-        {
-          workerPath: devArtifactsWorkerEntry,
-          signal: ac.signal,
-          onProgress: (progress) => {
-            mainWindow?.webContents.send(DEV_ARTIFACTS_PROGRESS_CHANNEL, {
-              ...progress,
-              rootPath,
-            });
-          },
-        },
-      );
-      const latest = getScanHistory(rootPath)[0];
-      if (latest && latest.id !== current.id) {
-        const adopted = await loadDevReport(latest.id, rootPath, getScanHistory(rootPath)[1]?.id);
-        if (adopted && adopted.artifacts.length > 0) {
-          setDevReport(latest.id, adopted);
-          return adopted;
-        }
-      }
-      setDevReport(current.id, report);
-      return report;
-    } catch (err) {
-      if (ac.signal.aborted) return null;
-      writeCrashLog(
-        "dev-artifacts-rescan",
-        err instanceof Error ? (err.stack ?? err.message) : String(err),
-      );
-      return null;
-    } finally {
-      if (devRescanAbort.get(key) === ac) devRescanAbort.delete(key);
-    }
   });
 
   // ── IPC: Duplicate Detection ────────────────────────────

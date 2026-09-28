@@ -5,10 +5,8 @@ import * as Path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import type { DevArtifactReport, FullDiffResult } from "../contracts";
-import type { DevArtifactsRescanProgress } from "../devArtifactSidecar";
 import {
   runDevArtifactsClassifyWorker,
-  runDevArtifactsRescanWorker,
 } from "../devArtifactsWorkerRuntime";
 import type { SerializedFolderTree } from "../folderTreeWorkerProtocol";
 import { runFolderTreeWorker } from "../folderTreeWorkerRuntime";
@@ -160,21 +158,6 @@ const runtimes: RuntimeCase[] = [
         { workerPath, signal },
       ),
   },
-  {
-    name: "runDevArtifactsRescanWorker",
-    label: "Dev artifacts worker",
-    resultField: "report",
-    payload: report,
-    run: (workerPath, signal) =>
-      runDevArtifactsRescanWorker(
-        {
-          rootPath: "/scan",
-          sidecarPath: "/unused/dev-artifacts.json",
-          indexPath: "/unused/index.ndjson.gz",
-        },
-        { workerPath, signal },
-      ),
-  },
 ];
 
 describe.each(runtimes)("$name", (runtime) => {
@@ -225,34 +208,6 @@ describe.each(runtimes)("$name", (runtime) => {
   });
 });
 
-describe("runDevArtifactsRescanWorker progress", () => {
-  it("forwards progress and still resolves with the report", async () => {
-    const progress: DevArtifactsRescanProgress = {
-      treesWalked: 1,
-      treesTotal: 2,
-      currentPath: "/scan/node_modules",
-      filesSoFar: 10,
-      bytesSoFar: 2048,
-      elapsedMs: 5,
-    };
-    const workerPath = await fakeWorker([
-      reply({ type: "progress", progress }),
-      reply({ type: "result", report }),
-    ].join("\n"));
-    const seen: DevArtifactsRescanProgress[] = [];
-    const result = await runDevArtifactsRescanWorker(
-      {
-        rootPath: "/scan",
-        sidecarPath: "/unused/dev-artifacts.json",
-        indexPath: "/unused/index.ndjson.gz",
-      },
-      { workerPath, onProgress: (next) => seen.push(next) },
-    );
-    expect(seen).toEqual([progress]);
-    expect(result).toEqual(report);
-  });
-});
-
 describe("Dev Artifacts worker heap", () => {
   it("runs under its own limit, well inside the 4 GB cage it shares with main", async () => {
     // The worker replies with the limits it was started under.
@@ -260,7 +215,7 @@ describe("Dev Artifacts worker heap", () => {
       `parentPort.postMessage({ requestId: request.requestId, type: "result", report: require("node:worker_threads").resourceLimits });`,
     );
     const devRuntimes = runtimes.filter((runtime) => runtime.label === "Dev artifacts worker");
-    expect(devRuntimes).toHaveLength(2);
+    expect(devRuntimes).toHaveLength(1);
     for (const runtime of devRuntimes) {
       const limits = await runtime.run(workerPath) as { maxOldGenerationSizeMb: number; maxYoungGenerationSizeMb: number };
       expect(limits.maxOldGenerationSizeMb).toBe(1024);

@@ -689,17 +689,6 @@ export interface DevArtifactReport {
   droppedPaths?: string[];
 }
 
-/** Live progress for `rescanDevArtifacts`. Not a full drive scan. */
-export interface DevArtifactsRescanProgress {
-  rootPath: string;
-  treesWalked: number;
-  treesTotal: number;
-  currentPath: string;
-  filesSoFar: number;
-  bytesSoFar: number;
-  elapsedMs: number;
-}
-
 export interface IndexSearchQuery {
   query: string;
   minSizeBytes?: number;
@@ -1412,13 +1401,8 @@ export interface DiskhoundNativeApi {
   /** Read the Dev Artifacts report. `sidecarOnly` reads an existing sidecar
    *  and never classifies from the folder tree (Overview tile). */
   getDevArtifacts: (rootPath: string, options?: { sidecarOnly?: boolean }) => Promise<DevArtifactReport | null>;
-  /** Re-walk known artifact trees on disk (not a full drive scan). */
-  rescanDevArtifacts: (rootPath: string) => Promise<DevArtifactReport | null>;
-  /** Stop an in-flight Dev tree walk. Does not start or cancel a drive scan. */
-  cancelDevArtifactsRescan: (rootPath: string) => Promise<void>;
   /** Drop deleted trees from the Dev sidecar and in-memory cache. JSON only. */
   forgetDevArtifactPaths: (rootPath: string, paths: string[]) => Promise<DevArtifactReport | null>;
-  onDevArtifactsProgress: (listener: (progress: DevArtifactsRescanProgress) => void) => () => void;
 
   // Easy Move
   easyMove: (sourcePath: string, destinationDir: string) => Promise<EasyMoveResult>;

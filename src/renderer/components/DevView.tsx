@@ -696,18 +696,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
           <span className="scan-root-chip">{rootLabel}</span>
           <span>No developer artifacts left on this scan.</span>
           <span className="empty-view-sub">Looks for worktrees, package trees, Rust targets, venvs, compiler caches, and DiagOutputDir RDP traces on this scan. Switch drives in the header to see another root.</span>
-          {report && onStartScan ? (
-            <button
-              className="action-btn"
-              disabled={snapshot.status === "running"}
-              onClick={onStartScan}
-              title="Refresh artifacts with a drive scan. Stop it from the header."
-            >
-              Rescan drive
-            </button>
-          ) : (
-            <button className="action-btn" onClick={() => void load()}>Retry</button>
-          )}
+          {!report && <button className="action-btn" onClick={() => void load()}>Retry</button>}
         </div>
       </div>
     );
@@ -758,16 +747,6 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
             <div className="summary-item-value">{formatCount(summary.totalFiles)}</div>
           </div>
         </div>
-        {onStartScan && <div className="dev-summary-actions">
-          <button
-            className="action-btn"
-            disabled={bulkBusy || snapshot.status === "running"}
-            onClick={onStartScan}
-            title="Refresh artifacts with a drive scan. Stop it from the header."
-          >
-            Rescan drive
-          </button>
-        </div>}
       </div>
 
       {(showSharedNote || devSnapshots.length > 0) && (

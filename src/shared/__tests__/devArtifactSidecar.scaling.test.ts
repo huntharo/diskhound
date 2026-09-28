@@ -5,7 +5,6 @@ import type { DevArtifact, DevArtifactReport } from "../contracts";
 import {
   compactDevArtifactSidecar,
   DEV_SIDECAR_ROOT_CAP,
-  planRescanTargets,
   reportFromSidecar,
   type DevArtifactSidecar,
 } from "../devArtifactSidecar";
@@ -41,44 +40,6 @@ function reportWith(projects: number): DevArtifactReport {
   const sidecar = sidecarWith(projects);
   return reportFromSidecar(sidecar);
 }
-
-describe("planRescanTargets scaling", () => {
-  it("checks seeded roots against known roots in linear work", () => {
-    const run = (projects: number) => {
-      const sidecar = sidecarWith(projects);
-      // One seed per project: half nested under a known root, half new.
-      const extras = Array.from({ length: projects }, (_, i) => (
-        i % 2 === 0
-          ? join(join(projectPath(i), "node_modules"), ".cache")
-          : join(projectPath(i), "DiagOutputDir")
-      ));
-      return measureOpsSync(() => planRescanTargets(sidecar, extras)).ops;
-    };
-    expectNearLinear("planRescanTargets", run(PROJECTS), run(PROJECTS * 8), {
-      maxTotal: PROJECTS * 8 * 100,
-    });
-  });
-
-  it("skips seeds that equal, sit under, or hold a known root, ignoring case", () => {
-    const sidecar: DevArtifactSidecar = {
-      version: 1,
-      rootPath: "C:\\",
-      generatedAt: 1,
-      roots: [{ path: "C:\\Work\\app\\node_modules", kind: "node-modules", size: 10, files: 1 }],
-      projects: [],
-    };
-    expect(planRescanTargets(sidecar, [
-      "c:\\work\\APP\\node_modules\\",
-      "C:\\work\\app\\node_modules\\.cache",
-      "C:\\Work",
-      "C:\\Windows\\Temp\\DiagOutputDir",
-      "C:\\Windows\\Temp\\DiagOutputDir\\RdClientAutoTrace",
-    ])).toEqual([
-      "C:\\Work\\app\\node_modules",
-      "C:\\Windows\\Temp\\DiagOutputDir",
-    ]);
-  });
-});
 
 describe("compactDevArtifactSidecar / reportFromSidecar scaling", () => {
   it("compacts in n log n", () => {
