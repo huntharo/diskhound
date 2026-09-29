@@ -17,6 +17,7 @@ import { updateDuplicateGroupWindow, type DuplicateGroupWindow, type DuplicateSo
 import { formatBytes, formatElapsed, humanAge } from "../lib/format";
 import { useConfirmPermanentDelete, useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
+import { DisclosureToggle } from "./Disclosure";
 import { FileIcon } from "./FileIcon";
 import { toast } from "./Toasts";
 
@@ -553,7 +554,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
             </span>
           </div>
           <div className="duplicates-walk-hint">
-            Using MFT on Windows — usually a couple of minutes. Duplicate check starts automatically when this finishes.
+            Duplicate check starts automatically when the scan index is ready.
           </div>
         </div>
       )}
@@ -790,6 +791,7 @@ function GroupCard({ group, isExpanded, busy, confirmDelete, selectedPaths, find
   return (
     <div className={`duplicate-group ${isExpanded ? "expanded" : ""}`}>
       <div className="duplicate-group-header" onClick={onToggle}>
+        <DisclosureToggle expanded={isExpanded} label={`Copies of ${name}`} onToggle={onToggle} />
         <label
           className="duplicate-group-checkbox"
           onClick={(e) => e.stopPropagation()}
@@ -837,13 +839,6 @@ function GroupCard({ group, isExpanded, busy, confirmDelete, selectedPaths, find
             Keep newest
           </button>
         </div>
-        <svg
-          className="duplicate-group-chevron"
-          width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5"
-          style={{ transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s" }}
-        >
-          <path d="M3.5 2L7 5L3.5 8" />
-        </svg>
       </div>
 
       {isExpanded && (
@@ -891,7 +886,7 @@ function GroupCard({ group, isExpanded, busy, confirmDelete, selectedPaths, find
                       {protectedBy && <span className="protected-path-badge" title={`Protected by ${protectedBy}`}>Protected</span>}
                     </span>
                   </div>
-                  <div className="duplicate-file-actions">
+                  <div className="duplicate-file-actions hover-actions">
                     <button className="action-btn" disabled={unavailableDisabled} onClick={() => onReveal(file.path)} title={deletedTitle}>Reveal</button>
                     <button className="action-btn" disabled={unavailableDisabled} onClick={() => onOpen(file.path)} title={deletedTitle}>Open</button>
                     <button className="action-btn warn" disabled={actionDisabled} onClick={() => onTrash(file.path)} title={deletedTitle ?? (protectedBy ? `Protected by ${protectedBy}` : undefined)}>Trash</button>

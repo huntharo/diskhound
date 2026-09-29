@@ -8,12 +8,15 @@ import {
   type MonitoringSnapshot,
   type UpdateStatus,
 } from "../../shared/contracts";
+import { platformTerminology } from "../../shared/platformTerminology";
 import { resolveSizeUnitBase } from "../../shared/sizeUnits";
 import { formatDriveSpace, driveUsedPercent } from "../lib/driveSpace";
 import { formatBytes } from "../lib/format";
 import { reportPollFailure } from "../lib/pollFailure";
 import { nativeApi } from "../nativeApi";
-import { dispatchSettingsUpdated } from "../lib/uiEvents";
+import { dispatchSettingsUpdated, SETTINGS_UPDATED_EVENT } from "../lib/uiEvents";
+import { startVisiblePoll } from "../lib/visiblePoll";
+import { PowerEfficiencyControl } from "./PowerEfficiencyControl";
 import { toast } from "./Toasts";
 import { normPath } from "../../shared/pathUtils";
 import {
@@ -35,6 +38,19 @@ export function SettingsView() {
       setSettings(s);
       setLoaded(true);
     });
+    // Settings also change outside this view (the header's Power
+    // Efficiency control, a finished scan's recent-scans list). Keep this
+    // copy current so a save here doesn't write an older value back.
+    const apply = (next: AppSettings | null | undefined) => {
+      if (next) setSettings(next);
+    };
+    const onLocal = (event: Event) => apply((event as CustomEvent<AppSettings>).detail);
+    const unsubscribe = nativeApi.onSettingsUpdated(apply);
+    window.addEventListener(SETTINGS_UPDATED_EVENT, onLocal as EventListener);
+    return () => {
+      unsubscribe();
+      window.removeEventListener(SETTINGS_UPDATED_EVENT, onLocal as EventListener);
+    };
   }, []);
 
   useEffect(() => {
@@ -50,17 +66,14 @@ export function SettingsView() {
       }
     };
 
-    void refreshMonitoring();
-    const intervalId = window.setInterval(() => {
-      void refreshMonitoring();
-    }, 15_000);
+    const stopPolling = startVisiblePoll(() => void refreshMonitoring(), 15_000, { immediate: true });
     const unsubscribe = nativeApi.onDiskDelta(() => {
       void refreshMonitoring();
     });
 
     return () => {
       cancelled = true;
-      window.clearInterval(intervalId);
+      stopPolling();
       unsubscribe();
     };
   }, []);
@@ -191,6 +204,20 @@ export function SettingsView() {
        * that don't exist. Gate on nativeApi.platform so the section
        * disappears entirely on non-Windows instead of half-working. */}
       {nativeApi.platform === "win32" && <PerformanceSection />}
+
+      {/* ── Scanning ── */}
+      <div className="settings-section">
+        <div className="settings-section-title">Scanning</div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Power Efficiency</div>
+            <div className="setting-desc">
+              How many folders a scan reads at once, up to one per CPU. Used from the next scan, manual or scheduled; a running scan keeps its workers.
+            </div>
+          </div>
+          <PowerEfficiencyControl />
+        </div>
+      </div>
 
       <ProtectedFoldersSection
         settings={settings}
@@ -358,7 +385,7 @@ function ProtectedFoldersSection({
     <div className="settings-section">
       <div className="settings-section-title">Protected Folders</div>
       <div className="settings-section-note">
-        These folders are still scanned and counted in totals. DiskHound hides stricter system folders from the Folders tab by default, keeps useful buckets like ProgramData and Recycle Bin visible, and blocks Trash, Delete, and Easy Move for anything inside them.
+        These folders are still scanned and counted in totals. DiskHound hides stricter system folders from the Folders tab by default, keeps useful storage categories visible, and blocks Trash, Delete, and Easy Move for anything inside them.
       </div>
       <ToggleRow
         label="Hide protected folders in Folders"
@@ -901,7 +928,7 @@ function CrashLogRow() {
           <button className="action-btn" onClick={() => void toggle()}>
             {expanded ? "Hide" : loading ? "Loading…" : "View"}
           </button>
-          <button className="action-btn" onClick={reveal} title="Open the DiskHound data folder in Explorer / Finder">
+          <button className="action-btn" onClick={reveal} title={`Show the DiskHound data folder in ${platformTerminology(nativeApi.platform).fileManager}`}>
             Open folder
           </button>
         </div>

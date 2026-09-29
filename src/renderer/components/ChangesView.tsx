@@ -23,6 +23,7 @@ import { basename, formatBytes, relativeTime } from "../lib/format";
 import { useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { saveLocalPreference } from "../lib/localPreference";
 import { reportPollFailure } from "../lib/pollFailure";
+import { useVisibleInterval } from "../lib/visiblePoll";
 import { nativeApi } from "../nativeApi";
 import { toast } from "./Toasts";
 import { FileIcon } from "./FileIcon";
@@ -157,11 +158,7 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
     if (info) setScheduleInfo(info);
   }, []);
 
-  useEffect(() => {
-    void refreshScheduleInfo();
-    const id = window.setInterval(() => { void refreshScheduleInfo(); }, 30_000);
-    return () => window.clearInterval(id);
-  }, [refreshScheduleInfo]);
+  useVisibleInterval(() => void refreshScheduleInfo(), 30_000, { immediate: true });
 
   const monitoringEnabled = scheduleInfo?.enabled ?? null;
 
@@ -611,7 +608,7 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
 
       {diff.sizeSemanticsChanged && (
         <div className="changes-semantics-note">
-          These two scans used different size accounting (Explorer file size vs size on disk for sparse/compressed files). Totals aren't comparable — run one more scan, then compare two scans from after that.
+          These two scans used different size accounting (logical file size vs size on disk for sparse/compressed files). Totals aren't comparable — run one more scan, then compare two scans from after that.
         </div>
       )}
 
@@ -1203,7 +1200,7 @@ function FileDeltaList({ deltas, busy, onReveal, onOpen, onTrash, onEasyMove }: 
               )}
             </div>
             {isActionable && (
-              <div className="changes-row-actions">
+              <div className="changes-row-actions hover-actions">
                 <button className="action-btn" disabled={unavailableDisabled} onClick={() => onReveal(d.path)} title={deletedTitle}>Reveal</button>
                 <button className="action-btn" disabled={unavailableDisabled} onClick={() => onOpen(d.path)} title={deletedTitle}>Open</button>
                 {onTrash && <button className="action-btn warn" disabled={destructiveDisabled} onClick={() => onTrash(d.path)} title={deletedTitle ?? (protectedBy ? `Protected by ${protectedBy}` : undefined)}>Trash</button>}
@@ -1275,7 +1272,7 @@ function DirDeltaList({ deltas, busy, onReveal, onOpen, onEasyMove }: { deltas: 
               )}
             </div>
             {isActionable && (
-              <div className="changes-row-actions">
+              <div className="changes-row-actions hover-actions">
                 <button className="action-btn" disabled={isBusy} onClick={() => onReveal(d.path)}>Reveal</button>
                 <button className="action-btn" disabled={isBusy} onClick={() => onOpen(d.path)}>Open</button>
                 <button className="action-btn" disabled={moveDisabled} onClick={() => onEasyMove(d.path)} title={protectionTitle}>Move</button>
@@ -1428,7 +1425,7 @@ function FullDiffList({ diff, busy, onReveal, onOpen, onTrash, onEasyMove }: {
               )}
             </div>
             {isActionable && (
-              <div className="changes-row-actions">
+              <div className="changes-row-actions hover-actions">
                 <button className="action-btn" disabled={unavailableDisabled} onClick={() => onReveal(change.path)} title={deletedTitle}>Reveal</button>
                 <button className="action-btn" disabled={unavailableDisabled} onClick={() => onOpen(change.path)} title={deletedTitle}>Open</button>
                 <button className="action-btn warn" disabled={destructiveDisabled} onClick={() => onTrash(change.path)} title={deletedTitle ?? (protectedBy ? `Protected by ${protectedBy}` : undefined)}>Trash</button>

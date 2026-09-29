@@ -1,3 +1,5 @@
+import * as OS from "node:os";
+
 import { contextBridge, ipcRenderer } from "electron";
 
 import type {
@@ -36,12 +38,14 @@ const DEV_ARTIFACTS_PROGRESS_CHANNEL = "diskhound:dev-artifacts-progress";
 const PERMANENT_DELETE_PROGRESS_CHANNEL = "diskhound:permanent-delete-progress";
 const SETTINGS_UPDATED_CHANNEL = "diskhound:settings-updated";
 const NAVIGATE_VIEW_CHANNEL = "diskhound:navigate-view";
+const WINDOW_SHOWN_CHANNEL = "diskhound:window-shown";
 
 const api: DiskhoundNativeApi = {
   platform,
   getDockerInventory: () => ipcRenderer.invoke("diskhound:docker-inventory"),
   cancelDockerInventory: () => ipcRenderer.invoke("diskhound:docker-cancel"),
   removeDockerImage: (id) => ipcRenderer.invoke("diskhound:docker-remove-image", id),
+  cpuCount: OS.availableParallelism(),
 
   // Scan
   pickRootPath: () => ipcRenderer.invoke("diskhound:pick-root"),
@@ -81,6 +85,7 @@ const api: DiskhoundNativeApi = {
   // Settings
   getSettings: () => ipcRenderer.invoke("diskhound:get-settings"),
   updateSettings: (settings) => ipcRenderer.invoke("diskhound:update-settings", settings),
+  setPowerEfficiency: (preset) => ipcRenderer.invoke("diskhound:set-power-efficiency", preset),
   getRecentScans: () => ipcRenderer.invoke("diskhound:get-recent-scans"),
 
   // Monitoring
@@ -124,6 +129,8 @@ const api: DiskhoundNativeApi = {
     ipcRenderer.invoke("diskhound:cancel-dev-artifacts-rescan", rootPath),
   forgetDevArtifactPaths: (rootPath, paths) =>
     ipcRenderer.invoke("diskhound:forget-dev-artifact-paths", rootPath, paths),
+  checkGitRepo: (checkoutPath) =>
+    ipcRenderer.invoke("diskhound:check-git-repo", checkoutPath),
   onDevArtifactsProgress: (listener) => {
     const wrapped = (_event: Electron.IpcRendererEvent, progress: DevArtifactsRescanProgress) => {
       listener(progress);
@@ -175,7 +182,7 @@ const api: DiskhoundNativeApi = {
   easyMoveElevated: (sourcePath, destinationDir) => ipcRenderer.invoke("diskhound:easy-move-elevated", sourcePath, destinationDir),
   easyMoveBack: (recordId) => ipcRenderer.invoke("diskhound:easy-move-back", recordId),
   getEasyMoves: () => ipcRenderer.invoke("diskhound:get-easy-moves"),
-  verifyEasyMoves: () => ipcRenderer.invoke("diskhound:verify-easy-moves"),
+  verifyEasyMoves: (options) => ipcRenderer.invoke("diskhound:verify-easy-moves", options),
   pickMoveDestination: () => ipcRenderer.invoke("diskhound:pick-move-destination"),
 
   // Theme
@@ -203,6 +210,14 @@ const api: DiskhoundNativeApi = {
   // Tray
   minimizeToTray: () => ipcRenderer.send("diskhound:minimize-to-tray"),
   quitApp: () => ipcRenderer.send("diskhound:quit-app"),
+  isWindowShown: () => ipcRenderer.invoke("diskhound:is-window-shown"),
+  onWindowShownChanged: (listener) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, shown: boolean) => {
+      listener(shown);
+    };
+    ipcRenderer.on(WINDOW_SHOWN_CHANNEL, wrapped);
+    return () => { ipcRenderer.removeListener(WINDOW_SHOWN_CHANNEL, wrapped); };
+  },
 
   // Events
   onScanSnapshot: (listener) => {

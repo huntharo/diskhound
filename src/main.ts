@@ -1,6 +1,7 @@
 import { DockerService } from "./docker/inventory";
 import * as FS from "node:fs/promises";
 import * as FS_SYNC from "node:fs";
+import * as OS from "node:os";
 import * as Path from "node:path";
 import { getHeapStatistics } from "node:v8";
 import { Worker } from "node:worker_threads";
@@ -28,6 +29,7 @@ import {
   type AppSettings,
   type DevArtifactReport,
   type DevBranch,
+  type DevGitRepoInfo,
   type DiskIoSnapshot,
   type FullDiffStatus,
   type MonitoringSnapshot,
@@ -36,8 +38,10 @@ import {
   type PermanentDeleteProgress,
   type ScanEngine,
   type ScanFileRecord,
+  type ScanDiffResult,
   type ScanOptions,
   type ScanSnapshot,
+  type StorageStats,
   ALLOCATED_SIZE_SEMANTICS,
   hardlinkAccountingCompatible,
   indexUsesAllocatedSize,
@@ -51,18 +55,21 @@ import {
   type UpdateStatus,
   type WorkerToMainMessage,
 } from "./shared/contracts";
+import { platformTerminology } from "./shared/platformTerminology";
+import { isPowerEfficiency, powerEfficiencyWorkers } from "./shared/powerEfficiency";
 import {
   checkDiskDeltas,
   flushDiskMonitor,
   getDiskDeltaHistory,
-  getDiskSpace,
   getLastFullScanAt,
   getMonitoringSnapshot,
+  getRecentDiskSpace,
   initDiskMonitor,
   markFullScan,
   startDiskMonitoring,
 } from "./shared/diskMonitor";
 import { readDevBranch } from "./shared/devBranch";
+import { annotateGitRepos, checkGitRepo } from "./shared/gitRepo";
 import { getStorageAccounting } from "./shared/macStorageAccounting";
 import { createScanSnapshotStore, type SnapshotWriteOptions } from "./shared/scanStore";
 import { createAffinityEnforcer, upsertAffinityRule } from "./shared/affinityEnforcer";
@@ -129,8 +136,10 @@ import {
   runFolderTreeWorker,
 } from "./shared/folderTreeWorkerRuntime";
 import {
+  estimateTreeHeapBytes,
   MAX_HEAP_FRACTION_DURING_LOAD,
   planFolderTreeLoad,
+  treeHeapBudgetBytes,
   type FolderTreeLoadPlan,
 } from "./shared/folderTreeLoadPlan";
 import { loadFolderTreeSidecar } from "./shared/folderTreeSidecarLoad";
@@ -152,7 +161,6 @@ import {
 } from "./shared/devArtifactsWorkerRuntime";
 import {
   deleteFullDiffCachesForScan,
-  hasFullDiffCache,
   initFullDiffCacheStore,
 } from "./shared/fullDiffCacheStore";
 import { createTreemapCache } from "./shared/treemapCache";
@@ -188,6 +196,9 @@ const SETTINGS_UPDATED_CHANNEL = "diskhound:settings-updated";
  *  and switches its active tab in response. Powers the System
  *  Widget's click-through tiles. */
 const NAVIGATE_VIEW_CHANNEL = "diskhound:navigate-view";
+/** Push from main to a window's renderer when that window is hidden,
+ *  shown, minimized or restored. See `reportWindowShown`. */
+const WINDOW_SHOWN_CHANNEL = "diskhound:window-shown";
 
 const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
 const rendererEntryUrl = process.env.VITE_DEV_SERVER_URL;
@@ -287,9 +298,34 @@ app.commandLine.appendSwitch("enable-zero-copy");
 // delivery for seconds at a time (Chromium aggressively throttles
 // hidden or occluded windows). We want progress heartbeats and the
 // [memory] interval to keep ticking regardless of focus state.
+//
+// These also keep `document.visibilityState` "visible" in a window
+// hidden to the tray (seen on macOS), so the renderer can't tell it
+// is hidden. `reportWindowShown` tells it instead.
 app.commandLine.appendSwitch("disable-renderer-backgrounding");
 app.commandLine.appendSwitch("disable-background-timer-throttling");
 app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
+
+function isWindowShown(win: BrowserWindow): boolean {
+  return win.isVisible() && !win.isMinimized();
+}
+
+/**
+ * Tells a window's renderer whenever it is hidden, shown, minimized or
+ * restored. The renderer pauses its pollers while the window can't be
+ * seen: several start a process here on every tick (df or PowerShell,
+ * the process sampler, nvidia-smi), which would otherwise run for days
+ * from the tray.
+ */
+function reportWindowShown(win: BrowserWindow): void {
+  const report = () => {
+    if (!win.isDestroyed()) win.webContents.send(WINDOW_SHOWN_CHANNEL, isWindowShown(win));
+  };
+  win.on("show", report);
+  win.on("hide", report);
+  win.on("minimize", report);
+  win.on("restore", report);
+}
 
 // Raise V8's old-generation heap ceiling for the main process from the
 // default ~4 GB to 8 GB. On big drives (1M+ directories) the post-scan
@@ -911,6 +947,12 @@ void (async () => {
     );
   } catch { /* non-fatal */ }
 
+  // Settings → Storage's last sum; see get-storage-stats.
+  let storageStatsCache: { at: number; historyKey: string; stats: Promise<StorageStats> } | null = null;
+  const invalidateStorageStats = () => {
+    storageStatsCache = null;
+  };
+
   // Sweep orphan pending-* index files left behind by crashed scans.
   // Done in the background so app startup isn't delayed; if it's
   // long-running (rare — there are usually <10 such files), the
@@ -934,6 +976,7 @@ void (async () => {
         } catch { /* skip */ }
       }
       if (removed > 0) {
+        invalidateStorageStats();
         writeCrashLog("storage-cleanup", `startup sweep: pruned ${removed} orphan pending-* files, freed ${bytesFreed} bytes`);
       }
     } catch { /* directory missing, fine */ }
@@ -1004,6 +1047,7 @@ void (async () => {
   const forgetPrunedScan = (prunedId: string) => {
     treemapCache.invalidateScan(prunedId);
     invalidateFolderTree(prunedId);
+    forgetScanCaches(prunedId);
   };
 
   const buildRunningSnapshot = (
@@ -1111,7 +1155,8 @@ void (async () => {
         // Record in recent scans, and auto-seed defaultRootPath so monitoring
         // has a target to rescan without the user having to set one manually.
         if (settings && message.snapshot.rootPath) {
-          void settingsStore!.set(settingsWithRecentScan(settings, message.snapshot, session.trigger));
+          void settingsStore!.update((current) =>
+            settingsWithRecentScan(current, message.snapshot, session.trigger));
         }
 
         if (settings?.notifications.scanComplete) {
@@ -1326,6 +1371,12 @@ void (async () => {
       ? undefined
       : getScanHistory(rootPath).find((entry) => entry.filesVisited > 0)?.filesVisited;
 
+    // Power Efficiency, read here so a new choice reaches the next scan
+    // and never the one already running.
+    const cpus = OS.availableParallelism();
+    const powerEfficiency = settingsStore?.get().scanning.powerEfficiency;
+    const workers = powerEfficiency ? powerEfficiencyWorkers(powerEfficiency, cpus) : undefined;
+
     // Buffer for messages that arrive before the session is fully wired
     const earlyMessages: WorkerToMainMessage[] = [];
     let earlyErrors: Error[] = [];
@@ -1341,6 +1392,7 @@ void (async () => {
         expectedTotalFiles,
         folderTreeOutput: tempFolderTreePath,
         devArtifactsOutput: tempDevArtifactsPath,
+        workers,
       },
       {
         onMessage: (message) => {
@@ -1721,7 +1773,9 @@ void (async () => {
     const history = getScanHistory(rootPath);
     const latest = history[0];
     if (!latest) return null;
-    return await loadHistoricalSnapshot(latest.id);
+    // Through the snapshot cache: a drive switch re-reads nothing, and
+    // Overview's treemap and latest diff reuse this read.
+    return await loadHistoricalSnapshotCached(latest.id);
   });
 
   // File icon cache keyed by extension (case-insensitive). Most files share
@@ -1755,6 +1809,7 @@ void (async () => {
   // refresh requests so we don't stack PowerShell invocations.
   let memoryCache: SystemMemorySnapshot | null = null;
   let memorySamplePromise: Promise<SystemMemorySnapshot> | null = null;
+  let memorySampleStartedAt = Number.NEGATIVE_INFINITY;
   // Same pattern for GPU sampling. Get-Counter is the slow one — we
   // dedupe concurrent refreshes and cache between them so the UI tab
   // switch is instant.
@@ -1775,6 +1830,7 @@ void (async () => {
 
   const refreshMemorySample = (): Promise<SystemMemorySnapshot> => {
     if (memorySamplePromise) return memorySamplePromise;
+    memorySampleStartedAt = Date.now();
     memorySamplePromise = sampleSystemMemory()
       .then((snap) => {
         memoryCache = snap;
@@ -1792,6 +1848,18 @@ void (async () => {
       });
     return memorySamplePromise;
   };
+
+  // Persistent rules must also see new/reset processes while every window
+  // is hidden. Reuse UI samples when fresh, and do no background sampling
+  // unless Windows has an enabled rule. This preserves the widget's former
+  // 4 s enforcement cadence without keeping hidden renderer polls alive.
+  const affinityInterval = setInterval(() => {
+    if (process.platform !== "win32" || isQuitting) return;
+    if (!settingsStore?.get().affinityRules.some((rule) => rule.enabled)) return;
+    if (Date.now() - memorySampleStartedAt < 4_000) return;
+    void refreshMemorySample().catch(() => { /* retry on the next tick */ });
+  }, 4_000);
+  affinityInterval.unref?.();
 
   ipcMain.handle("diskhound:get-memory-snapshot", () => refreshMemorySample());
 
@@ -1949,17 +2017,19 @@ void (async () => {
   // the counts it hasn't saved yet, and saves keep its values.
   ipcMain.handle("diskhound:get-affinity-rules", () => affinityEnforcer.rules());
   ipcMain.handle("diskhound:upsert-affinity-rule", async (_event, rule: AffinityRule) => {
-    const settings = settingsStore?.get();
-    if (!settings) return { ok: false, message: "Settings unavailable" };
-    const next = upsertAffinityRule(settings.affinityRules, rule);
-    await settingsStore?.set({ ...settings, affinityRules: next });
+    if (!settingsStore) return { ok: false, message: "Settings unavailable" };
+    await settingsStore.update((current) => ({
+      ...current,
+      affinityRules: upsertAffinityRule(current.affinityRules, rule),
+    }));
     return { ok: true };
   });
   ipcMain.handle("diskhound:delete-affinity-rule", async (_event, id: string) => {
-    const settings = settingsStore?.get();
-    if (!settings) return { ok: false, message: "Settings unavailable" };
-    const next = settings.affinityRules.filter((r) => r.id !== id);
-    await settingsStore?.set({ ...settings, affinityRules: next });
+    if (!settingsStore) return { ok: false, message: "Settings unavailable" };
+    await settingsStore.update((current) => ({
+      ...current,
+      affinityRules: current.affinityRules.filter((candidate) => candidate.id !== id),
+    }));
     return { ok: true };
   });
 
@@ -2044,7 +2114,7 @@ void (async () => {
       await FS.lstat(resolved);
     } catch {
       writeCrashLog("trash", `missing path=${resolved}`);
-      return { ok: false, message: "Nothing at this path to move to the Recycle Bin." };
+      return { ok: false, message: `Nothing at this path to move to the ${platformTerminology(process.platform).trash}.` };
     }
     try {
       await shell.trashItem(resolved);
@@ -2055,10 +2125,10 @@ void (async () => {
     }
     try {
       await FS.lstat(resolved);
-      writeCrashLog("trash", `noop path=${resolved} still on disk after Recycle Bin`);
+      writeCrashLog("trash", `noop path=${resolved} still on disk after trashItem`);
       return {
         ok: false,
-        message: "The Recycle Bin did not take this folder — it is still on disk.",
+        message: `The ${platformTerminology(process.platform).trash} did not take this folder — it is still on disk.`,
       };
     } catch {
       writeCrashLog("trash", `ok path=${resolved}`);
@@ -2209,6 +2279,19 @@ void (async () => {
     handleUpdateSettingsChanged?.(previousSettings, normalizedSettings);
   });
 
+  // Only the one field, so a renderer's older copy of the rest can't
+  // overwrite it. Nothing restarts: createPreferredScanSession reads it
+  // when the next scan starts.
+  ipcMain.handle("diskhound:set-power-efficiency", async (_event, preset: unknown) => {
+    if (!isPowerEfficiency(preset)) {
+      throw new Error(`Unknown Power Efficiency preset: ${String(preset)}`);
+    }
+    return settingsStore!.update((current) => ({
+      ...current,
+      scanning: { ...current.scanning, powerEfficiency: preset },
+    }));
+  });
+
   ipcMain.handle("diskhound:get-recent-scans", () => settingsStore!.get().recentScans ?? []);
 
   // ── IPC: Easy Move ───────────────────────────────────────
@@ -2305,7 +2388,11 @@ void (async () => {
   });
 
   ipcMain.handle("diskhound:get-easy-moves", () => getEasyMoves());
-  ipcMain.handle("diskhound:verify-easy-moves", () => verifyEasyMoves());
+  // A tab mount reuses a verification up to 10 minutes old; the Verify
+  // button forces a fresh lstat and stat of every move.
+  const EASY_MOVE_VERIFY_REUSE_MS = 10 * 60_000;
+  ipcMain.handle("diskhound:verify-easy-moves", (_event, options?: { force?: boolean }) =>
+    verifyEasyMoves({ maxAgeMs: options?.force ? 0 : EASY_MOVE_VERIFY_REUSE_MS }));
 
   ipcMain.handle("diskhound:pick-move-destination", async () => {
     if (!mainWindow) return null;
@@ -2327,7 +2414,21 @@ void (async () => {
   // time. We keep up to 8 parsed snapshots in memory (~8-16 MB worst case)
   // — older entries get evicted on insert.
   const snapshotCache = new Map<string, ScanSnapshot>();
+  const snapshotInflight = new Map<string, Promise<ScanSnapshot | null>>();
   const SNAPSHOT_CACHE_LIMIT = 8;
+  // compute-scan-diff results, so a remounted Changes tab can click
+  // back through a 30-scan history without re-reading snapshots the
+  // 8-entry cache above let go. Bounded by delta rows too: a diff of
+  // two top-N lists is at most ~15k rows (~3 MB).
+  const scanDiffCache = new Map<string, ScanDiffResult>();
+  const SCAN_DIFF_CACHE_LIMIT = 32;
+  const SCAN_DIFF_CACHE_MAX_ROWS = 200_000;
+  let scanDiffCacheRows = 0;
+  const scanDiffRows = (diff: ScanDiffResult) =>
+    diff.fileDeltas.length + diff.directoryDeltas.length + diff.extensionDeltas.length;
+  // get-full-diff-status answers each scan's index size. An index never
+  // changes once written, so its size is kept until the scan is pruned.
+  const indexBytesCache = new Map<string, number>();
   const loadHistoricalSnapshotCached = async (id: string): Promise<ScanSnapshot | null> => {
     const cached = snapshotCache.get(id);
     if (cached) {
@@ -2336,20 +2437,80 @@ void (async () => {
       snapshotCache.set(id, cached);
       return cached;
     }
-    const snap = await loadHistoricalSnapshot(id);
-    if (snap) {
-      if (snapshotCache.size >= SNAPSHOT_CACHE_LIMIT) {
-        const firstKey = snapshotCache.keys().next().value;
-        if (firstKey) snapshotCache.delete(firstKey);
+    // Overview asks for the treemap and the latest diff at once, and
+    // both start from the latest snapshot: read it once.
+    const inflight = snapshotInflight.get(id);
+    if (inflight) return inflight;
+    const pending = loadHistoricalSnapshot(id).then((snap) => {
+      if (snap) {
+        if (snapshotCache.size >= SNAPSHOT_CACHE_LIMIT) {
+          const firstKey = snapshotCache.keys().next().value;
+          if (firstKey) snapshotCache.delete(firstKey);
+        }
+        snapshotCache.set(id, snap);
       }
-      snapshotCache.set(id, snap);
+      return snap;
+    }).finally(() => {
+      snapshotInflight.delete(id);
+    });
+    snapshotInflight.set(id, pending);
+    return pending;
+  };
+  const computeScanDiffCached = async (baselineId: string, currentId: string): Promise<ScanDiffResult | null> => {
+    const key = `${baselineId}::${currentId}`;
+    const cached = scanDiffCache.get(key);
+    if (cached) {
+      scanDiffCache.delete(key);
+      scanDiffCache.set(key, cached);
+      return cached;
     }
-    return snap;
+    const [baseline, current] = await Promise.all([
+      loadHistoricalSnapshotCached(baselineId),
+      loadHistoricalSnapshotCached(currentId),
+    ]);
+    if (!baseline || !current) return null;
+    // Another request for this pair may have filled the cache while we
+    // awaited the snapshots. Charge its rows only once.
+    const concurrent = scanDiffCache.get(key);
+    if (concurrent) {
+      scanDiffCache.delete(key);
+      scanDiffCache.set(key, concurrent);
+      return concurrent;
+    }
+    const diff = computeDiff(baseline, current, baselineId, currentId);
+    scanDiffCache.set(key, diff);
+    scanDiffCacheRows += scanDiffRows(diff);
+    while (
+      scanDiffCache.size > 1
+      && (scanDiffCache.size > SCAN_DIFF_CACHE_LIMIT || scanDiffCacheRows > SCAN_DIFF_CACHE_MAX_ROWS)
+    ) {
+      const [oldestKey, oldest] = scanDiffCache.entries().next().value!;
+      scanDiffCache.delete(oldestKey);
+      scanDiffCacheRows -= scanDiffRows(oldest);
+    }
+    return diff;
+  };
+  /** Drops what the Changes caches hold for a scan that is pruned or cleared. */
+  const forgetScanDiffs = (id: string) => {
+    snapshotCache.delete(id);
+    indexBytesCache.delete(id);
+    for (const [key, diff] of scanDiffCache) {
+      if (diff.baselineId === id || diff.currentId === id) {
+        scanDiffCache.delete(key);
+        scanDiffCacheRows -= scanDiffRows(diff);
+      }
+    }
+    fullDiffLoader.forgetScan(id);
   };
   const getIndexBytes = async (id: string): Promise<number | null> => {
+    const cached = indexBytesCache.get(id);
+    if (cached !== undefined) return cached;
     try {
       const stat = await FS.stat(indexFilePath(id));
-      return stat.isFile() ? stat.size : null;
+      if (!stat.isFile()) return null;
+      // Only a size is kept: a missing index may still be renamed into place.
+      indexBytesCache.set(id, stat.size);
+      return stat.size;
     } catch {
       return null;
     }
@@ -2364,14 +2525,8 @@ void (async () => {
     void fullDiffLoader.warmLatest(rootPath);
   };
 
-  ipcMain.handle("diskhound:compute-scan-diff", async (_event, baselineId: string, currentId: string) => {
-    const [baseline, current] = await Promise.all([
-      loadHistoricalSnapshotCached(baselineId),
-      loadHistoricalSnapshotCached(currentId),
-    ]);
-    if (!baseline || !current) return null;
-    return computeDiff(baseline, current, baselineId, currentId);
-  });
+  ipcMain.handle("diskhound:compute-scan-diff", (_event, baselineId: string, currentId: string) =>
+    computeScanDiffCached(baselineId, currentId));
 
   ipcMain.handle("diskhound:get-full-diff-status", async (
     _event,
@@ -2381,7 +2536,7 @@ void (async () => {
   ): Promise<FullDiffStatus> => {
     const normalizedLimit = normalizeDiffLimit(limit);
     const [cached, baselineIndexBytes, currentIndexBytes] = await Promise.all([
-      hasFullDiffCache(baselineId, currentId, normalizedLimit),
+      fullDiffLoader.hasOnDisk(baselineId, currentId, normalizedLimit),
       getIndexBytes(baselineId),
       getIndexBytes(currentId),
     ]);
@@ -2490,17 +2645,22 @@ void (async () => {
    * In-memory cache of built folder trees, keyed by scan ID.
    *
    * Eviction policy: bounded both by scan count (at most N trees) AND
-   * by total parent-path entries across ALL trees. The entry cap is
-   * what actually protects the heap — a C:\ drive can produce a tree
-   * with 1M+ parent paths, and keeping two or three of those in
-   * memory runs the main process to a gigabyte+.
+   * by the heap all trees hold together, estimated as folderTreeLoadPlan
+   * does. The heap cap is what actually protects the process — a C:\
+   * drive can produce a tree with 1M+ parent paths — and it is the same
+   * budget one tree may use, so two or three drives stay loaded as long
+   * as together they fit in what one big drive may take. (A fixed
+   * 600k-entry cap used to evict down to one tree, so switching between
+   * two large drives re-read a ~50 MB sidecar on every switch.)
    *
    * LRU within the Map's insertion-order semantics (delete + set moves
    * the entry to the tail on access).
    */
   const FOLDER_TREE_MAX_SCANS = 3;
-  const FOLDER_TREE_MAX_TOTAL_ENTRIES = 600_000;
   const folderTreeCache: Map<string, FolderTree> = new Map();
+  /** Estimated heap per cached tree, and their sum. */
+  const folderTreeHeapBytes: Map<string, number> = new Map();
+  let folderTreeTotalHeapBytes = 0;
   const folderTreeInflight: Map<string, Promise<FolderTree>> = new Map();
   // Track which root each cached/inflight tree belongs to so we can
   // evict the PRIOR tree for root R the moment R gets a new scan.
@@ -2510,24 +2670,37 @@ void (async () => {
   const folderTreeRootByScanId: Map<string, string> = new Map();
   let folderTreeTotalEntries = 0;
 
+  /** Drops a cached tree and its share of the entry and heap totals. */
+  const dropCachedFolderTree = (id: string) => {
+    const tree = folderTreeCache.get(id);
+    if (!tree) return;
+    folderTreeCache.delete(id);
+    folderTreeTotalEntries = Math.max(0, folderTreeTotalEntries - tree.size);
+    folderTreeTotalHeapBytes = Math.max(0, folderTreeTotalHeapBytes - (folderTreeHeapBytes.get(id) ?? 0));
+    folderTreeHeapBytes.delete(id);
+  };
+
   const evictOldestFolderTree = (): boolean => {
     const oldest = folderTreeCache.keys().next().value;
     if (oldest === undefined) return false;
-    const tree = folderTreeCache.get(oldest);
-    folderTreeCache.delete(oldest);
-    folderTreeTotalEntries -= tree?.size ?? 0;
-    if (folderTreeTotalEntries < 0) folderTreeTotalEntries = 0;
+    dropCachedFolderTree(oldest);
     return true;
   };
 
   const insertFolderTree = (id: string, tree: FolderTree) => {
-    // Honour BOTH caps — scan count first, then total-entry pressure.
+    const heapBytes = estimateTreeHeapBytes(tree);
+    dropCachedFolderTree(id);
     folderTreeCache.set(id, tree);
+    folderTreeHeapBytes.set(id, heapBytes);
     folderTreeTotalEntries += tree.size;
+    folderTreeTotalHeapBytes += heapBytes;
+    // Honour BOTH caps — scan count first, then heap pressure. The
+    // tree just inserted always stays: the plan already let it in.
     while (folderTreeCache.size > FOLDER_TREE_MAX_SCANS) {
       if (!evictOldestFolderTree()) break;
     }
-    while (folderTreeTotalEntries > FOLDER_TREE_MAX_TOTAL_ENTRIES && folderTreeCache.size > 1) {
+    const heapBudget = treeHeapBudgetBytes(getHeapStatistics().heap_size_limit, folderTreeMaxHeapOverride);
+    while (folderTreeTotalHeapBytes > heapBudget && folderTreeCache.size > 1) {
       if (!evictOldestFolderTree()) break;
     }
   };
@@ -2682,6 +2855,19 @@ void (async () => {
   }
   /** Scans whose in-memory load hit the heap ceiling. Paged from then on. */
   const folderTreePagedScanIds = new Set<string>();
+  /**
+   * Scans whose tree build failed (a worker OOM, an unreadable index),
+   * and why. Folders shows the reason instead of starting another
+   * whole-index build on every click, and tries again after a while.
+   */
+  const folderTreeFailedAt = new Map<string, { at: number; message: string }>();
+  const FOLDER_TREE_RETRY_AFTER_MS = 10 * 60_000;
+  const recentFolderTreeFailure = (id: string) => {
+    const failed = folderTreeFailedAt.get(id);
+    return failed && Date.now() - failed.at < FOLDER_TREE_RETRY_AFTER_MS ? failed : null;
+  };
+  const folderTreeFailureMessage = (failed: { message: string }) =>
+    `DiskHound couldn't load this scan's folders (${failed.message}). It will try again in a few minutes, or rescan this drive to rebuild them.`;
   const ensureFolderTree = async (
     id: string,
     rootPath?: string,
@@ -2748,7 +2934,12 @@ void (async () => {
       // scanId hits the fast disk path. Errors logged, don't block.
       void writeFolderTreeSidecar(id, tree);
       return tree;
-    })().finally(() => {
+    })().catch((err: unknown) => {
+      if (!(err instanceof FolderTreeTooLargeError)) {
+        folderTreeFailedAt.set(id, { at: Date.now(), message: err instanceof Error ? err.message : String(err) });
+      }
+      throw err;
+    }).finally(() => {
       folderTreeInflight.delete(id);
     });
     folderTreeInflight.set(id, pending);
@@ -2756,12 +2947,8 @@ void (async () => {
   };
 
   const invalidateFolderTree = (id: string) => {
-    const tree = folderTreeCache.get(id);
-    if (tree) {
-      folderTreeCache.delete(id);
-      folderTreeTotalEntries -= tree.size;
-      if (folderTreeTotalEntries < 0) folderTreeTotalEntries = 0;
-    }
+    dropCachedFolderTree(id);
+    folderTreeFailedAt.delete(id);
     folderTreeInflight.delete(id);
     folderTreeRootByScanId.delete(id);
     folderTreePages.invalidateScan(id);
@@ -2908,6 +3095,8 @@ void (async () => {
 
   const lookupFolderNode = async (id: string, rootPath: string, key: string): Promise<FolderNodeLookup> => {
     folderTreeRootByScanId.set(id, normPath(rootPath));
+    const failed = recentFolderTreeFailure(id);
+    if (failed) return { unavailableMessage: folderTreeFailureMessage(failed) };
     try {
       if (folderTreeCache.has(id) || folderTreeInflight.has(id)) {
         const tree = await ensureFolderTree(id, rootPath);
@@ -2948,7 +3137,7 @@ void (async () => {
       caches: [folderTreeCache.size, folderTreeTotalEntries, pages.pages, treemapStats.entries, fullDiffEntries].join("/"),
       text: [
         describeMemoryUsage(mem),
-        `folderTree: ${folderTreeCache.size} trees, ${folderTreeTotalEntries.toLocaleString()} entries`,
+        `folderTree: ${folderTreeCache.size} trees, ${folderTreeTotalEntries.toLocaleString()} entries, ~${Math.round(folderTreeTotalHeapBytes / 1024 / 1024)} MB`,
         `folderTreePages: ${pages.pages} pages, ${pages.nodes.toLocaleString()} nodes, ~${Math.round(pages.heapBytes / 1024 / 1024)} MB`,
         `treemapCache: ${treemapStats.entries} entries, ${treemapStats.inflight} inflight`,
         `fullDiffMem: ${fullDiffEntries} entries`,
@@ -3099,7 +3288,8 @@ void (async () => {
           "folder-tree",
           err instanceof Error ? (err.stack ?? err.message) : String(err),
         );
-        return empty;
+        const failed = recentFolderTreeFailure(currentId);
+        return failed ? { ...empty, unavailableMessage: folderTreeFailureMessage(failed) } : empty;
       }
     },
   );
@@ -3107,12 +3297,7 @@ void (async () => {
   ipcMain.handle("diskhound:get-latest-diff", async (_event, rootPath: string) => {
     const pair = getLatestPair(rootPath);
     if (!pair) return null;
-    const [baseline, current] = await Promise.all([
-      loadHistoricalSnapshotCached(pair.baseline.id),
-      loadHistoricalSnapshotCached(pair.current.id),
-    ]);
-    if (!baseline || !current) return null;
-    return computeDiff(baseline, current, pair.baseline.id, pair.current.id);
+    return computeScanDiffCached(pair.baseline.id, pair.current.id);
   });
 
   // ── IPC: Monitoring ───────────────────────────────────────
@@ -3136,7 +3321,7 @@ void (async () => {
       defaultRootPath: settings?.scanning.defaultRootPath ?? "",
     };
   });
-  ipcMain.handle("diskhound:get-disk-space", () => getDiskSpace());
+  ipcMain.handle("diskhound:get-disk-space", () => getRecentDiskSpace());
   ipcMain.handle(
     "diskhound:get-storage-accounting",
     async (_event, targetPath: string, opts?: { fresh?: boolean }) => {
@@ -3194,15 +3379,44 @@ void (async () => {
     if (!current) return { hits: [], truncated: false, filesScanned: 0 };
     return searchIndexFile(indexFilePath(current.id), query);
   });
+  // Reports per scan, empty ones included: Overview and the Dev tab
+  // ask on every mount.
   const devArtifactCache = new Map<string, DevArtifactReport>();
   const devArtifactInflight = new Map<string, Promise<DevArtifactReport | null>>();
   const devRescanAbort = new Map<string, AbortController>();
+  // Scans whose sidecar load found no sidecar, and scans whose full
+  // load found nothing to classify or failed to. Both answer null from
+  // memory for a while, instead of listing scan-indexes and reading
+  // sidecars (or starting another classify worker) on every mount.
+  const devSidecarMissingAt = new Map<string, number>();
+  const devFullLoadEmptyAt = new Map<string, number>();
+  const DEV_ARTIFACT_NEGATIVE_TTL_MS = 10 * 60_000;
+  // Native can write a scan's Dev sidecar after Done (adoptTempDevSidecar
+  // waits 4 s for it), so "none" is only remembered for older scans.
+  const DEV_ARTIFACT_SETTLE_MS = 60_000;
+  const rememberDevNone = (misses: Map<string, number>, scan: { id: string; scannedAt: number }) => {
+    if (Date.now() - scan.scannedAt >= DEV_ARTIFACT_SETTLE_MS) misses.set(scan.id, Date.now());
+  };
+  const recentDevNone = (misses: Map<string, number>, scanId: string) => {
+    const at = misses.get(scanId);
+    return at !== undefined && Date.now() - at < DEV_ARTIFACT_NEGATIVE_TTL_MS;
+  };
+  // Remotes of each `git-repo` row, keyed by its `.git` path. Read once
+  // per repo per run; a rebuilt report (forget, tab switch) reads none.
+  const devGitInfo = new Map<string, DevGitRepoInfo>();
+  const setDevReport = async (scanId: string, report: DevArtifactReport) => {
+    const annotated = await annotateGitRepos(report, devGitInfo);
+    devArtifactCache.set(scanId, annotated);
+    devSidecarMissingAt.delete(scanId);
+    devFullLoadEmptyAt.delete(scanId);
+    return annotated;
+  };
 
   const loadDevReport = (scanId: string, scanRoot: string, previousId?: string) =>
     loadDevArtifactReport(
       devArtifactsSidecarPath(scanId),
       scanRoot,
-      listPendingDevArtifactSidecars(),
+      listPendingDevArtifactSidecars,
       previousId ? devArtifactsSidecarPath(previousId) : null,
     );
 
@@ -3212,13 +3426,21 @@ void (async () => {
     if (!current) return null;
     const cached = devArtifactCache.get(current.id);
     if (cached) return cached;
+    if (recentDevNone(options?.sidecarOnly ? devSidecarMissingAt : devFullLoadEmptyAt, current.id)) {
+      return null;
+    }
 
     const loadKey = `${current.id}:load`;
     let loadPromise = devArtifactInflight.get(loadKey);
+    if (!loadPromise && recentDevNone(devSidecarMissingAt, current.id)) {
+      // Overview's sidecar-only ask just found none: go straight to classifying.
+      loadPromise = Promise.resolve(null);
+    }
     if (!loadPromise) {
       loadPromise = loadDevReport(current.id, rootPath, history[1]?.id)
         .then((report) => {
-          if (report && report.artifacts.length > 0) devArtifactCache.set(current.id, report);
+          if (report) return setDevReport(current.id, report);
+          rememberDevNone(devSidecarMissingAt, current);
           return report;
         })
         .catch((err) => {
@@ -3256,7 +3478,10 @@ void (async () => {
       // sidecar in a worker — never stream the 7M-file index, and
       // never walk 1M+ folder-tree entries on the main thread.
       const treePath = folderTreeSidecarPath(current.id);
-      if (!FS_SYNC.existsSync(treePath)) return null;
+      if (!FS_SYNC.existsSync(treePath)) {
+        rememberDevNone(devFullLoadEmptyAt, current);
+        return null;
+      }
 
       writeCrashLog("dev-artifacts-classify", `scanId=${current.id} via folder-tree worker`);
       const classified = await runDevArtifactsClassifyWorker(
@@ -3268,13 +3493,13 @@ void (async () => {
         },
         { workerPath: devArtifactsWorkerEntry },
       );
-      if (classified.artifacts.length > 0) devArtifactCache.set(current.id, classified);
-      return classified;
+      return setDevReport(current.id, classified);
     })().catch((err) => {
       writeCrashLog(
         "dev-artifacts",
         err instanceof Error ? (err.stack ?? err.message) : String(err),
       );
+      rememberDevNone(devFullLoadEmptyAt, current);
       return null;
     }).finally(() => {
       devArtifactInflight.delete(current.id);
@@ -3304,10 +3529,7 @@ void (async () => {
     if (!sidecar) {
       writeCrashLog("dev-artifacts", `forget: no sidecar scanId=${current.id} paths=${list.length}`);
       if (!cached || list.length === 0) return cached ?? null;
-      const next = dropArtifactsFromReport(cached, list);
-      if (next.artifacts.length > 0) devArtifactCache.set(current.id, next);
-      else devArtifactCache.delete(current.id);
-      return next;
+      return setDevReport(current.id, dropArtifactsFromReport(cached, list));
     }
 
     const nextSidecar = list.length > 0 ? dropSidecarRoots(sidecar, list) : sidecar;
@@ -3320,9 +3542,7 @@ void (async () => {
       );
     }
     const previous = history[1] ? await readDevArtifactSidecar(devArtifactsSidecarPath(history[1].id)) : null;
-    const report = reportFromSidecar(nextSidecar, previous);
-    if (report.artifacts.length > 0) devArtifactCache.set(current.id, report);
-    else devArtifactCache.delete(current.id);
+    const report = await setDevReport(current.id, reportFromSidecar(nextSidecar, previous));
     writeCrashLog("dev-artifacts", `forgot ${list.length} tree(s) scanId=${current.id}`);
     return report;
   });
@@ -3335,6 +3555,8 @@ void (async () => {
     devRescanAbort.get(key)?.abort();
     const ac = new AbortController();
     devRescanAbort.set(key, ac);
+    // A rescan re-reads what is on disk, remotes included.
+    devGitInfo.clear();
     try {
       const report = await runDevArtifactsRescanWorker(
         {
@@ -3357,13 +3579,10 @@ void (async () => {
       if (latest && latest.id !== current.id) {
         const adopted = await loadDevReport(latest.id, rootPath, getScanHistory(rootPath)[1]?.id);
         if (adopted && adopted.artifacts.length > 0) {
-          devArtifactCache.set(latest.id, adopted);
-          return adopted;
+          return setDevReport(latest.id, adopted);
         }
       }
-      if (report.artifacts.length > 0) devArtifactCache.set(current.id, report);
-      else devArtifactCache.delete(current.id);
-      return report;
+      return setDevReport(current.id, report);
     } catch (err) {
       if (ac.signal.aborted) return null;
       writeCrashLog(
@@ -3374,6 +3593,21 @@ void (async () => {
     } finally {
       if (devRescanAbort.get(key) === ac) devRescanAbort.delete(key);
     }
+  });
+
+  // Just before the Dev tab offers to remove a checkout. Runs only on
+  // that click, in that one repo.
+  ipcMain.handle("diskhound:check-git-repo", async (_event, checkoutPath: unknown) => {
+    if (typeof checkoutPath !== "string" || !Path.isAbsolute(checkoutPath)) {
+      throw new Error("check-git-repo needs an absolute checkout path");
+    }
+    const check = await checkGitRepo(checkoutPath);
+    writeCrashLog(
+      "dev-artifacts",
+      `git check git=${check.gitAvailable} remotes=${check.remotes.length} unpushed=${check.unpushedCommits} `
+        + `changed=${check.changedFiles} stashes=${check.stashes} worktrees=${check.linkedWorktrees.length}`,
+    );
+    return check;
   });
 
   // ── IPC: Duplicate Detection ────────────────────────────
@@ -3611,7 +3845,39 @@ void (async () => {
   // so 20 scans of history was silently using 7 GB+ of disk before
   // v0.5.24 reduced the default to 7.
 
-  ipcMain.handle("diskhound:get-storage-stats", async () => {
+  // Opening Settings again reuses the last sum (storageStatsCache,
+  // declared before the startup sweep) until the scan history changes
+  // (a scan finished, or history was pruned or cleared), an orphan
+  // sweep removed files, or it is STORAGE_STATS_MAX_AGE_MS old. Never
+  // while a scan runs: its pending-* files are still growing.
+  const STORAGE_STATS_MAX_AGE_MS = 10 * 60_000;
+  const storageHistoryKey = () => getAllEntries().map((entry) => entry.id).join(",");
+
+  ipcMain.handle("diskhound:get-storage-stats", () => {
+    const historyKey = storageHistoryKey();
+    const cached = storageStatsCache;
+    if (
+      activeScans.size === 0
+      && cached
+      && cached.historyKey === historyKey
+      && Date.now() - cached.at < STORAGE_STATS_MAX_AGE_MS
+    ) {
+      return cached.stats;
+    }
+    const stats = computeStorageStats();
+    storageStatsCache = activeScans.size === 0 ? { at: Date.now(), historyKey, stats } : null;
+    return stats;
+  });
+
+  /** Drops what main caches in memory about a scan that was pruned or cleared. */
+  const forgetScanCaches = (id: string) => {
+    forgetScanDiffs(id);
+    devArtifactCache.delete(id);
+    devSidecarMissingAt.delete(id);
+    devFullLoadEmptyAt.delete(id);
+  };
+
+  const computeStorageStats = async (): Promise<StorageStats> => {
     const userData = app.getPath("userData");
     const indexesDir = Path.join(userData, "scan-indexes");
     const historyDir = Path.join(userData, "scan-history");
@@ -3664,7 +3930,7 @@ void (async () => {
       orphanPendingCount: indexes.orphanPending.count,
       orphanPendingBytes: indexes.orphanPending.bytes,
     };
-  });
+  };
 
   /**
    * Wipe every scan-history snapshot, every scan-indexes file
@@ -3695,6 +3961,7 @@ void (async () => {
       try { await deleteFolderTreeSidecar(id); } catch { /* ok */ }
       try { await deleteIndex(id); } catch { /* ok */ }
       try { deleteFullDiffCachesForScan(id); } catch { /* ok */ }
+      forgetScanCaches(id);
     }
 
     // Step 4: nuke EVERY file in scan-indexes/ as a belt-and-suspenders
@@ -3758,6 +4025,7 @@ void (async () => {
       }
     } catch { /* directory missing */ }
     if (removed > 0) {
+      invalidateStorageStats();
       writeCrashLog("storage-cleanup", `pruned ${removed} orphan pending-* files, freed ${bytesFreed} bytes`);
     }
     return { removed, bytesFreed };
@@ -3782,6 +4050,11 @@ void (async () => {
 
   ipcMain.on("diskhound:minimize-to-tray", () => {
     mainWindow?.hide();
+  });
+
+  ipcMain.handle("diskhound:is-window-shown", (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    return win ? isWindowShown(win) : true;
   });
 
   ipcMain.on("diskhound:quit-app", () => {
@@ -4106,6 +4379,7 @@ void (async () => {
     }
 
     widgetWindowStateStore?.track(widgetWindow);
+    reportWindowShown(widgetWindow);
 
     await loadRenderer(widgetWindow, "widget");
 
@@ -4272,6 +4546,7 @@ void (async () => {
     // geometry changes. Persistence is debounced inside the store so
     // a slow drag doesn't generate a write per frame.
     windowStateStore?.track(mainWindow);
+    reportWindowShown(mainWindow);
 
     await loadRenderer(mainWindow, "app");
 
@@ -4573,6 +4848,7 @@ void (async () => {
 
   app.on("before-quit", () => {
     isQuitting = true;
+    clearInterval(affinityInterval);
     clearUpdateCheckTimer();
     for (const session of activeScans.values()) {
       void session.stop();

@@ -505,7 +505,6 @@ export function FileList({ snapshot, initialFilter, onRescan }: Props) {
         <SortableHeader field="name" label="Name" current={sortField} dir={sortDir} onToggle={toggleSort} />
         <SortableHeader field="ext" label="Type" current={sortField} dir={sortDir} onToggle={toggleSort} align="center" />
         <SortableHeader field="age" label="Age" current={sortField} dir={sortDir} onToggle={toggleSort} align="right" />
-        <div className="file-actions-hdr" />
       </div>
 
       <div className="file-list-scroll" ref={listRef} tabIndex={0}>
@@ -600,6 +599,7 @@ function SortableHeader({ field, label, title, current, dir, onToggle, align }: 
   return (
     <button
       className={`file-col-btn ${isActive ? "active" : ""}`}
+      data-field={field}
       title={title}
       style={align ? { textAlign: align, justifyContent: align === "right" ? "flex-end" : align === "center" ? "center" : "flex-start" } : undefined}
       onClick={() => onToggle(field)}
@@ -664,7 +664,7 @@ function FileRow(props: {
       </div>
       <div className="file-ext">{file.extension}</div>
       <div className="file-age">{humanAge(file.modifiedAt)}</div>
-      <div className="file-actions">
+      <div className="file-actions hover-actions">
         <button
           className="action-btn"
           disabled={destructiveDisabled}

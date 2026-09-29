@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { linkSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 
 import { expect, test } from "./fixtures/electron-app";
 import { openTab, scanFolderFromPicker } from "./fixtures/steps";
@@ -54,9 +54,34 @@ async function findOneDuplicateGroup(page: Page) {
   // Hashing waits on the index stream, slow on a cold Windows runner.
   await expect(page.locator(".duplicates-title")).toHaveText("1 duplicate group", { timeout: 45_000 });
   const group = page.locator(".duplicate-group");
-  await group.locator(".duplicate-group-header").click();
+  const toggle = group.getByRole("button", { name: "Copies of", exact: false });
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expectChevronLeadsHeader(group);
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
   await expect(group.locator(".duplicate-file-row").first()).toBeVisible();
+  await expectChevronLeadsHeader(group);
   return group;
+}
+
+/** The header is one line and the chevron leads it, before the
+ *  checkbox. A fixed-column grid once pushed the chevron onto a second
+ *  line whenever the shared-storage badge showed, which every group
+ *  here has. */
+async function expectChevronLeadsHeader(group: Locator) {
+  const header = group.locator(".duplicate-group-header");
+  await expect(header.locator(".duplicate-shared-badge")).toBeVisible();
+  const box = async (selector: string) => {
+    const b = await header.locator(selector).boundingBox();
+    expect(b, selector).not.toBeNull();
+    return { left: b!.x, right: b!.x + b!.width, middle: b!.y + b!.height / 2 };
+  };
+  const toggle = await box(".disclosure-toggle");
+  const checkbox = await box(".duplicate-group-checkbox");
+  expect(toggle.right).toBeLessThanOrEqual(checkbox.left);
+  for (const selector of [".duplicate-group-checkbox", ".duplicate-shared-badge", ".duplicate-group-actions"]) {
+    expect(Math.abs((await box(selector)).middle - toggle.middle), selector).toBeLessThan(2);
+  }
 }
 
 test("lists a hardlinked file once and counts it as freeing nothing", async ({ launch }, testInfo) => {
@@ -133,10 +158,21 @@ test.describe("APFS clones", () => {
       cloneDuplicateBytes: DATA_BYTES,
     });
 
+    const primary = handle.page.locator(".metrics-strip .metric").filter({
+      has: handle.page.locator(".metric-label", { hasText: "scanned file bytes" }),
+    });
+    await expect(primary).toContainText("4.5 MB");
+    await expect(primary).toHaveAttribute("title", /Shared clone blocks count for each file/);
+    const adjusted = handle.page.locator(".metrics-strip .metric").filter({
+      has: handle.page.locator(".metric-label", { hasText: "after known clone repeats" }),
+    });
+    await expect(adjusted).toContainText("≈ 2.4 MB");
+    await expect(adjusted).toHaveAttribute("title", /not physical disk usage/);
+
     const card = handle.page.getByRole("region", { name: "Space macOS is holding back" });
     await expect(card).toBeVisible();
     await expect(card.locator(".storage-card-col").nth(1)).toContainText("4.2 MB in 2 cloned files");
-    await expect(card).toContainText("The 4.5 MB total counts 2.1 MB of it more than once");
+    await expect(card).toContainText("The 4.5 MB scanned file bytes count 2.1 MB of known full clones more than once");
   });
 
   test("Dev Artifacts marks node_modules trees cloned from each other", async ({ launch }, testInfo) => {
@@ -152,7 +188,14 @@ test.describe("APFS clones", () => {
     const handle = await launch();
     await scanFolderFromPicker(handle, root);
     const { page } = handle;
-    await openTab(page, "Dev Artifacts");
+    const tile = page.locator(".metric-dev-tile");
+    await expect(tile).toContainText("0 B – 33.6 MB");
+    await expect(tile).toContainText("dev artifacts reclaimable");
+    await expect(tile).toContainText("101 MB listed");
+    await expect(tile).toHaveAttribute("title", /Local snapshots can delay/);
+    const tileValue = await tile.locator(".metric-value").textContent();
+    await tile.click();
+    await expect(page.locator(".tab-bar").getByRole("button", { name: "Dev Artifacts" })).toHaveClass(/active/);
 
     for (const tree of trees) {
       const row = page.locator(".dev-row").filter({ has: page.locator(`.dev-row-name[title="${tree}"]`) });
@@ -164,7 +207,7 @@ test.describe("APFS clones", () => {
     // 96 MB listed is 32 MB of blocks. No one tree frees any of it, and
     // deleting all three frees it once.
     const summary = page.locator(".dev-summary-net");
-    await expect(summary.locator(".changes-delta-big")).toHaveText("0 B – 33.6 MB");
+    await expect(summary.locator(".changes-delta-big")).toHaveText(tileValue ?? "");
     await expect(summary.locator(".changes-delta-label")).toHaveText("reclaimable on this scan · 101 MB listed");
     // The kind rail tells the same story as the header.
     const rail = page.locator(".dev-kind-rail");

@@ -195,9 +195,18 @@ async function seedHistoryAtCap(): Promise<string[]> {
       filesVisited: FILES,
       bytesSeen: 1e12 + i,
     }))!;
-    writeSyntheticIndex(indexFilePath(id), baseTree);
-    writeSyntheticFolderTreeSidecar(folderTreeSidecarPath(id), baseTree);
-    writeDevSidecar(devArtifactsSidecarPath(id));
+    const first = ids[0];
+    if (first) {
+      // The history entries have identical files. Linking keeps each index
+      // and sidecar at its realistic size without serializing them seven times.
+      FS.linkSync(indexFilePath(first), indexFilePath(id));
+      FS.linkSync(folderTreeSidecarPath(first), folderTreeSidecarPath(id));
+      FS.linkSync(devArtifactsSidecarPath(first), devArtifactsSidecarPath(id));
+    } else {
+      writeSyntheticIndex(indexFilePath(id), baseTree);
+      writeSyntheticFolderTreeSidecar(folderTreeSidecarPath(id), baseTree);
+      writeDevSidecar(devArtifactsSidecarPath(id));
+    }
     const previous = ids.at(-1);
     if (previous) {
       await writeFullDiffCache({
@@ -498,9 +507,10 @@ describe("scheduled USN rescan (Windows)", () => {
     expect(result).toMatchObject({ changed, recordCount: emitted });
   });
 
-  // Seeds seven 20k-file indexes/sidecars, then rewrites and commits another.
-  // This measures I/O counts, not speed. Windows CI can exceed the default 5s;
-  // a timed-out async rescan can also outlive teardown and affect the next test.
+  // CI measured 5,094 ms against Vitest's 5,000 ms default. The seven
+  // history entries share realistic 20,000-file indexes and sidecars, but
+  // a slow Windows run still spent 3,725 ms in the rescan alone. Let an
+  // async rescan finish before teardown, even on a loaded runner.
   it("rewrites the index when files under the root changed", async () => {
     await seedHistoryAtCap();
     await saveCursor();

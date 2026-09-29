@@ -156,7 +156,7 @@ function dirsEqual(a: string, b: string): boolean {
  */
 export function noteDirectoryRoot(acc: DevAcc, path: string, size: number, files: number): void {
   if (size <= 0) return;
-  const match = classifyArtifactPath(path);
+  const match = classifyArtifactPath(path, true);
   if (!match || !dirsEqual(match.root, path)) return;
   const existing = acc.artifacts.get(match.root);
   if (!existing || size > existing.size) {
@@ -237,7 +237,7 @@ function nearestProject(artifactPath: string, projects: Map<string, string>): st
 // Old sidecars can include name-only guesses and whole tool homes.
 // Do not keep displaying or refreshing those guesses after rules change.
 function keepArtifact(rec: DevArtifactRootRec): boolean {
-  const match = classifyArtifactPath(rec.path);
+  const match = classifyArtifactPath(rec.path, true);
   return match?.kind === rec.kind && dirsEqual(match.root, rec.path);
 }
 
@@ -341,7 +341,10 @@ export function reportFromSidecar(
   const artifacts: DevArtifact[] = [];
   for (const rec of current.roots) {
     if (!keepArtifact(rec)) continue;
-    const projectPath = nearestProject(rec.path, projects);
+    // A repo belongs to its checkout, marker file or not.
+    const projectPath = rec.kind === "git-repo"
+      ? dirnameOf(rec.path)
+      : nearestProject(rec.path, projects);
     const previousSize = prevByPath.get(rec.path) ?? null;
     artifacts.push({
       path: rec.path,
@@ -398,13 +401,14 @@ export async function readDevArtifactSidecar(filePath: string): Promise<DevArtif
 export async function resolveDevArtifactSidecar(
   destPath: string,
   scanRoot: string,
-  pendingPaths: string[],
+  /** A function is only called when `destPath` is missing, to skip listing the dir on the happy path. */
+  pendingPaths: string[] | (() => string[]),
 ): Promise<DevArtifactSidecar | null> {
   const existing = await readDevArtifactSidecar(destPath);
   if (existing) return existing;
 
   const wanted = normPath(scanRoot);
-  for (const pending of pendingPaths) {
+  for (const pending of typeof pendingPaths === "function" ? pendingPaths() : pendingPaths) {
     const sidecar = await readDevArtifactSidecar(pending);
     if (!sidecar || normPath(sidecar.rootPath) !== wanted) continue;
     try {
@@ -428,7 +432,7 @@ export async function resolveDevArtifactSidecar(
 export async function loadDevArtifactReport(
   destPath: string,
   scanRoot: string,
-  pendingPaths: string[],
+  pendingPaths: string[] | (() => string[]),
   previousSidecarPath?: string | null,
 ): Promise<DevArtifactReport | null> {
   const sidecar = await resolveDevArtifactSidecar(destPath, scanRoot, pendingPaths);

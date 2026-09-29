@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 
 import { FOLDER_CHILDREN_MAX_DIRS, type ScanFileRecord, type ScanSnapshot } from "../../shared/contracts";
+import { platformTerminology } from "../../shared/platformTerminology";
 import { protectedFolderDisplayName } from "../../shared/pathProtection";
 import type { ExcludedFolderActionBlocker } from "../../shared/pathProtection";
 import { formatScanRoot } from "../../shared/pathUtils";
 import { formatBytes, formatCount } from "../lib/format";
 import { useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
+import { DisclosureToggle } from "./Disclosure";
 import { FileIcon } from "./FileIcon";
 import { FOLDER_LOADING_STAGES, IndexLoadingPanel } from "./IndexLoadingPanel";
 import { PathContextMenu } from "./PathContextMenu";
@@ -351,7 +353,7 @@ export function FolderList({ snapshot, onStartScan, otherScannedRoots = [] }: Pr
         <button
           className="folder-open-btn"
           onClick={() => void runAction(currentPath, () => nativeApi.openPath(currentPath))}
-          title="Open in Explorer"
+          title={`Show in ${platformTerminology(nativeApi.platform).fileManager}`}
         >
           <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
             <path d="M1.5 3.5V11.5C1.5 12.05 1.95 12.5 2.5 12.5H11.5C12.05 12.5 12.5 12.05 12.5 11.5V5.5C12.5 4.95 12.05 4.5 11.5 4.5H7L5.5 2.5H2.5C1.95 2.5 1.5 2.95 1.5 3.5Z" />
@@ -433,16 +435,11 @@ export function FolderList({ snapshot, onStartScan, otherScannedRoots = [] }: Pr
                   onClick={() => setShowOtherFiles(!showOtherFiles)}
                 >
                   <div className="folder-row-icon folder-row-icon-other">
-                    <svg
-                      width="12" height="12" viewBox="0 0 12 12" fill="none"
-                      stroke="currentColor" strokeWidth="1.5"
-                      style={{
-                        transition: "transform 0.15s",
-                        transform: showOtherFiles ? "rotate(90deg)" : "rotate(0deg)",
-                      }}
-                    >
-                      <path d="M4.5 2L8.5 6L4.5 10" />
-                    </svg>
+                    <DisclosureToggle
+                      expanded={showOtherFiles}
+                      label="Files in this folder"
+                      onToggle={() => setShowOtherFiles(!showOtherFiles)}
+                    />
                   </div>
                   <div className="folder-row-info">
                     <div className="folder-row-name folder-row-name-other">

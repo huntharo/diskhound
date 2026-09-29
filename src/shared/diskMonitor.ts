@@ -117,6 +117,32 @@ export async function getDiskSpace(): Promise<DiskSpaceInfo[]> {
   return drives;
 }
 
+/**
+ * How old a reading `getRecentDiskSpace` may hand out. App's header,
+ * the drive picker and the System widget each poll every 10 s, out of
+ * phase, from two renderers; each poll ran df (PowerShell on Windows).
+ */
+export const SHARED_DISK_SPACE_MAX_AGE_MS = 5_000;
+
+let sharedDiskSpace: { at: number; drives: Promise<DiskSpaceInfo[]> } | null = null;
+
+/**
+ * getDiskSpace for the renderer's pollers: calls that arrive while a
+ * read is running, or within SHARED_DISK_SPACE_MAX_AGE_MS of its start,
+ * share it. The monitoring check still reads fresh.
+ */
+export function getRecentDiskSpace(read: () => Promise<DiskSpaceInfo[]> = getDiskSpace): Promise<DiskSpaceInfo[]> {
+  const shared = sharedDiskSpace;
+  if (shared && Date.now() - shared.at < SHARED_DISK_SPACE_MAX_AGE_MS) return shared.drives;
+  const drives = read();
+  const entry = { at: Date.now(), drives };
+  sharedDiskSpace = entry;
+  drives.catch(() => {
+    if (sharedDiskSpace === entry) sharedDiskSpace = null;
+  });
+  return drives;
+}
+
 /** `readDrives` is for tests. */
 export async function checkDiskDeltas(
   readDrives: () => Promise<DiskSpaceInfo[]> = getDiskSpace,
@@ -392,11 +418,69 @@ async function getLinuxDiskSpace(): Promise<DiskSpaceInfo[] | null> {
   return stdout === null ? null : parseLinuxDfOutput(stdout, Date.now());
 }
 
+interface CapacityRow {
+  filesystem: string;
+  fsType: string;
+  totalKb: number;
+  usedKb: number;
+  freeKb: number;
+  mount: string;
+}
+
+/**
+ * The mount that should stand for a filesystem df listed more than once.
+ * `/` wins, then the shallowest path, then the shorter string.
+ */
+function representativeMount(current: string, candidate: string): string {
+  if (current === candidate) return current;
+  if (current === "/") return current;
+  if (candidate === "/") return candidate;
+  const depth = (mount: string) => mount.split("/").filter(Boolean).length;
+  const currentDepth = depth(current);
+  const candidateDepth = depth(candidate);
+  if (currentDepth !== candidateDepth) return currentDepth < candidateDepth ? current : candidate;
+  return current.length <= candidate.length ? current : candidate;
+}
+
+/**
+ * One filesystem, one drive. btrfs prints a df row for every subvolume,
+ * and each row repeats the pool's size and free space. A default install
+ * lists `/`, `/home`, `/var/log`, and `/var/cache/pacman/pkg` as four
+ * copies of one disk, so a monitor that adds the rows up reports the
+ * free space once per mount. Bind mounts of the same source do the same.
+ * Keep the shortest mount — `/` when it is one of them — and leave a
+ * different source, such as a separate ext4 `/home` or a USB disk, as
+ * its own drive. Scanning `/` still walks the sibling subvolumes; this
+ * only changes the capacity list.
+ */
+function collapseSharedFilesystems(rows: CapacityRow[]): CapacityRow[] {
+  const groups = new Map<string, CapacityRow>();
+  const order: string[] = [];
+  for (const row of rows) {
+    const key = `${row.fsType.toLowerCase()}\0${row.filesystem}`;
+    const existing = groups.get(key);
+    if (!existing) {
+      groups.set(key, row);
+      order.push(key);
+      continue;
+    }
+    if (representativeMount(existing.mount, row.mount) === row.mount) {
+      groups.set(key, row);
+    }
+  }
+  const collapsed: CapacityRow[] = [];
+  for (const key of order) {
+    const row = groups.get(key);
+    if (row) collapsed.push(row);
+  }
+  return collapsed;
+}
+
 export function parseLinuxDfOutput(stdout: string, timestamp = Date.now()): DiskSpaceInfo[] {
-  const drives: DiskSpaceInfo[] = [];
+  const rows: CapacityRow[] = [];
 
   for (const row of parseDfRows(stdout, DF_ROW_WITH_TYPE)) {
-    const { fsType, totalKb, usedKb, freeKb, mount } = row;
+    const { filesystem, fsType, totalKb, usedKb, freeKb, mount } = row;
     // Skip snap-specific mount bind points (each installed snap shows
     // up as a squashfs loopback under /snap/<name>/<rev>).
     if (mount.startsWith("/snap")) continue;
@@ -411,13 +495,17 @@ export function parseLinuxDfOutput(stdout: string, timestamp = Date.now()): Disk
     // sysfs, cgroup, overlay, squashfs, fusectl, etc.) are not
     // user-scannable storage, so we drop them here.
     if (!REAL_FILESYSTEM_TYPES.has(fsType.toLowerCase())) continue;
+    if (!mount || totalKb <= 0) continue;
+    if (![totalKb, usedKb, freeKb].every(Number.isFinite)) continue;
 
-    // Returns null for zero-sized rows (empty tmpfs instances, broken
-    // mounts).
-    const disk = diskSpaceFromKb(mount, totalKb, usedKb, freeKb, timestamp);
-    if (disk) drives.push(disk);
+    rows.push({ filesystem, fsType, totalKb, usedKb, freeKb, mount });
   }
 
+  const drives: DiskSpaceInfo[] = [];
+  for (const row of collapseSharedFilesystems(rows)) {
+    const disk = diskSpaceFromKb(row.mount, row.totalKb, row.usedKb, row.freeKb, timestamp);
+    if (disk) drives.push(disk);
+  }
   return drives;
 }
 

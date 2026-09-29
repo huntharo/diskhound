@@ -1,5 +1,8 @@
 import { useEffect } from "preact/hooks";
 
+import { platformTerminology } from "../../shared/platformTerminology";
+import { nativeApi } from "../nativeApi";
+
 interface Props {
   open: boolean;
   onClose: () => void;
@@ -85,7 +88,7 @@ export function ShortcutHelp({ open, onClose }: Props) {
                       {item.keys.map((k, ki) => (
                         <span key={ki}>
                           {ki > 0 && <span className="shortcut-help-sep">+</span>}
-                          <kbd className="shortcut-help-key">{k}</kbd>
+                          <kbd className="shortcut-help-key">{k === "Ctrl" ? platformTerminology(nativeApi.platform).modifier : k}</kbd>
                         </span>
                       ))}
                     </div>

@@ -18,8 +18,11 @@ import {
   type DeletedPathRecord,
 } from "../lib/deletedPaths";
 import { basename, formatBytes, formatCount, formatElapsed, humanAge, relativeTime } from "../lib/format";
+import { overviewDevTileDisplay } from "../lib/devReclaimDisplay";
+import { overviewStorageTotal } from "../lib/overviewStorageTotal";
 import { useConfirmPermanentDelete, useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { saveLocalPreference } from "../lib/localPreference";
+import { useVisibleInterval } from "../lib/visiblePoll";
 import {
   buildTreemapComposition,
   colorForExtension,
@@ -33,6 +36,7 @@ import {
 } from "../lib/fileQuickFilters";
 import { nativeApi } from "../nativeApi";
 import { DEV_ARTIFACTS_UPDATED_EVENT } from "../lib/uiEvents";
+import { DisclosureChevron } from "./Disclosure";
 import { FileIcon } from "./FileIcon";
 import { StorageAccountingCard } from "./StorageAccountingCard";
 import { toast } from "./Toasts";
@@ -124,6 +128,7 @@ const DENSE_TREEMAP_LIMIT = 5_000;
 
 export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev, scanPercent, drives, onOpenDrive }: Props) {
   const { bytesSeen, filesVisited, directoriesVisited, skippedEntries } = snapshot;
+  const storageTotal = overviewStorageTotal(snapshot);
   // Live-ticking elapsed: during a running scan the snapshot only updates
   // ~5x/second via progress messages, so the "elapsed" metric would
   // freeze between ticks — users reported seeing "0.0s" stuck on screen.
@@ -131,11 +136,8 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
   // feels alive even when the scanner is mid-enumerate and hasn't
   // emitted a progress message yet.
   const [liveNow, setLiveNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (snapshot.status !== "running" || snapshot.startedAt === null) return;
-    const id = window.setInterval(() => setLiveNow(Date.now()), 250);
-    return () => window.clearInterval(id);
-  }, [snapshot.status, snapshot.startedAt]);
+  const ticking = snapshot.status === "running" && snapshot.startedAt !== null;
+  useVisibleInterval(() => setLiveNow(Date.now()), ticking ? 250 : null);
   const displayElapsedMs = snapshot.status === "running" && snapshot.startedAt !== null
     ? liveNow - snapshot.startedAt
     : snapshot.elapsedMs;
@@ -319,11 +321,18 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
       <MonitoringNudge />
       <div className="metrics-strip">
         <Metric
-          value={formatBytes(bytesSeen)}
-          label="on disk"
+          value={formatBytes(storageTotal.primaryBytes)}
+          label={storageTotal.primaryLabel}
           accent
-          title="Size on disk after sparse holes and filesystem compression"
+          title={storageTotal.primaryTitle}
         />
+        {storageTotal.adjustedBytes !== null && (
+          <Metric
+            value={`≈ ${formatBytes(storageTotal.adjustedBytes)}`}
+            label={storageTotal.adjustedLabel!}
+            title={storageTotal.adjustedTitle!}
+          />
+        )}
         <Metric value={formatCount(filesVisited)} label="files" />
         <Metric value={formatCount(directoriesVisited)} label="dirs" />
         <Metric value={formatCount(skippedEntries)} label="skipped" />
@@ -483,14 +492,7 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
                   onClick={() => setDominantExpanded((v) => !v)}
                   aria-expanded={dominantExpanded}
                 >
-                  <svg
-                    className="treemap-featured-chevron"
-                    width="10" height="10" viewBox="0 0 10 10"
-                    fill="none" stroke="currentColor" strokeWidth="1.5"
-                    style={{ transform: dominantExpanded ? "rotate(90deg)" : "rotate(0deg)" }}
-                  >
-                    <path d="M3.5 2L7 5L3.5 8" />
-                  </svg>
+                  <DisclosureChevron expanded={dominantExpanded} />
                   <div className="treemap-featured-title">
                     {treemapComposition.featuredFiles.length} dominant file{treemapComposition.featuredFiles.length === 1 ? "" : "s"}
                   </div>
@@ -940,20 +942,20 @@ function DevCleanupTile({ snapshot, onViewDev }: { snapshot: ScanSnapshot; onVie
   const display = dev
     ? mergeDiagLogHotspots(dev, snapshot.hottestDirectories ?? [])
     : null;
-  if (!display || display.totalBytes <= 0) return null;
-  const topKind = display.kindTotals[0]?.kind;
+  if (!display) return null;
+  const tile = overviewDevTileDisplay(display.artifacts);
+  if (!tile) return null;
   return (
     <button
       type="button"
       className="metric metric-dev-tile"
       onClick={() => onViewDev?.()}
-      title="Open Dev Artifacts to permanently delete worktrees, node_modules, build caches, and RDP traces"
+      title={tile.title}
     >
-      <span className="metric-value accent">{formatBytes(display.totalBytes)}</span>
-      <span className="metric-label">dev artifacts</span>
+      <span className="metric-value accent">{tile.value}</span>
+      <span className="metric-label">{tile.label}</span>
       <span className="metric-dev-meta">
-        {formatCount(display.projectCount)} proj
-        {topKind ? ` · ${formatCount(display.kindTotals[0]!.count)} trees` : ""}
+        {tile.secondary ?? `${formatCount(display.projectCount)} proj`}
       </span>
     </button>
   );

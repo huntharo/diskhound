@@ -8,7 +8,9 @@ import { saveLocalPreference } from "../lib/localPreference";
 import { reportPollFailure } from "../lib/pollFailure";
 import { processMetadataParts, processSearchText } from "../lib/processMetadata";
 import { squarify } from "../lib/treemap";
+import { useVisibleInterval } from "../lib/visiblePoll";
 import { nativeApi } from "../nativeApi";
+import { DisclosureToggle } from "./Disclosure";
 import { GpuView } from "./GpuView";
 import {
   ProcessHeatmap,
@@ -101,17 +103,11 @@ export function MemoryView() {
   // matches a rule, and the context menu uses it to decide between
   // "Pin rule…" and "Edit rule…".
   const [affinityRules, setAffinityRules] = useState<AffinityRule[]>([]);
-  useEffect(() => {
-    const refresh = () => {
-      nativeApi.getAffinityRules()
-        .then((rules) => setAffinityRules(rules))
-        .catch((error: unknown) => reportPollFailure("MemoryView affinity rules", error));
-    };
-    refresh();
-    const id = window.setInterval(refresh, 5000);
-    return () => window.clearInterval(id);
-  }, []);
-  const timerRef = useRef<number | null>(null);
+  useVisibleInterval(() => {
+    nativeApi.getAffinityRules()
+      .then((rules) => setAffinityRules(rules))
+      .catch((error: unknown) => reportPollFailure("MemoryView affinity rules", error));
+  }, 5000, { immediate: true });
 
   // Shared context menu used by both ProcessTreemap and ProcessHeatmap —
   // lifted here so either view can open it, and a single Escape handler
@@ -236,20 +232,9 @@ export function MemoryView() {
     }
   }, []);
 
-  useEffect(() => {
-    if (paused) return;
-    timerRef.current = window.setInterval(() => void refresh(), refreshMs);
-    return () => {
-      if (timerRef.current !== null) window.clearInterval(timerRef.current);
-    };
-  }, [paused, refresh, refreshMs]);
-
-  // Pause polling when tab/window hidden (saves CPU)
-  useEffect(() => {
-    const onVis = () => setPaused(document.hidden);
-    document.addEventListener("visibilitychange", onVis);
-    return () => document.removeEventListener("visibilitychange", onVis);
-  }, []);
+  // Each sample runs the process sampler in main. It stops while the
+  // window is hidden without touching the user's own pause.
+  useVisibleInterval(() => void refresh(), paused ? null : refreshMs);
 
   // Pre-warm the process appearance cache as soon as a snapshot arrives,
   // regardless of which view is active. This fixes the "treemap shows
@@ -517,7 +502,7 @@ export function MemoryView() {
               type="button"
               className={`memory-cpu-scale-btn ${cpuScale === "overall" ? "active" : ""}`}
               aria-pressed={cpuScale === "overall"}
-              title="Overall — % of total system CPU. Idle machine ≈ 0% across the board. Matches Task Manager."
+              title="Overall — % of total system CPU. Idle machine ≈ 0% across the board."
               onClick={() => setCpuScale("overall")}
             >
               Overall
@@ -808,14 +793,8 @@ function ProcessGroupRows(props: {
         onClick={onToggle}
         title={`${group.processes.length} instances · click to ${isExpanded ? "collapse" : "expand"}`}
       >
-        <div className="memory-row-icon memory-row-chevron">
-          <svg
-            width="10" height="10" viewBox="0 0 10 10"
-            fill="none" stroke="currentColor" strokeWidth="1.5"
-            style={{ transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.12s" }}
-          >
-            <path d="M3 2L7 5L3 8" />
-          </svg>
+        <div className="memory-row-icon">
+          <DisclosureToggle expanded={isExpanded} label={`Instances of ${group.name}`} onToggle={onToggle} />
         </div>
         <div className="memory-row-mem">
           <span className={`memory-row-mem-value ${memClass}`}>{formatBytes(group.totalMemory)}</span>
@@ -2197,14 +2176,10 @@ function AffinityRulesView({ cpuCount }: { cpuCount: number }) {
     }
   };
 
-  useEffect(() => {
-    void reload();
-    // Light polling so "lastAppliedAt" / "appliedCount" update
-    // reactively as the engine fires rules in the background. 3 s is
-    // fast enough to feel live without hammering settings reads.
-    const id = window.setInterval(() => { void reload(); }, 3000);
-    return () => window.clearInterval(id);
-  }, []);
+  // Light polling so "lastAppliedAt" / "appliedCount" update
+  // reactively as the engine fires rules in the background. 3 s is
+  // fast enough to feel live without hammering settings reads.
+  useVisibleInterval(() => void reload(), 3000, { immediate: true });
 
   const toggleEnabled = async (rule: AffinityRule) => {
     const next: AffinityRule = { ...rule, enabled: !rule.enabled };

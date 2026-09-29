@@ -51,6 +51,39 @@ describe("noteDevFile with Terraform", () => {
   });
 });
 
+describe("noteDevFile with Git repos", () => {
+  it("names a repo after its checkout, with or without a project marker", async () => {
+    const { createDevAcc, noteDevFile, sidecarFromAcc, reportFromSidecar } = await import("../devArtifactSidecar");
+    const acc = createDevAcc();
+    noteDevFile(acc, "/Users/me/github/openclaw/.git/objects/pack/pack-1.pack", 6_000_000_000, false);
+    noteDevFile(acc, "/Users/me/github/openclaw/.git/HEAD", 23, false);
+    noteDevFile(acc, "/Users/me/github/openclaw/README.md", 5_000, false);
+    // A linked worktree's .git is a file: not a repo of its own.
+    noteDevFile(acc, "/Users/me/github/openclaw-feat/.git", 60, false);
+    // The monorepo root's package.json is not what the repo is named after.
+    noteDevFile(acc, "/Users/me/github/mono/package.json", 1_000, false);
+    noteDevFile(acc, "/Users/me/github/mono/.git/objects/pack/pack-2.pack", 900_000_000, false);
+
+    const result = reportFromSidecar(sidecarFromAcc(acc, "/"));
+    expect(result.artifacts).toEqual([
+      expect.objectContaining({
+        path: "/Users/me/github/openclaw/.git",
+        kind: "git-repo",
+        projectPath: "/Users/me/github/openclaw",
+        projectName: "openclaw",
+        size: 6_000_000_023,
+        fileCount: 2,
+      }),
+      expect.objectContaining({
+        path: "/Users/me/github/mono/.git",
+        kind: "git-repo",
+        projectPath: "/Users/me/github/mono",
+        projectName: "mono",
+      }),
+    ]);
+  });
+});
+
 describe("noteDirectoryRoot", () => {
   it("ignores ambiguous target rollups", async () => {
     const { createDevAcc, dropNestedRoots, noteDirectoryRoot, reportFromSidecar, sidecarFromAcc } =

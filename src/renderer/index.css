@@ -274,16 +274,70 @@ button, input, select, textarea { font: inherit; }
   outline: 1px solid var(--border-focus);
   outline-offset: -1px;
 }
-.file-row.focused .file-actions { opacity: 1; }
 .file-list-scroll:focus { outline: none; }
 
+/* ── Disclosure chevron (Disclosure.tsx) ──────
+ * One expand/collapse chevron for the app. It leads its row, so it
+ * cannot wrap or move when badges come and go. --text-tertiary gives
+ * 3.6:1 or better on rows in every theme, above the 3:1 WCAG 1.4.11
+ * asks of an icon that is the only sign a row opens; --text-muted
+ * gave 2.4:1. Stroke settings live here because Preact without compat
+ * writes strokeWidth as a literal attribute that SVG ignores. */
+.disclosure-chevron {
+  flex-shrink: 0;
+  color: var(--text-tertiary);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 0.15s, color 0.12s;
+}
+.disclosure-chevron.expanded { transform: rotate(90deg); }
+.disclosure-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  cursor: pointer;
+}
+.treemap-featured-header:hover .disclosure-chevron,
+.duplicate-group-header:hover .disclosure-chevron,
+.memory-row-group:hover .disclosure-chevron,
+.folder-row-other:hover .disclosure-chevron {
+  color: var(--text-secondary);
+}
+.disclosure-toggle:hover { background: var(--bg-row-hover); }
+.disclosure-toggle:hover .disclosure-chevron { color: var(--text); }
+.disclosure-toggle:focus-visible,
+.treemap-featured-header:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 1px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .disclosure-chevron { transition: none; }
+}
+
 /* ── App Shell ─────────────────────────────── */
+/* Each child names its row. Placed in order, the search bar (open or
+ * not) decided which row everything after it got: open, it pushed the
+ * tab bar into the 1fr row and the view into the status bar's. */
 .app-shell {
   display: grid;
-  grid-template-rows: var(--header-h) var(--tab-h) 1fr var(--status-h);
+  grid-template-rows: var(--header-h) auto var(--tab-h) 1fr var(--status-h);
+  grid-template-areas: "header" "search" "tabs" "view" "status";
   height: 100vh;
   overflow: hidden;
 }
+.app-shell > .header { grid-area: header; }
+.app-shell > .search-bar { grid-area: search; }
+.app-shell > .tab-bar { grid-area: tabs; }
+.app-shell > .view-container { grid-area: view; }
+.app-shell > .status-bar { grid-area: status; }
 
 /* ── Scan Progress Stripe ──────────────────── */
 /* ── Update banner ─────────────────────────── */
@@ -875,8 +929,9 @@ button, input, select, textarea { font: inherit; }
    * Pills are the column that shrinks and scrolls. Scan controls
    * used to be `1fr` with min-width: 0, so on a Linux window full of
    * mount pills the Stop button overflowed and painted on top of the
-   * root pill's "free" label. */
-  grid-template-columns: auto minmax(168px, 320px) minmax(0, 1fr) auto;
+   * root pill's "free" label. The column also holds the 44px Power
+   * Efficiency gauge and its gap, hence 168 + 52 and 320 + 52. */
+  grid-template-columns: auto minmax(220px, 372px) minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
   padding: 0 12px;
@@ -1003,6 +1058,156 @@ button, input, select, textarea { font: inherit; }
   border-color: rgba(245,158,11,0.35);
   background: rgba(245,158,11,0.08);
 }
+
+/* ── Power Efficiency (components/PowerEfficiencyControl.tsx) ──
+ * A 28px framed button like the scan buttons: four rising bars, lit in
+ * amber up to the saved preset, and a chevron. The menu and tooltip are
+ * fixed-position so the header's overflow can't clip them. */
+.power-control {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.power-btn {
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 7px 0 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.power-btn:hover,
+.power-btn.open {
+  background: var(--bg-row-hover);
+  color: var(--text-secondary);
+}
+.power-btn.open { border-color: var(--border-selected); }
+.power-btn:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
+.power-gauge {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 12px;
+}
+.power-gauge i {
+  display: block;
+  width: 3px;
+  border-radius: 1px;
+  background: var(--text-muted);
+  opacity: 0.45;
+}
+.power-gauge i:nth-child(1) { height: 3px; }
+.power-gauge i:nth-child(2) { height: 6px; }
+.power-gauge i:nth-child(3) { height: 9px; }
+.power-gauge i:nth-child(4) { height: 12px; }
+.power-gauge i.lit { background: var(--amber); opacity: 1; }
+.power-chevron { flex-shrink: 0; }
+
+.power-menu,
+.power-tip {
+  position: fixed;
+  z-index: 60;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+  -webkit-app-region: no-drag;
+  animation: power-pop-in 0.12s ease-out;
+}
+:root.light .power-menu,
+:root.light .power-tip { box-shadow: 0 6px 18px rgba(0, 0, 0, 0.1); }
+@keyframes power-pop-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.power-menu {
+  /* Wide enough for "Drain My Battery" beside the bar and count lanes. */
+  width: 320px;
+  padding: 4px;
+  background: var(--bg);
+  outline: none;
+  user-select: none;
+}
+.power-menu-head {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 8px 6px;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+.power-menu-item {
+  display: grid;
+  /* Check, name, share bar, count. */
+  grid-template-columns: 14px minmax(0, 1fr) 64px 72px;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+}
+.power-menu-item.highlighted { background: var(--bg-row-hover); }
+.power-menu-item.current .power-menu-name { font-weight: 700; }
+/* The saved preset keeps its check wherever the highlight goes. */
+.power-menu-check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--amber);
+}
+.power-menu-item[aria-disabled="true"] { opacity: 0.4; cursor: default; }
+.power-menu-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.power-menu-share {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-row-hover);
+  overflow: hidden;
+}
+.power-menu-share i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--amber);
+}
+.power-menu-count {
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.power-tip {
+  width: 280px;
+  padding: 8px 10px;
+  background: var(--bg-panel);
+  backdrop-filter: blur(12px);
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.power-tip-title { font-size: 12px; font-weight: 600; color: var(--text); }
+.power-tip-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.power-tip-body { font-size: 11px; line-height: 1.45; color: var(--text-tertiary); }
 
 /* Middle-ellipsis path label (components/MiddleEllipsis.tsx). The head
  * shrinks with "…" and the tail keeps the last segment, so long macOS
@@ -1155,7 +1360,7 @@ button, input, select, textarea { font: inherit; }
  * left, so the chip shrinks, down to its min-width, before the pills
  * start to scroll. With no chip the header keeps its release layout. */
 .header:has(> .dev-branch-chip) {
-  grid-template-columns: auto minmax(168px, 320px) minmax(0, max-content) 1fr auto;
+  grid-template-columns: auto minmax(220px, 372px) minmax(0, max-content) 1fr auto;
 }
 .dev-branch-chip {
   justify-self: end;
@@ -2211,11 +2416,6 @@ button, input, select, textarea { font: inherit; }
 .treemap-featured.expanded .treemap-featured-header {
   padding: 10px 12px 6px;
 }
-.treemap-featured-chevron {
-  color: var(--text-muted);
-  transition: transform 0.15s;
-  flex-shrink: 0;
-}
 .treemap-featured-actions {
   display: flex;
   gap: 4px;
@@ -2866,10 +3066,10 @@ button, input, select, textarea { font: inherit; }
 .bulk-btn.danger { border-color: rgba(239,68,68,0.15); color: var(--red-dim); }
 .bulk-btn.danger:hover { background: var(--red-glow); color: var(--red); }
 
-/* Column header row */
+/* Column header row. Same tracks as .file-row. */
 .file-col-header {
   display: grid;
-  grid-template-columns: 28px 90px 18px 1fr 80px 64px auto;
+  grid-template-columns: 28px 90px 18px 1fr 80px 64px;
   align-items: center;
   gap: 8px;
   padding: 0 12px;
@@ -2896,7 +3096,6 @@ button, input, select, textarea { font: inherit; }
 }
 .file-col-btn:hover { color: var(--text-secondary); }
 .file-col-btn.active { color: var(--amber); }
-.file-actions-hdr { width: 1px; }
 
 .file-list-scroll {
   overflow-y: auto;
@@ -2905,15 +3104,19 @@ button, input, select, textarea { font: inherit; }
 
 .file-row {
   display: grid;
-  grid-template-columns: 28px 90px 18px 1fr 80px 64px auto;
+  grid-template-columns: 28px 90px 18px 1fr 80px 64px;
   align-items: center;
   gap: 8px;
   padding: 6px 12px;
   border-bottom: 1px solid rgba(255,255,255,0.02);
   transition: background 0.1s;
+  --hover-actions-bg: linear-gradient(var(--bg-row-hover), var(--bg-row-hover)), var(--bg);
 }
 .file-row:hover { background: var(--bg-row-hover); }
-.file-row.selected { background: var(--bg-row-selected); }
+.file-row.selected {
+  background: var(--bg-row-selected);
+  --hover-actions-bg: linear-gradient(var(--bg-row-selected), var(--bg-row-selected)), var(--bg);
+}
 .file-row.deleted,
 .duplicate-file-row.deleted,
 .changes-row.deleted,
@@ -3050,13 +3253,45 @@ button, input, select, textarea { font: inherit; }
   text-align: right;
 }
 
-.file-actions {
+/* ── Hover actions ──
+ * Row buttons that show only while the row is hovered or has keyboard
+ * focus (Largest Files, Duplicates, Changes). They float over the end
+ * of the row's name or path instead of holding a column of their own,
+ * which cut every name short even while the buttons were hidden. Each
+ * row sets --hover-actions-bg to its own background in that state,
+ * layered down to the opaque page, so the text under the buttons
+ * doesn't show through, and the mask fades it in from the left. The
+ * overlay spans the row's full height; the name and path are two lines
+ * and the buttons are one. While the buttons are hidden they take no
+ * clicks, so a press on the name under them hits the name. */
+.hover-actions {
   display: flex;
+  align-items: center;
   gap: 4px;
+  padding-left: 24px;
+  background: var(--hover-actions-bg);
+  mask-image: linear-gradient(90deg, transparent, #000 24px);
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.1s;
 }
-.file-row:hover .file-actions { opacity: 1; }
+
+/* Over the end of the name column. Both are placed in its cell: an
+ * auto-placed item skips an occupied cell, so the name would move right. */
+.file-row > .file-info,
+.file-actions {
+  grid-area: 1 / 4;
+}
+.file-actions {
+  justify-self: end;
+  align-self: stretch;
+}
+.file-row:is(:hover, .focused, :has(:focus-visible)) .file-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+/* Every action is disabled on a deleted file; don't cover its name. */
+.file-row.deleted .file-actions { display: none; }
 
 .action-btn {
   height: 22px;
@@ -4408,12 +4643,28 @@ button, input, select, textarea { font: inherit; }
 }
 
 /* ── Memory / Process viewer ──────────────── */
+/* A column, not a fixed-row grid: only the list has a column header, so
+ * in the other modes the body landed in an auto row. The treemap and
+ * heatmap pin their canvas to the size they are given, so there they
+ * could shrink with the window but never grow back. */
 .memory-view {
-  display: grid;
-  grid-template-rows: auto auto auto 1fr;
+  display: flex;
+  flex-direction: column;
   height: 100%;
   overflow: hidden;
 }
+.memory-view > * { flex-shrink: 0; }
+.memory-view > .memory-list-scroll,
+.memory-view > .memory-treemap-container,
+.memory-view > .process-heatmap,
+.memory-view > .gpu-view,
+.memory-view > .affinity-rules-view,
+.memory-view > .affinity-rules-empty {
+  flex: 1 1 0;
+  min-height: 0;
+}
+/* Rules have no scroll container of their own. */
+.memory-view > .affinity-rules-view { overflow-y: auto; }
 
 /* ── Initial loading (no cache yet) ── */
 .memory-initial-loading {
@@ -5476,9 +5727,6 @@ button, input, select, textarea { font: inherit; }
   background: rgba(59,130,246,0.05);
 }
 :root.light .memory-row-group.expanded { background: rgba(59,130,246,0.04); }
-.memory-row-chevron {
-  color: var(--text-muted);
-}
 .memory-row-name-group {
   font-weight: 500;
 }
@@ -5676,6 +5924,24 @@ button, input, select, textarea { font: inherit; }
 }
 .toast-close:hover { background: rgba(255,255,255,0.06); color: var(--text); }
 
+/* One action under the body, e.g. "Rescan now" after a Power Efficiency
+ * change. The scan-btn-primary palette at the toast's scale. */
+.toast-action {
+  margin-top: 8px;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--border-selected);
+  border-radius: var(--radius-sm);
+  background: var(--amber-glow);
+  color: var(--amber);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.toast-action:hover { background: color-mix(in srgb, var(--amber) 25%, transparent); }
+.toast-action:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
+
 @keyframes toast-in {
   from { opacity: 0; transform: translateX(24px); }
   to { opacity: 1; transform: translateX(0); }
@@ -5686,9 +5952,12 @@ button, input, select, textarea { font: inherit; }
 }
 
 /* ── Duplicates View ──────────────────────────── */
+/* A column, not a fixed-row grid: the progress bars, sort bar and bulk
+ * bar come and go, and in a grid the list and the bulk bar land in
+ * whichever rows are left (the bulk bar then stretches to fill). */
 .duplicates-view {
-  display: grid;
-  grid-template-rows: auto auto auto 1fr;
+  display: flex;
+  flex-direction: column;
   height: 100%;
   overflow: hidden;
 }
@@ -5835,6 +6104,8 @@ button, input, select, textarea { font: inherit; }
 
 /* List */
 .duplicates-list-scroll {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 6px 10px;
   display: flex;
@@ -5862,9 +6133,10 @@ button, input, select, textarea { font: inherit; }
 .duplicate-group:hover { border-color: rgba(255,255,255,0.1); }
 .duplicate-group.expanded { border-color: rgba(245,158,11,0.2); }
 
+/* Flex, not a fixed-column grid: the sharing badge is optional, and an
+ * extra child in a grid wraps the chevron onto a second row. */
 .duplicate-group-header {
-  display: grid;
-  grid-template-columns: auto auto 1fr auto auto auto auto auto;
+  display: flex;
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
@@ -5936,6 +6208,7 @@ button, input, select, textarea { font: inherit; }
   align-items: center;
 }
 .duplicate-group-info {
+  flex: 1;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -6005,33 +6278,33 @@ button, input, select, textarea { font: inherit; }
   display: flex;
   gap: 4px;
 }
-.duplicate-group-chevron {
-  flex-shrink: 0;
-  color: var(--text-muted);
-}
 
 /* Expanded file list */
 .duplicate-group-files {
   border-top: 1px solid var(--border);
   padding: 6px 0;
 }
+/* Copies indent past the header's chevron (12px pad + 20px toggle +
+ * 10px gap) so their checkboxes line up under the group's. */
 .duplicate-files-toolbar {
   display: flex;
   gap: 6px;
-  padding: 4px 12px 8px;
+  padding: 4px 12px 8px 42px;
   border-bottom: 1px solid rgba(255,255,255,0.03);
 }
 .duplicate-file-row {
+  position: relative;
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 10px;
-  padding: 5px 12px;
+  padding: 5px 12px 5px 42px;
   transition: background 0.1s;
 }
-.duplicate-file-row:hover { background: var(--bg-row-hover); }
+.duplicate-file-row:hover,
+.duplicate-file-row:has(:focus-visible) { background: var(--bg-row-hover); }
 
 .duplicate-file-info {
+  flex: 1;
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -6062,14 +6335,25 @@ button, input, select, textarea { font: inherit; }
   color: var(--blue);
   font-weight: 600;
 }
+/* A .hover-actions overlay at the row's end, which is the end of the
+ * path. The group card's --bg-row sits between the row and the page. */
 .duplicate-file-actions {
-  display: flex;
-  gap: 4px;
-  flex-shrink: 0;
-  opacity: 0;
-  transition: opacity 0.1s;
+  position: absolute;
+  top: 0;
+  right: 12px;
+  bottom: 0;
+  --hover-actions-bg:
+    linear-gradient(var(--bg-row-hover), var(--bg-row-hover)),
+    linear-gradient(var(--bg-row), var(--bg-row)),
+    var(--bg);
 }
-.duplicate-file-row:hover .duplicate-file-actions { opacity: 1; }
+.duplicate-file-row:hover .duplicate-file-actions,
+.duplicate-file-row:has(:focus-visible) .duplicate-file-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+/* Every action is disabled on a deleted copy; don't cover its path. */
+.duplicate-file-row.deleted .duplicate-file-actions { display: none; }
 
 /* Empty states */
 .duplicates-empty {
@@ -6257,9 +6541,12 @@ button, input, select, textarea { font: inherit; }
   transition: opacity 0.15s;
   pointer-events: none;
 }
+/* A column, not a two-row grid: with the optional "Comparing" header
+ * there are three children, so the tabs took the 1fr row and the list
+ * sat under them at its own height. */
 .changes-detail {
-  display: grid;
-  grid-template-rows: auto 1fr;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
   min-height: 0;
 }
@@ -6639,6 +6926,8 @@ button, input, select, textarea { font: inherit; }
 
 /* Detail list */
 .changes-detail-scroll {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 4px 0;
 }
@@ -6751,23 +7040,37 @@ button, input, select, textarea { font: inherit; }
   background: color-mix(in srgb, var(--bg-row) 80%, var(--red) 20%);
 }
 
+/* The sizes track is fixed so the delta column lines up from row to
+ * row; a directory's "(+N files)" wraps under its sizes. */
 .changes-row {
   display: grid;
-  grid-template-columns: 72px 18px 1fr 100px auto auto;
+  grid-template-columns: 72px 18px 1fr 100px 140px;
   align-items: center;
   gap: 10px;
   padding: 7px 14px;
   border-bottom: 1px solid rgba(255,255,255,0.02);
   transition: background 0.1s;
+  --hover-actions-bg: linear-gradient(var(--bg-row-hover), var(--bg-row-hover)), var(--bg);
 }
-.changes-row:hover { background: var(--bg-row-hover); }
+.changes-row:hover,
+.changes-row:has(:focus-visible) { background: var(--bg-row-hover); }
+/* A .hover-actions overlay over the end of the name and path column.
+ * Both are placed in its cell: an auto-placed item skips an occupied
+ * cell, so the name would move right. */
+.changes-row > .changes-row-info,
 .changes-row-actions {
-  display: flex;
-  gap: 4px;
-  opacity: 0;
-  transition: opacity 0.1s;
+  grid-area: 1 / 3;
 }
-.changes-row:hover .changes-row-actions { opacity: 1; }
+.changes-row-actions {
+  justify-self: end;
+  align-self: stretch;
+}
+.changes-row:is(:hover, :has(:focus-visible)) .changes-row-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+/* Every action is disabled on a deleted file; don't cover its name. */
+.changes-row.deleted .changes-row-actions { display: none; }
 
 .changes-row-badge {
   font-family: var(--font-mono);
@@ -6841,8 +7144,9 @@ button, input, select, textarea { font: inherit; }
   font-size: 11px;
   color: var(--text-secondary);
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 4px;
+  gap: 0 4px;
   white-space: nowrap;
 }
 .changes-row-prev { color: var(--text-muted); }
@@ -7381,7 +7685,9 @@ button, input, select, textarea { font: inherit; }
   .search-bar::after {
     display: none;
   }
-  .file-row { grid-template-columns: 28px 80px 18px 1fr 60px auto; }
+  .file-col-header,
+  .file-row { grid-template-columns: 28px 80px 18px 1fr 60px; }
+  .file-col-header [data-field="age"],
   .file-age { display: none; }
   .cleanup-grid { grid-template-columns: 1fr; }
   .picker-card { max-width: 100%; padding: 20px; }
@@ -9188,6 +9494,7 @@ body.system-widget-body #app {
   --dev-k-compiler-cache: #64748b;
   --dev-k-cmake-build: #38bdf8;
   --dev-k-terraform: #d946ef;
+  --dev-k-git-repo: #84cc16;
   --dev-k-diag-logs: #f59e0b;
 }
 .dev-summary {
@@ -9618,6 +9925,24 @@ body.system-widget-body #app {
   font-weight: 600;
   line-height: 15px;
   cursor: help;
+}
+.dev-git-badge {
+  color: var(--text-secondary);
+}
+.dev-git-badge.warn {
+  display: inline-block;
+  padding: 0 5px;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: var(--radius-sm);
+  background: rgba(245, 158, 11, 0.08);
+  color: var(--amber);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 15px;
+  cursor: help;
+}
+.action-btn.is-blocked {
+  opacity: 0.55;
 }
 .dev-share-badge.likely {
   border-style: dashed;

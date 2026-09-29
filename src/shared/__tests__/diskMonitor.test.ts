@@ -11,12 +11,14 @@ import type { DiskSpaceInfo } from "../contracts";
 import {
   __resetDiskMonitorForTests,
   getDiskSpace,
+  getRecentDiskSpace,
   getMonitoringSnapshot,
   initDiskMonitor,
   parseLinuxDfOutput,
   parseMacDfOutput,
   parseWindowsCimLogicalDisks,
   runDf,
+  SHARED_DISK_SPACE_MAX_AGE_MS,
   stdoutOfFailedDf,
 } from "../diskMonitor";
 
@@ -306,6 +308,55 @@ describe("parseLinuxDfOutput", () => {
     ]);
   });
 
+  it("counts one btrfs pool once and keeps a different disk", () => {
+    // Same layout as a default btrfs install: `/`, `/home`, the pacman
+    // cache, and `/var/log` are subvolumes of `/dev/mapper/root`, and
+    // df repeats the pool's free space on every row.
+    const pool = "/dev/mapper/root            btrfs        974646272  873269368   97368232      90%";
+    const stdout = [
+      header,
+      `${pool} /`,
+      "/dev/nvme0n1p1              vfat           2093048     223304    1869744      11% /boot",
+      `${pool} /home`,
+      `${pool} /var/cache/pacman/pkg`,
+      `${pool} /var/log`,
+      "/dev/sdb1                   ext4         200000000   50000000  150000000      25% /mnt/usb",
+    ].join("\n");
+
+    const drives = parseLinuxDfOutput(stdout, 5);
+
+    expect(drives.map((drive) => drive.drive)).toEqual(["/", "/mnt/usb"]);
+    expect(drives[0]).toMatchObject({
+      totalBytes: 974646272 * 1024,
+      usedBytes: 873269368 * 1024,
+      freeBytes: 97368232 * 1024,
+    });
+  });
+
+  it("keeps / when a shared filesystem is listed under /home first", () => {
+    const stdout = [
+      header,
+      "/dev/mapper/root            btrfs        974646272  873269368   97368232      90% /home",
+      "/dev/mapper/root            btrfs        974646272  873269000   97368500      90% /",
+    ].join("\n");
+
+    const drives = parseLinuxDfOutput(stdout, 5);
+
+    expect(drives.map((drive) => drive.drive)).toEqual(["/"]);
+    expect(drives[0]?.freeBytes).toBe(97368500 * 1024);
+  });
+
+  it("keeps a bind mount's shortest path and a separate /home", () => {
+    const stdout = [
+      header,
+      "/dev/nvme0n1p2              ext4         490617784  412345678   53278906      89% /",
+      "/dev/nvme0n1p2              ext4         490617784  412345678   53278906      89% /mnt/root-bind",
+      "/dev/nvme0n1p3              ext4         200000000   80000000  120000000      40% /home",
+    ].join("\n");
+
+    expect(parseLinuxDfOutput(stdout).map((drive) => drive.drive)).toEqual(["/", "/home"]);
+  });
+
   it("drops rows with sizes that are not finite numbers", () => {
     const stdout = [
       header,
@@ -552,5 +603,37 @@ describe("parseWindowsCimLogicalDisks", () => {
     );
     expect(drives).toHaveLength(1);
     expect(drives[0]?.drive).toBe("C:");
+  });
+});
+
+describe("getRecentDiskSpace", () => {
+  const drive = (freeBytes: number): DiskSpaceInfo[] => [
+    { drive: "/", totalBytes: 1_000, freeBytes, usedBytes: 1_000 - freeBytes, usedPercent: 0, timestamp: 0 },
+  ];
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("shares one read between pollers inside the window, then reads again", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: 1_000_000 });
+    let reads = 0;
+    const read = async () => drive(100 + ++reads);
+
+    const [app, widget] = await Promise.all([getRecentDiskSpace(read), getRecentDiskSpace(read)]);
+    vi.setSystemTime(1_000_000 + SHARED_DISK_SPACE_MAX_AGE_MS - 1);
+    const picker = await getRecentDiskSpace(read);
+    expect(reads).toBe(1);
+    expect([app, widget, picker].map((d) => d[0]!.freeBytes)).toEqual([101, 101, 101]);
+
+    vi.setSystemTime(1_000_000 + SHARED_DISK_SPACE_MAX_AGE_MS);
+    expect((await getRecentDiskSpace(read))[0]!.freeBytes).toBe(102);
+    expect(reads).toBe(2);
+  });
+
+  it("does not hand out a failed read", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: 2_000_000 });
+    await expect(getRecentDiskSpace(() => Promise.reject(new Error("df hung")))).rejects.toThrow("df hung");
+    expect((await getRecentDiskSpace(async () => drive(7)))[0]!.freeBytes).toBe(7);
   });
 });

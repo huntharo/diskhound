@@ -58,6 +58,7 @@ const GENERIC_LEAVES = new Set([
   "providers",
   "plugins",
   "plugin-cache",
+  ".git",
 ]);
 
 function stripDrive(parts: string[]): string[] {
