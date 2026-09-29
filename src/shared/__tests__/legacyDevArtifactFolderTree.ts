@@ -43,7 +43,8 @@ export function legacySidecarFromDirectoryRoots(
   for (const project of projectPaths) acc.projects.add(project);
   for (const dir of dirs) {
     if (dir.size <= 0) continue;
-    const match = classifyArtifactPath(dir.path);
+    // Every row is a folder, which only a `.git` rule cares about.
+    const match = classifyArtifactPath(dir.path, true);
     if (!match || !dirsEqual(match.root, dir.path)) continue;
     const existing = acc.artifacts.get(match.root);
     if (!existing || dir.size > existing.size) {

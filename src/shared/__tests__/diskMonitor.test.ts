@@ -308,6 +308,55 @@ describe("parseLinuxDfOutput", () => {
     ]);
   });
 
+  it("counts one btrfs pool once and keeps a different disk", () => {
+    // Same layout as a default btrfs install: `/`, `/home`, the pacman
+    // cache, and `/var/log` are subvolumes of `/dev/mapper/root`, and
+    // df repeats the pool's free space on every row.
+    const pool = "/dev/mapper/root            btrfs        974646272  873269368   97368232      90%";
+    const stdout = [
+      header,
+      `${pool} /`,
+      "/dev/nvme0n1p1              vfat           2093048     223304    1869744      11% /boot",
+      `${pool} /home`,
+      `${pool} /var/cache/pacman/pkg`,
+      `${pool} /var/log`,
+      "/dev/sdb1                   ext4         200000000   50000000  150000000      25% /mnt/usb",
+    ].join("\n");
+
+    const drives = parseLinuxDfOutput(stdout, 5);
+
+    expect(drives.map((drive) => drive.drive)).toEqual(["/", "/mnt/usb"]);
+    expect(drives[0]).toMatchObject({
+      totalBytes: 974646272 * 1024,
+      usedBytes: 873269368 * 1024,
+      freeBytes: 97368232 * 1024,
+    });
+  });
+
+  it("keeps / when a shared filesystem is listed under /home first", () => {
+    const stdout = [
+      header,
+      "/dev/mapper/root            btrfs        974646272  873269368   97368232      90% /home",
+      "/dev/mapper/root            btrfs        974646272  873269000   97368500      90% /",
+    ].join("\n");
+
+    const drives = parseLinuxDfOutput(stdout, 5);
+
+    expect(drives.map((drive) => drive.drive)).toEqual(["/"]);
+    expect(drives[0]?.freeBytes).toBe(97368500 * 1024);
+  });
+
+  it("keeps a bind mount's shortest path and a separate /home", () => {
+    const stdout = [
+      header,
+      "/dev/nvme0n1p2              ext4         490617784  412345678   53278906      89% /",
+      "/dev/nvme0n1p2              ext4         490617784  412345678   53278906      89% /mnt/root-bind",
+      "/dev/nvme0n1p3              ext4         200000000   80000000  120000000      40% /home",
+    ].join("\n");
+
+    expect(parseLinuxDfOutput(stdout).map((drive) => drive.drive)).toEqual(["/", "/home"]);
+  });
+
   it("drops rows with sizes that are not finite numbers", () => {
     const stdout = [
       header,

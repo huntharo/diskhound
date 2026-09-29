@@ -43,7 +43,7 @@ describe("classifyArtifactPath", () => {
             // UNC paths are normalized to backslashes by both classifiers.
             const root = prefix.startsWith("//") ? expectedRoot?.replaceAll("/", "\\") : expectedRoot;
             expect(classifyArtifactPath(path), path).toEqual(root ? { root, kind: fixture.kind } : null);
-            if (root) expect(classifyArtifactPath(root), root).toEqual({ root, kind: fixture.kind });
+            if (root) expect(classifyArtifactPath(root, true), root).toEqual({ root, kind: fixture.kind });
           }
         }
       }
@@ -120,6 +120,35 @@ describe("classifyArtifactPath", () => {
     ]) {
       expect(classifyArtifactPath(path), path).toBeNull();
     }
+  });
+
+  it("counts everything under a .git folder as one repo", () => {
+    expect(classifyArtifactPath("/Users/me/github/openclaw/.git/objects/pack/pack-1234.pack"))
+      .toEqual({ root: "/Users/me/github/openclaw/.git", kind: "git-repo" });
+    // Submodules keep their history under the parent's .git/modules.
+    expect(classifyArtifactPath("C:\\src\\app\\.git\\modules\\vendor\\lib\\objects\\pack\\pack-1.pack"))
+      .toEqual({ root: "C:\\src\\app\\.git", kind: "git-repo" });
+    // A branch named like a build folder is still history.
+    expect(classifyArtifactPath("/Users/me/app/.git/refs/heads/build"))
+      .toEqual({ root: "/Users/me/app/.git", kind: "git-repo" });
+    // The folder-tree reader passes folder rows as folders.
+    expect(classifyArtifactPath("/Users/me/app/.git", true))
+      .toEqual({ root: "/Users/me/app/.git", kind: "git-repo" });
+  });
+
+  it("leaves the .git file of a linked worktree or submodule alone", () => {
+    for (const path of [
+      "/Users/me/app-feature/.git",
+      "/Users/me/app/vendor/lib/.git",
+      "/Users/me/app/.worktrees/feat/.git",
+    ]) {
+      expect(classifyArtifactPath(path)?.kind, path).not.toBe("git-repo");
+    }
+  });
+
+  it("keeps a .git folder inside node_modules with node_modules", () => {
+    expect(classifyArtifactPath("/Users/me/app/node_modules/dep/.git/objects/ab/cdef"))
+      .toEqual({ root: "/Users/me/app/node_modules", kind: "node-modules" });
   });
 
   it("ignores ordinary documents", () => {

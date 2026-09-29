@@ -66,6 +66,65 @@ describe("settings store", () => {
     // Subscribers still hear every save, as before.
     expect(listener).toHaveBeenCalledTimes(3);
   });
+
+  it("keeps the committed setting when persistence fails", async () => {
+    // A file where userData should be makes mkdir/write fail reliably,
+    // without depending on the test user's permissions.
+    await FSP.rm(paths.userData, { recursive: true, force: true });
+    await FSP.writeFile(paths.userData, "not a directory", "utf8");
+    const store = await createSettingsStore();
+    const before = store.get();
+    const listener = vi.fn();
+    store.subscribe(listener);
+
+    await expect(store.update((current) => ({
+      ...current,
+      scanning: { ...current.scanning, powerEfficiency: "miser" },
+    }))).rejects.toThrow();
+
+    expect(store.get()).toBe(before);
+    expect(store.get().scanning.powerEfficiency).toBe("balanced");
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it("serializes overlapping updates so the last choice wins", async () => {
+    const store = await createSettingsStore();
+    const realWriteFile = FSP.writeFile;
+    let releaseFirstWrite!: () => void;
+    const firstWriteCanFinish = new Promise<void>((resolve) => { releaseFirstWrite = resolve; });
+    let writes = 0;
+    const writeSpy = vi.spyOn(FSP, "writeFile").mockImplementation(async (...args) => {
+      writes += 1;
+      if (writes === 1) await firstWriteCanFinish;
+      return realWriteFile(...args);
+    });
+
+    try {
+      const transforms: string[] = [];
+      const first = store.update((current) => {
+        transforms.push("miser");
+        return { ...current, scanning: { ...current.scanning, powerEfficiency: "miser" } };
+      });
+      // Let the first transform reach its deliberately stalled write.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const second = store.update((current) => {
+        transforms.push("aggressive");
+        return { ...current, scanning: { ...current.scanning, powerEfficiency: "aggressive" } };
+      });
+
+      expect(transforms).toEqual(["miser"]);
+      expect(store.get().scanning.powerEfficiency).toBe("balanced");
+      releaseFirstWrite();
+      await Promise.all([first, second]);
+
+      expect(transforms).toEqual(["miser", "aggressive"]);
+      expect(store.get().scanning.powerEfficiency).toBe("aggressive");
+      expect(JSON.parse(FS.readFileSync(settingsPath(), "utf8")).scanning.powerEfficiency)
+        .toBe("aggressive");
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
 });
 
 it("persists size overrides once per choice and removes the key when returning to platform default", async () => {

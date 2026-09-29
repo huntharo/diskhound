@@ -280,6 +280,31 @@ describe("sidecarFromFolderTreeFile", () => {
     ]);
   });
 
+  it("finds a repo's .git folder and skips a worktree's .git file", async () => {
+    const after = await expectSameAsLegacy([
+      line("/Users/me/github/openclaw", [
+        ["/Users/me/github/openclaw/.git", 6_000_000_000, 4_000],
+        ["/Users/me/github/openclaw/src", 30_000_000, 900],
+      ], [["README.md", 5_000, 1]]),
+      line("/Users/me/github/openclaw/.git", [
+        ["/Users/me/github/openclaw/.git/objects", 5_990_000_000, 3_900],
+        ["/Users/me/github/openclaw/.git/refs", 10_000, 50],
+      ], [["HEAD", 23, 1], ["config", 300, 1]]),
+      line("/Users/me/github/openclaw-feat", [["/Users/me/github/openclaw-feat/src", 30_000_000, 900]], [
+        [".git", 60, 1],
+      ]),
+    ].join("\n"), "/");
+    expect(reportFromSidecar(after).artifacts).toEqual([
+      expect.objectContaining({
+        path: "/Users/me/github/openclaw/.git",
+        kind: "git-repo",
+        projectPath: "/Users/me/github/openclaw",
+        projectName: "openclaw",
+        size: 6_000_000_000,
+      }),
+    ]);
+  });
+
   it("matches the old reader on random paths built from artifact names", async () => {
     // Guards the reader's shortcut: only rows whose last two segments
     // name an artifact are decoded. Any classifyArtifactPath rule whose

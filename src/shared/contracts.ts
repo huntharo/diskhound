@@ -4,6 +4,11 @@ import {
   getDefaultExcludedFolderPaths,
   normalizeExcludedFolderPaths,
 } from "./pathProtection";
+import {
+  DEFAULT_POWER_EFFICIENCY,
+  isPowerEfficiency,
+  type PowerEfficiency,
+} from "./powerEfficiency";
 
 export type ScanStatus = "idle" | "running" | "done" | "cancelled" | "error";
 export type ScanEngine = "js-worker" | "native-sidecar" | "usn-journal";
@@ -326,6 +331,12 @@ export interface ScanStartInput {
   folderTreeOutput?: string;
   /** Compact Dev Artifacts sidecar written during the scan. */
   devArtifactsOutput?: string;
+  /**
+   * How many workers the native scanner walks with (Power Efficiency).
+   * Unset leaves the scanner's own default. DISKHOUND_PARALLEL_THREADS
+   * still overrides both, for experiments.
+   */
+  workers?: number;
 }
 
 export type WorkerToMainMessage =
@@ -428,6 +439,8 @@ export interface ScanningSettings {
   excludedFolderPaths: string[];
   /** Hide excluded folders from Folders while still counting their bytes. */
   hideExcludedFoldersFromFolderResults: boolean;
+  /** How many workers the native scanner walks with, from the next scan. */
+  powerEfficiency: PowerEfficiency;
 }
 
 export interface MonitoringSettings {
@@ -632,6 +645,7 @@ export type DevArtifactKind =
   | "compiler-cache"
   | "cmake-build"
   | "terraform"
+  | "git-repo"
   | "diag-logs";
 
 /**
@@ -675,6 +689,39 @@ export interface DevArtifact {
   deltaBytes: number | null;
   /** Present when the scanner measured APFS clones under this tree. */
   clone?: DevArtifactCloneInfo;
+  /** `git-repo` rows only: what main read from the repo's `.git/config`. */
+  git?: DevGitRepoInfo;
+}
+
+/**
+ * A `git-repo` row's remotes, read from `.git/config` when main builds
+ * the report. No `git` process runs for it.
+ */
+export interface DevGitRepoInfo {
+  /** Remote names in config order. Empty when none is configured. */
+  remotes: string[];
+  /** `origin`'s URL (else the first remote's), without any user or password. */
+  remoteUrl: string | null;
+  /** False when `.git/config` could not be read: remotes are unknown. */
+  readable: boolean;
+}
+
+/**
+ * What `git` reports about a checkout just before the Dev tab offers to
+ * remove it. Counts are null when that command failed.
+ */
+export interface DevGitRepoCheck {
+  /** False when `git` could not run here at all (not on PATH, or not a repo). */
+  gitAvailable: boolean;
+  remotes: string[];
+  remoteUrl: string | null;
+  /** Commits on local branches that no remote-tracking branch has. */
+  unpushedCommits: number | null;
+  /** Modified, staged and untracked paths. Ignored files are not counted. */
+  changedFiles: number | null;
+  stashes: number | null;
+  /** Other checkouts that use this repo's `.git` (`git worktree add`). */
+  linkedWorktrees: string[];
 }
 
 export interface DevArtifactReport {
@@ -1287,6 +1334,9 @@ export interface DiskhoundNativeApi {
    *  renderer gate Windows-only UI (MFT elevation, CPU affinity rules,
    *  GPU counters) without relying on user-agent sniffing. */
   platform: DiskhoundPlatform;
+  /** Logical CPUs, resolved once at preload time. The Power Efficiency
+   *  presets are capped by it, as main caps the scanner's workers. */
+  cpuCount: number;
 
   // Scan
   pickRootPath: () => Promise<string | null>;
@@ -1366,6 +1416,10 @@ export interface DiskhoundNativeApi {
   // Settings
   getSettings: () => Promise<AppSettings>;
   updateSettings: (settings: AppSettings) => Promise<void>;
+  /** Saves the Power Efficiency choice on its own, so a stale copy of
+   *  the rest of the settings can't overwrite a newer one. The next scan
+   *  uses it; a running scan keeps its workers. */
+  setPowerEfficiency: (preset: PowerEfficiency) => Promise<AppSettings>;
   getRecentScans: () => Promise<RecentScan[]>;
 
   // Monitoring
@@ -1420,6 +1474,8 @@ export interface DiskhoundNativeApi {
   cancelDevArtifactsRescan: (rootPath: string) => Promise<void>;
   /** Drop deleted trees from the Dev sidecar and in-memory cache. JSON only. */
   forgetDevArtifactPaths: (rootPath: string, paths: string[]) => Promise<DevArtifactReport | null>;
+  /** Run `git` in a `git-repo` row's checkout to find work that is not on a remote. */
+  checkGitRepo: (checkoutPath: string) => Promise<DevGitRepoCheck>;
   onDevArtifactsProgress: (listener: (progress: DevArtifactsRescanProgress) => void) => () => void;
 
   // Easy Move
@@ -1644,6 +1700,7 @@ export function defaultSettings(): AppSettings {
       defaultRootPath: "",
       excludedFolderPaths: getDefaultExcludedFolderPaths(),
       hideExcludedFoldersFromFolderResults: true,
+      powerEfficiency: DEFAULT_POWER_EFFICIENCY,
     },
     monitoring: {
       enabled: true, // cheap free-space polls; full rescans are opt-in-cadence
@@ -1769,6 +1826,9 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
         merged.scanning.hideExcludedFoldersFromFolderResults === undefined
           ? defaults.scanning.hideExcludedFoldersFromFolderResults
           : Boolean(merged.scanning.hideExcludedFoldersFromFolderResults),
+      powerEfficiency: isPowerEfficiency(merged.scanning.powerEfficiency)
+        ? merged.scanning.powerEfficiency
+        : defaults.scanning.powerEfficiency,
     },
     monitoring: {
       enabled: Boolean(merged.monitoring.enabled),
