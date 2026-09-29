@@ -13,6 +13,8 @@
 //!                             stream (a modified clone gets a new id)
 //!   ATTR_CMNEXT_CLONE_REFCNT  size of that full-clone group, self included
 //!   ATTR_CMNEXT_EXT_FLAGS     EF_MAY_SHARE_BLOCKS / EF_SHARES_ALL_BLOCKS
+//!   ATTR_CMNEXT_REALDEVID     physical APFS volume (System and Data can
+//!                             share the ordinary `st_dev`)
 //!
 //! Verified with `cp -c` on macOS 26: original + 2 clones → all three
 //! report the same clone id, refcnt 3, private 0; writing one byte into
@@ -46,6 +48,9 @@ pub struct CloneAttrs {
     pub private_size: Option<u64>,
     /// 0 when the kernel did not return ATTR_CMNEXT_CLONEID.
     pub clone_id: u64,
+    /// Real APFS volume device, distinct for System and Data even when
+    /// their ordinary `st_dev` is shared. Not emitted into index rows.
+    pub volume_id: u64,
     /// 0 when the kernel did not return ATTR_CMNEXT_CLONE_REFCNT.
     pub clone_refcnt: u32,
     pub ext_flags: u64,
@@ -60,8 +65,8 @@ pub struct CloneAttrs {
 #[cfg(target_os = "macos")]
 #[derive(Default)]
 pub struct CloneAttrCache {
-    full_groups: HashMap<u64, (CloneAttrs, u32)>,
-    /// `(clone id, device, inode)` for multi-link members already counted
+    full_groups: HashMap<(u64, u64), (CloneAttrs, u32)>,
+    /// `(real device, clone id, inode)` for multi-link members already counted
     /// against a group's APFS refcount. Ordinary files need no identity set.
     hardlink_members: std::collections::HashSet<(u64, u64, u64)>,
     lookups: u64,
@@ -74,16 +79,24 @@ impl CloneAttrCache {
         &mut self,
         path: &std::path::Path,
         clone_id: Option<std::num::NonZeroU64>,
+        volume_id: Option<u64>,
         hardlink_id: Option<(u64, u64)>,
     ) -> CloneAttrs {
         let Some(clone_id) = clone_id else {
             return CloneAttrs::default();
         };
         let clone_id_value = clone_id.get();
-        let hardlink_member = hardlink_id.map(|(dev, ino)| (clone_id_value, dev, ino));
-        let hardlink_already_counted = hardlink_member
-            .is_some_and(|member| self.hardlink_members.contains(&member));
-        if let Some((attrs, seen)) = self.full_groups.get_mut(&clone_id_value) {
+        // An unavailable real device cannot safely identify a clone group.
+        // Keep exact per-file attrs, but do not reuse a result across paths.
+        let Some(volume_id) = volume_id else {
+            self.lookups += 1;
+            return file_clone_attrs(path, Some(clone_id), None);
+        };
+        let key = (volume_id, clone_id_value);
+        let hardlink_member = hardlink_id.map(|(_, ino)| (volume_id, clone_id_value, ino));
+        let hardlink_already_counted =
+            hardlink_member.is_some_and(|member| self.hardlink_members.contains(&member));
+        if let Some((attrs, seen)) = self.full_groups.get_mut(&key) {
             // APFS counts cloned inodes, not directory entries. Reusing the
             // result for another name of this inode must not consume another
             // slot from clone_refcnt.
@@ -104,20 +117,20 @@ impl CloneAttrCache {
         }
 
         self.lookups += 1;
-        let attrs = file_clone_attrs(path, Some(clone_id));
+        let attrs = file_clone_attrs(path, Some(clone_id), Some(volume_id));
         // A full-clone group has no blocks private to one member. Be
         // deliberately conservative if a future APFS version reports a
         // non-zero private size alongside refcnt >= 2: measure every member
         // instead of assuming that value is reusable.
         if attrs.clone_refcnt >= 2 && attrs.private_size == Some(0) {
-            let cached = if let Some((cached, seen)) = self.full_groups.get_mut(&clone_id_value) {
+            let cached = if let Some((cached, seen)) = self.full_groups.get_mut(&key) {
                 cached.clone_refcnt = cached.clone_refcnt.max(attrs.clone_refcnt);
                 *seen = seen.saturating_add(1);
                 true
             } else if self.full_groups.len() < MAX_CLONE_GROUPS {
                 // Use the same cap as the writer's clone-group index. Past
                 // this, exact accounting continues; only lookup reuse stops.
-                self.full_groups.insert(clone_id_value, (attrs, 1));
+                self.full_groups.insert(key, (attrs, 1));
                 true
             } else {
                 false
@@ -201,7 +214,7 @@ impl CloneTotals {
 pub const OUTSIDE_ROOTS: u32 = u32::MAX - 1;
 const EMPTY_SLOT: u32 = u32::MAX;
 const ROOT_SLOTS: usize = 3;
-/// ~48 B per group incl. hash overhead → ~48 MB worst case. Past this,
+/// ~56 B per group incl. hash overhead → ~56 MB worst case. Past this,
 /// new groups are not tracked and results are flagged approximate.
 pub const MAX_CLONE_GROUPS: usize = 1_000_000;
 const MAX_ROOT_EDGES: usize = 250_000;
@@ -218,9 +231,9 @@ struct GroupRec {
     overflow: bool,
 }
 
-/// Full-clone groups seen during one scan, keyed by clone id.
+/// Full-clone groups seen during one scan, keyed by APFS volume and clone id.
 pub struct CloneGroups {
-    groups: HashMap<u64, GroupRec>,
+    groups: HashMap<(u64, u64), GroupRec>,
     truncated: bool,
 }
 
@@ -263,14 +276,21 @@ impl CloneGroups {
         let Some((clone_id, refcnt)) = attrs.full_clone_group() else {
             return;
         };
-        let rec = match self.groups.get_mut(&clone_id) {
+        if attrs.volume_id == 0 {
+            // No reliable volume identity: the per-file values remain exact,
+            // but cross-file clone attribution must be marked incomplete.
+            self.truncated = true;
+            return;
+        }
+        let key = (attrs.volume_id, clone_id);
+        let rec = match self.groups.get_mut(&key) {
             Some(rec) => rec,
             None => {
                 if self.groups.len() >= MAX_CLONE_GROUPS {
                     self.truncated = true;
                     return;
                 }
-                self.groups.entry(clone_id).or_insert(GroupRec {
+                self.groups.entry(key).or_insert(GroupRec {
                     alloc: allocated,
                     refcnt,
                     seen: 0,
@@ -295,8 +315,10 @@ impl CloneGroups {
     pub fn summary(&self) -> CloneGroupSummary {
         let mut duplicate_bytes = 0u64;
         for rec in self.groups.values() {
-            duplicate_bytes =
-                duplicate_bytes.saturating_add(rec.alloc.saturating_mul(u64::from(rec.seen.saturating_sub(1))));
+            duplicate_bytes = duplicate_bytes.saturating_add(
+                rec.alloc
+                    .saturating_mul(u64::from(rec.seen.saturating_sub(1))),
+            );
         }
         CloneGroupSummary {
             duplicate_bytes,
@@ -325,9 +347,8 @@ impl CloneGroups {
                 .copied()
                 .filter(|r| *r != EMPTY_SLOT && *r != OUTSIDE_ROOTS && (*r as usize) < root_count)
                 .collect();
-            let only_dev_root = dev_roots.len() == 1
-                && !rec.overflow
-                && !rec.roots.contains(&OUTSIDE_ROOTS);
+            let only_dev_root =
+                dev_roots.len() == 1 && !rec.overflow && !rec.roots.contains(&OUTSIDE_ROOTS);
             if only_dev_root && rec.seen >= rec.refcnt {
                 let share = &mut out[dev_roots[0] as usize];
                 share.internal_bytes = share.internal_bytes.saturating_add(rec.alloc);
@@ -425,7 +446,11 @@ mod reader {
     /// Clone attributes of one regular file, given the clone id the
     /// walker's bulk folder read returned (Some only for files that may
     /// share blocks). Other files cost nothing and report no sharing.
-    pub fn file_clone_attrs(path: &Path, clone_id: Option<NonZeroU64>) -> CloneAttrs {
+    pub fn file_clone_attrs(
+        path: &Path,
+        clone_id: Option<NonZeroU64>,
+        volume_id: Option<u64>,
+    ) -> CloneAttrs {
         let Some(clone_id) = clone_id else {
             return CloneAttrs::default();
         };
@@ -433,6 +458,7 @@ mod reader {
         CloneAttrs {
             private_size,
             clone_id: clone_id.get(),
+            volume_id: volume_id.unwrap_or(0),
             clone_refcnt,
             ext_flags: EF_MAY_SHARE_BLOCKS,
         }
@@ -466,13 +492,21 @@ mod reader {
                     &mut attrs as *mut AttrList as *mut libc::c_void,
                     buf.as_mut_ptr() as *mut libc::c_void,
                     buf.len(),
-                    (FSOPT_NOFOLLOW | FSOPT_ATTR_CMN_EXTENDED | FSOPT_PACK_INVAL_ATTRS) as libc::c_uint,
+                    (FSOPT_NOFOLLOW | FSOPT_ATTR_CMN_EXTENDED | FSOPT_PACK_INVAL_ATTRS)
+                        as libc::c_uint,
                 )
             };
             if rc != 0 {
                 if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL) {
-                    let next = if mask == FULL_MASK { ATTR_CMNEXT_PRIVATESIZE } else { 0 };
-                    if FORK_MASK.compare_exchange(mask, next, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+                    let next = if mask == FULL_MASK {
+                        ATTR_CMNEXT_PRIVATESIZE
+                    } else {
+                        0
+                    };
+                    if FORK_MASK
+                        .compare_exchange(mask, next, Ordering::Relaxed, Ordering::Relaxed)
+                        .is_ok()
+                    {
                         eprintln!(
                             "[diskhound-native-scanner] clone attrs: kernel rejected mask {mask:#x}, falling back to {next:#x}"
                         );
@@ -482,8 +516,12 @@ mod reader {
                 return (None, 0);
             }
             let returned = read_u32(&buf, 4 + 16).unwrap_or(0);
-            let private = (returned & ATTR_CMNEXT_PRIVATESIZE != 0).then(|| read_u64(&buf, 24)).flatten();
-            let refcnt = if mask & ATTR_CMNEXT_CLONE_REFCNT != 0 && returned & ATTR_CMNEXT_CLONE_REFCNT != 0 {
+            let private = (returned & ATTR_CMNEXT_PRIVATESIZE != 0)
+                .then(|| read_u64(&buf, 24))
+                .flatten();
+            let refcnt = if mask & ATTR_CMNEXT_CLONE_REFCNT != 0
+                && returned & ATTR_CMNEXT_CLONE_REFCNT != 0
+            {
                 read_u32(&buf, 32).unwrap_or(0)
             } else {
                 0
@@ -493,11 +531,13 @@ mod reader {
     }
 
     fn read_u32(buf: &[u8], at: usize) -> Option<u32> {
-        buf.get(at..at + 4).map(|b| u32::from_ne_bytes(b.try_into().unwrap()))
+        buf.get(at..at + 4)
+            .map(|b| u32::from_ne_bytes(b.try_into().unwrap()))
     }
 
     fn read_u64(buf: &[u8], at: usize) -> Option<u64> {
-        buf.get(at..at + 8).map(|b| u64::from_ne_bytes(b.try_into().unwrap()))
+        buf.get(at..at + 8)
+            .map(|b| u64::from_ne_bytes(b.try_into().unwrap()))
     }
 }
 
@@ -512,6 +552,7 @@ mod tests {
         CloneAttrs {
             private_size: Some(0),
             clone_id: id,
+            volume_id: 1,
             clone_refcnt: refcnt,
             ext_flags: EF_MAY_SHARE_BLOCKS | EF_SHARES_ALL_BLOCKS,
         }
@@ -539,7 +580,12 @@ mod tests {
             crate::work::take()
         };
         let (n, k) = (4_000, 50);
-        assert_scales("clone groups", groups(n, k), groups(8 * n, 8 * k), 20 * 8 * n as u64);
+        assert_scales(
+            "clone groups",
+            groups(n, k),
+            groups(8 * n, 8 * k),
+            20 * 8 * n as u64,
+        );
     }
 
     #[test]
@@ -555,6 +601,7 @@ mod tests {
             &CloneAttrs {
                 private_size: Some(8192),
                 clone_id: 99,
+                volume_id: 1,
                 clone_refcnt: 1,
                 ext_flags: EF_MAY_SHARE_BLOCKS,
             },
@@ -568,7 +615,10 @@ mod tests {
 
     #[test]
     fn clone_private_is_clamped_and_defaults_to_zero() {
-        let attrs = CloneAttrs { private_size: Some(10_000), ..Default::default() };
+        let attrs = CloneAttrs {
+            private_size: Some(10_000),
+            ..Default::default()
+        };
         assert_eq!(attrs.clone_private_of(4096), 4096);
         assert_eq!(CloneAttrs::default().clone_private_of(4096), 0);
     }
@@ -586,6 +636,52 @@ mod tests {
         assert_eq!(s.duplicate_bytes, 2000);
         assert_eq!(s.groups, 2);
         assert!(!s.truncated);
+    }
+
+    #[test]
+    fn same_clone_id_on_different_volumes_stays_separate() {
+        let mut g = CloneGroups::new();
+        for volume_id in [11, 22] {
+            let mut attrs = clone_file(7, 2);
+            attrs.volume_id = volume_id;
+            let allocated = volume_id / 11 * 4096;
+            g.add(&attrs, allocated, (volume_id / 11 - 1) as u32);
+            g.add(&attrs, allocated, (volume_id / 11 - 1) as u32);
+        }
+        let summary = g.summary();
+        assert_eq!(summary.groups, 2);
+        assert_eq!(summary.duplicate_bytes, 12_288);
+        let shares = g.attribute(2);
+        assert_eq!(shares[0].internal_bytes, 4096);
+        assert_eq!(shares[1].internal_bytes, 8192);
+        assert!(shares.iter().all(|share| share.neighbors.is_empty()));
+    }
+
+    #[test]
+    fn group_without_volume_identity_is_marked_incomplete() {
+        let mut g = CloneGroups::new();
+        let mut attrs = clone_file(7, 2);
+        attrs.volume_id = 0;
+        g.add(&attrs, 4096, 0);
+        assert!(g.summary().truncated);
+        assert_eq!(g.summary().groups, 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cache_does_not_reuse_same_clone_id_from_another_volume() {
+        use std::num::NonZeroU64;
+        let mut cache = CloneAttrCache::default();
+        let attrs = clone_file(7, 2);
+        cache.full_groups.insert((1, 7), (attrs, 1));
+        let clone_id = NonZeroU64::new(7);
+        let missing = std::path::Path::new("/nonexistent-diskhound-clone");
+        assert_eq!(cache.get(missing, clone_id, Some(1), None), attrs);
+        assert_eq!(cache.hits(), 1);
+        let other = cache.get(missing, clone_id, Some(2), None);
+        assert_eq!(other.volume_id, 2);
+        assert_ne!(other, attrs);
+        assert_eq!(cache.lookups(), 1);
     }
 
     #[test]
@@ -663,21 +759,32 @@ mod tests {
         let src = std::ffi::CString::new(orig.to_str().unwrap()).unwrap();
         let dst = std::ffi::CString::new(clone.to_str().unwrap()).unwrap();
         unsafe extern "C" {
-            fn clonefile(src: *const libc::c_char, dst: *const libc::c_char, flags: u32) -> libc::c_int;
+            fn clonefile(
+                src: *const libc::c_char,
+                dst: *const libc::c_char,
+                flags: u32,
+            ) -> libc::c_int;
         }
         assert_eq!(unsafe { clonefile(src.as_ptr(), dst.as_ptr(), 0) }, 0);
         std::fs::write(dir.join("plain.bin"), vec![1u8; 64 * 1024]).unwrap();
 
-        let options = dua_core::Options { apfs_clone_metadata: true, ..dua_core::Options::default() };
+        let options = dua_core::Options {
+            apfs_clone_metadata: true,
+            ..dua_core::Options::default()
+        };
         let mut attrs = HashMap::new();
         for entry in dua_core::walk(&dir, 1, dua_core::Order::Completion, options, |_| true) {
             let entry = entry.unwrap();
             if !entry.file_type.is_file() {
                 continue;
             }
-            let clone_id = entry.metadata.as_ref().unwrap().as_ref().unwrap().clone_id();
+            let metadata = entry.metadata.as_ref().unwrap().as_ref().unwrap();
+            let clone_id = metadata.clone_id();
             let name = entry.file_name.to_string_lossy().into_owned();
-            attrs.insert(name, file_clone_attrs(&entry.path(), clone_id));
+            attrs.insert(
+                name,
+                file_clone_attrs(&entry.path(), clone_id, metadata.real_dev()),
+            );
         }
         let (a, b, plain) = (attrs["orig.bin"], attrs["clone.bin"], attrs["plain.bin"]);
         assert!(a.may_share() && b.may_share());
@@ -685,7 +792,41 @@ mod tests {
         assert_eq!(a.private_size, Some(0));
         assert_eq!(b.private_size, Some(0));
         assert_eq!(a.clone_id, b.clone_id);
+        assert_ne!(a.volume_id, 0);
+        assert_eq!(a.volume_id, b.volume_id);
         assert_eq!(a.full_clone_group().map(|g| g.1), Some(2));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn startup_system_and_data_report_distinct_real_devices() {
+        use std::os::unix::fs::MetadataExt;
+        let system = std::path::Path::new("/System/Library/CoreServices/SystemVersion.plist");
+        let data = std::path::Path::new("/System/Volumes/Data/private/etc/hosts");
+        let (Ok(system_stat), Ok(data_stat)) = (std::fs::metadata(system), std::fs::metadata(data))
+        else {
+            return; // Non-startup APFS layout, such as a CI test volume.
+        };
+        if system_stat.dev() != data_stat.dev() {
+            return; // No logical device collision on this host.
+        }
+        let options = dua_core::Options {
+            apfs_clone_metadata: true,
+            ..Default::default()
+        };
+        let read_device = |file: &std::path::Path| {
+            dua_core::read_dir(file.parent().unwrap(), options)
+                .unwrap()
+                .map(Result::unwrap)
+                .find(|entry| entry.file_name == file.file_name().unwrap())
+                .unwrap()
+                .metadata
+                .unwrap()
+                .unwrap()
+                .real_dev()
+                .unwrap()
+        };
+        assert_ne!(read_device(system), read_device(data));
     }
 }

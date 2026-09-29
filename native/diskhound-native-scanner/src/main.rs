@@ -1704,7 +1704,12 @@ fn scan_generic_with_plan_mode(
         let clone = clone_attrs_enabled.then(|| {
             if cache_clone_attrs {
                 let before = clone_cache.lookups();
-                let attrs = clone_cache.get(&path, metadata.clone_id(), link_id);
+                let attrs = clone_cache.get(
+                    &path,
+                    metadata.clone_id(),
+                    metadata.real_dev(),
+                    link_id,
+                );
                 if clone_cache.lookups() != before {
                     state.io.count_stat();
                 }
@@ -1713,7 +1718,7 @@ fn scan_generic_with_plan_mode(
                 if metadata.clone_id().is_some() {
                     state.io.count_stat();
                 }
-                clone_attrs::file_clone_attrs(&path, metadata.clone_id())
+                clone_attrs::file_clone_attrs(&path, metadata.clone_id(), metadata.real_dev())
             }
         });
         #[cfg(not(target_os = "macos"))]
@@ -6051,6 +6056,7 @@ mod index_writer_clone_tests {
         let clone = |private_size| CloneAttrs {
             private_size,
             clone_id: 0,
+            volume_id: 0,
             clone_refcnt: 0,
             ext_flags: EF_MAY_SHARE_BLOCKS,
         };

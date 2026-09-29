@@ -579,6 +579,7 @@ mod tests {
         let shared = |id: u64| CloneAttrs {
             private_size: Some(0),
             clone_id: id,
+            volume_id: 1,
             clone_refcnt: 2,
             ext_flags: EF_MAY_SHARE_BLOCKS | EF_SHARES_ALL_BLOCKS,
         };
@@ -626,6 +627,7 @@ mod tests {
         let copy_of = |id: u64, refcnt: u32, private: u64| CloneAttrs {
             private_size: Some(private),
             clone_id: id,
+            volume_id: 1,
             clone_refcnt: refcnt,
             ext_flags: EF_MAY_SHARE_BLOCKS | EF_SHARES_ALL_BLOCKS,
         };
