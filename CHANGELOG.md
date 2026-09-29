@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.6.4 — 2026-09-29
+
+The Linux AppImage mounts on the runtimes AppImage catalogs use.
+
+### Linux
+
+The AppImage is a gzip squashfs again. 0.6.3 compressed it with xz, and
+the runtime AppImageHub uses can mount zlib and zstd only, so its test
+could not open the file. Windows and macOS packages are unchanged.
+
 ## 0.6.3 — 2026-09-28
 
 Linux shows each process's real memory and each disk once. macOS shows
