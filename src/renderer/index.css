@@ -10018,3 +10018,12 @@ body.system-widget-body #app {
   .dev-summary-actions { margin-left: 0; }
   .dev-select-bar { padding-left: 12px; padding-right: 12px; }
 }
+
+.docker-view { height: 100%; padding: 24px; overflow: auto; }
+.docker-view p { max-width: 1000px; line-height: 1.5; margin: 10px 0; color: var(--text-secondary); }
+.docker-view h3 { margin-top: 22px; }
+.docker-view .action-btn { margin-right: 8px; }
+.docker-view table { width: 100%; border-collapse: collapse; text-align: left; }
+.docker-view th, .docker-view td { padding: 10px; border-bottom: 1px solid var(--border); }
+.docker-view td:first-child { overflow-wrap: anywhere; }
+.docker-table { overflow-x: auto; }

@@ -1,3 +1,4 @@
+import { DockerService } from "./docker/inventory";
 import * as FS from "node:fs/promises";
 import * as FS_SYNC from "node:fs";
 import * as OS from "node:os";
@@ -1645,6 +1646,28 @@ void (async () => {
         `Remove or narrow that exclusion in Settings > Protected Folders to allow this action.`,
     };
   };
+
+  const docker = new DockerService();
+  app.on("before-quit", () => docker.cancel());
+  ipcMain.handle("diskhound:docker-inventory", async () => {
+    try { return { ok: true, inventory: await docker.refresh() }; }
+    catch (error) { return { ok: false, message: String(error) }; }
+  });
+  ipcMain.handle("diskhound:docker-cancel", () => docker.cancel());
+  ipcMain.handle("diskhound:docker-remove-image", async (_event, id: unknown) => {
+    try {
+      const removed = await docker.remove(id, async (image, inventory) => {
+        if (!mainWindow) return false;
+        const answer = await dialog.showMessageBox(mainWindow, {
+          type: "warning", buttons: ["Cancel", "Remove image"], defaultId: 0, cancelId: 0,
+          message: `Remove Docker image ${image.name}?`,
+          detail: `${image.id}\nContext: ${inventory.context}\nEndpoint: ${inventory.endpoint}\n\nProvenance is unknown. This may be a locally built image you cannot download again. All local platform variants are targeted. Shared layers may remain and host disk space may not shrink. Multiple tags or container references may prevent removal.`,
+        });
+        return answer.response === 1;
+      });
+      return { ok: removed, message: removed ? "Image removed. Refresh to see current usage." : "Removal cancelled." };
+    } catch (error) { return { ok: false, message: String(error) }; }
+  });
 
   // ── IPC: Build identity ───────────────────────────────────
 

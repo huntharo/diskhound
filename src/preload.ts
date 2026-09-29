@@ -42,6 +42,9 @@ const WINDOW_SHOWN_CHANNEL = "diskhound:window-shown";
 
 const api: DiskhoundNativeApi = {
   platform,
+  getDockerInventory: () => ipcRenderer.invoke("diskhound:docker-inventory"),
+  cancelDockerInventory: () => ipcRenderer.invoke("diskhound:docker-cancel"),
+  removeDockerImage: (id) => ipcRenderer.invoke("diskhound:docker-remove-image", id),
   cpuCount: OS.availableParallelism(),
 
   // Scan
