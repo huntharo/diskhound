@@ -20,15 +20,15 @@ import { toast } from "./Toasts";
 
 /**
  * What the tooltip says the choice costs, where the gauge alone cannot.
- * Measured with the native scanner on an 18-CPU M5 Max, whole `/` (20.7M
- * files, medians of 3): against Balanced's 4 workers, 8 took 7% longer on
- * 38% more CPU time and 18 finished 6% sooner on 65% more
+ * Measured with the native scanner on an 18-CPU M5 Max, whole `/` (21.6M
+ * files, medians of 3): 8 workers finished about 20% sooner than Balanced's
+ * 4, while 18 saved only another 2% and used about 65% more CPU time
  * (DEFAULT_POWER_EFFICIENCY has the numbers). Elsewhere the fans are a
  * likely cost, not a measured one.
  */
 export function powerTradeoff(platform: string): string {
   const fans = platform === "darwin" ? "runs the fans at full speed" : "can run the fans at full speed";
-  return `Above Balanced, a scan finishes little or no sooner but uses 40–65% more CPU, and ${fans}.`;
+  return `Aggressive finishes about 20% sooner than Balanced. Maximum saves little more time but uses about 65% more CPU, and ${fans}.`;
 }
 
 const TOOLTIP_DELAY_MS = 450;

@@ -16,12 +16,11 @@ export const POWER_EFFICIENCY_PRESETS: readonly PowerEfficiency[] = [
 
 /**
  * Settings without a saved choice get this. On an 18-CPU M5 Max, a whole
- * `/` scan (20.7M files; medians of 3, scripts/bench-scan-workers.py)
- * took 250 s and 661 CPU-s at 4 workers, 267 s and 913 CPU-s at 8 (the
- * scanner's old cap), 234 s and 1,088 CPU-s at 18, and 334 s and 558
- * CPU-s at 2. The scanner's one consumer thread, which takes every entry
- * the walkers find, runs near a full core, so past 4 more walkers barely
- * speed the scan up; they only add CPU time.
+ * `/` scan (21.6M files; medians of 3, scripts/bench-scan-workers.py)
+ * took 222 s and 577 CPU-s at 4 workers, 182 s and 845 CPU-s at 8,
+ * 179 s and 1,382 CPU-s at 18, and 348 s and 495 CPU-s at 2. APFS clone
+ * metadata is cached per full-clone group, so 8 is now within 2% of maximum
+ * speed while 4 still saves about a third of 8's CPU time.
  */
 export const DEFAULT_POWER_EFFICIENCY: PowerEfficiency = "balanced";
 

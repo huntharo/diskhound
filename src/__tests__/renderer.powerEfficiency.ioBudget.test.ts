@@ -101,7 +101,8 @@ describe("the Power Efficiency button", () => {
     const tip = one(view, ".power-tip");
     expect(tip.textContent).toContain("Power Efficiency: Balanced");
     expect(tip.textContent).toContain("4 workers of 18 CPUs");
-    expect(tip.textContent).toContain("Above Balanced");
+    expect(tip.textContent).toContain("Aggressive finishes about 20% sooner");
+    expect(tip.textContent).toContain("Maximum saves little more time");
     expect(tip.textContent).toContain("runs the fans at full speed");
     expect(tip.textContent).toContain("Used from the next scan, and remembered.");
     expect(tip.textContent).not.toMatch(/thread/i);
