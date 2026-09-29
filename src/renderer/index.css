@@ -9694,7 +9694,7 @@ body.system-widget-body #app {
   .dev-select-bar { padding-left: 12px; padding-right: 12px; }
 }
 
-.docker-view { padding: 24px; overflow: auto; }
+.docker-view { height: 100%; padding: 24px; overflow: auto; }
 .docker-view p { max-width: 1000px; line-height: 1.5; margin: 10px 0; color: var(--text-secondary); }
 .docker-view h3 { margin-top: 22px; }
 .docker-view .action-btn { margin-right: 8px; }

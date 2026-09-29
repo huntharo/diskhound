@@ -25,7 +25,15 @@ test("Docker inventory is opt-in, paginated, and separates resources and usage",
   await expect(rows.nth(1).getByRole("button")).toBeDisabled();
   await expect(rows.nth(2).getByRole("button")).toBeEnabled();
   await page.screenshot({ path: testInfo.outputPath("docker-inventory.png") });
-  await page.getByRole("button", { name: "Next", exact: true }).click();
+  // Wheel scrolling must expose the last row and pagination without Playwright's
+  // click auto-scroll masking an unconstrained, clipped inventory container.
+  const view = page.locator(".docker-view");
+  await view.hover({ position: { x: 20, y: 20 } });
+  await page.mouse.wheel(0, 100_000);
+  await expect(rows.last()).toBeInViewport();
+  const next = page.getByRole("button", { name: "Next", exact: true });
+  await expect(next).toBeInViewport();
+  await next.click();
   await expect(rows).toHaveCount(1);
   await rows.nth(0).getByRole("button").click();
   await expect(page.getByRole("status")).toHaveText("Removal cancelled.");
