@@ -17,6 +17,9 @@ export const nativeApi: DiskhoundNativeApi = new Proxy(
         if (prop === "platform") {
           return guessPlatformFromUserAgent();
         }
+        if (prop === "cpuCount") {
+          return typeof navigator === "undefined" ? 1 : navigator.hardwareConcurrency || 1;
+        }
         // Event listeners: return no-op unsubscriber
         if (prop.startsWith("on")) {
           return (_listener: unknown) => () => {};

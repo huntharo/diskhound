@@ -1,5 +1,6 @@
 import * as FS from "node:fs/promises";
 import * as FS_SYNC from "node:fs";
+import * as OS from "node:os";
 import * as Path from "node:path";
 import { getHeapStatistics } from "node:v8";
 import { Worker } from "node:worker_threads";
@@ -27,6 +28,7 @@ import {
   type AppSettings,
   type DevArtifactReport,
   type DevBranch,
+  type DevGitRepoInfo,
   type DiskIoSnapshot,
   type FullDiffStatus,
   type MonitoringSnapshot,
@@ -53,6 +55,7 @@ import {
   type WorkerToMainMessage,
 } from "./shared/contracts";
 import { platformTerminology } from "./shared/platformTerminology";
+import { isPowerEfficiency, powerEfficiencyWorkers } from "./shared/powerEfficiency";
 import {
   checkDiskDeltas,
   flushDiskMonitor,
@@ -65,6 +68,7 @@ import {
   startDiskMonitoring,
 } from "./shared/diskMonitor";
 import { readDevBranch } from "./shared/devBranch";
+import { annotateGitRepos, checkGitRepo } from "./shared/gitRepo";
 import { getStorageAccounting } from "./shared/macStorageAccounting";
 import { createScanSnapshotStore, type SnapshotWriteOptions } from "./shared/scanStore";
 import { createAffinityEnforcer, upsertAffinityRule } from "./shared/affinityEnforcer";
@@ -1150,7 +1154,8 @@ void (async () => {
         // Record in recent scans, and auto-seed defaultRootPath so monitoring
         // has a target to rescan without the user having to set one manually.
         if (settings && message.snapshot.rootPath) {
-          void settingsStore!.set(settingsWithRecentScan(settings, message.snapshot, session.trigger));
+          void settingsStore!.update((current) =>
+            settingsWithRecentScan(current, message.snapshot, session.trigger));
         }
 
         if (settings?.notifications.scanComplete) {
@@ -1365,6 +1370,12 @@ void (async () => {
       ? undefined
       : getScanHistory(rootPath).find((entry) => entry.filesVisited > 0)?.filesVisited;
 
+    // Power Efficiency, read here so a new choice reaches the next scan
+    // and never the one already running.
+    const cpus = OS.availableParallelism();
+    const powerEfficiency = settingsStore?.get().scanning.powerEfficiency;
+    const workers = powerEfficiency ? powerEfficiencyWorkers(powerEfficiency, cpus) : undefined;
+
     // Buffer for messages that arrive before the session is fully wired
     const earlyMessages: WorkerToMainMessage[] = [];
     let earlyErrors: Error[] = [];
@@ -1380,6 +1391,7 @@ void (async () => {
         expectedTotalFiles,
         folderTreeOutput: tempFolderTreePath,
         devArtifactsOutput: tempDevArtifactsPath,
+        workers,
       },
       {
         onMessage: (message) => {
@@ -1982,17 +1994,19 @@ void (async () => {
   // the counts it hasn't saved yet, and saves keep its values.
   ipcMain.handle("diskhound:get-affinity-rules", () => affinityEnforcer.rules());
   ipcMain.handle("diskhound:upsert-affinity-rule", async (_event, rule: AffinityRule) => {
-    const settings = settingsStore?.get();
-    if (!settings) return { ok: false, message: "Settings unavailable" };
-    const next = upsertAffinityRule(settings.affinityRules, rule);
-    await settingsStore?.set({ ...settings, affinityRules: next });
+    if (!settingsStore) return { ok: false, message: "Settings unavailable" };
+    await settingsStore.update((current) => ({
+      ...current,
+      affinityRules: upsertAffinityRule(current.affinityRules, rule),
+    }));
     return { ok: true };
   });
   ipcMain.handle("diskhound:delete-affinity-rule", async (_event, id: string) => {
-    const settings = settingsStore?.get();
-    if (!settings) return { ok: false, message: "Settings unavailable" };
-    const next = settings.affinityRules.filter((r) => r.id !== id);
-    await settingsStore?.set({ ...settings, affinityRules: next });
+    if (!settingsStore) return { ok: false, message: "Settings unavailable" };
+    await settingsStore.update((current) => ({
+      ...current,
+      affinityRules: current.affinityRules.filter((candidate) => candidate.id !== id),
+    }));
     return { ok: true };
   });
 
@@ -2240,6 +2254,19 @@ void (async () => {
 
     restartMonitoring(normalizedSettings);
     handleUpdateSettingsChanged?.(previousSettings, normalizedSettings);
+  });
+
+  // Only the one field, so a renderer's older copy of the rest can't
+  // overwrite it. Nothing restarts: createPreferredScanSession reads it
+  // when the next scan starts.
+  ipcMain.handle("diskhound:set-power-efficiency", async (_event, preset: unknown) => {
+    if (!isPowerEfficiency(preset)) {
+      throw new Error(`Unknown Power Efficiency preset: ${String(preset)}`);
+    }
+    return settingsStore!.update((current) => ({
+      ...current,
+      scanning: { ...current.scanning, powerEfficiency: preset },
+    }));
   });
 
   ipcMain.handle("diskhound:get-recent-scans", () => settingsStore!.get().recentScans ?? []);
@@ -3351,10 +3378,15 @@ void (async () => {
     const at = misses.get(scanId);
     return at !== undefined && Date.now() - at < DEV_ARTIFACT_NEGATIVE_TTL_MS;
   };
-  const setDevReport = (scanId: string, report: DevArtifactReport) => {
-    devArtifactCache.set(scanId, report);
+  // Remotes of each `git-repo` row, keyed by its `.git` path. Read once
+  // per repo per run; a rebuilt report (forget, tab switch) reads none.
+  const devGitInfo = new Map<string, DevGitRepoInfo>();
+  const setDevReport = async (scanId: string, report: DevArtifactReport) => {
+    const annotated = await annotateGitRepos(report, devGitInfo);
+    devArtifactCache.set(scanId, annotated);
     devSidecarMissingAt.delete(scanId);
     devFullLoadEmptyAt.delete(scanId);
+    return annotated;
   };
 
   const loadDevReport = (scanId: string, scanRoot: string, previousId?: string) =>
@@ -3384,8 +3416,8 @@ void (async () => {
     if (!loadPromise) {
       loadPromise = loadDevReport(current.id, rootPath, history[1]?.id)
         .then((report) => {
-          if (report) setDevReport(current.id, report);
-          else rememberDevNone(devSidecarMissingAt, current);
+          if (report) return setDevReport(current.id, report);
+          rememberDevNone(devSidecarMissingAt, current);
           return report;
         })
         .catch((err) => {
@@ -3438,8 +3470,7 @@ void (async () => {
         },
         { workerPath: devArtifactsWorkerEntry },
       );
-      setDevReport(current.id, classified);
-      return classified;
+      return setDevReport(current.id, classified);
     })().catch((err) => {
       writeCrashLog(
         "dev-artifacts",
@@ -3475,9 +3506,7 @@ void (async () => {
     if (!sidecar) {
       writeCrashLog("dev-artifacts", `forget: no sidecar scanId=${current.id} paths=${list.length}`);
       if (!cached || list.length === 0) return cached ?? null;
-      const next = dropArtifactsFromReport(cached, list);
-      setDevReport(current.id, next);
-      return next;
+      return setDevReport(current.id, dropArtifactsFromReport(cached, list));
     }
 
     const nextSidecar = list.length > 0 ? dropSidecarRoots(sidecar, list) : sidecar;
@@ -3490,8 +3519,7 @@ void (async () => {
       );
     }
     const previous = history[1] ? await readDevArtifactSidecar(devArtifactsSidecarPath(history[1].id)) : null;
-    const report = reportFromSidecar(nextSidecar, previous);
-    setDevReport(current.id, report);
+    const report = await setDevReport(current.id, reportFromSidecar(nextSidecar, previous));
     writeCrashLog("dev-artifacts", `forgot ${list.length} tree(s) scanId=${current.id}`);
     return report;
   });
@@ -3504,6 +3532,8 @@ void (async () => {
     devRescanAbort.get(key)?.abort();
     const ac = new AbortController();
     devRescanAbort.set(key, ac);
+    // A rescan re-reads what is on disk, remotes included.
+    devGitInfo.clear();
     try {
       const report = await runDevArtifactsRescanWorker(
         {
@@ -3526,12 +3556,10 @@ void (async () => {
       if (latest && latest.id !== current.id) {
         const adopted = await loadDevReport(latest.id, rootPath, getScanHistory(rootPath)[1]?.id);
         if (adopted && adopted.artifacts.length > 0) {
-          setDevReport(latest.id, adopted);
-          return adopted;
+          return setDevReport(latest.id, adopted);
         }
       }
-      setDevReport(current.id, report);
-      return report;
+      return setDevReport(current.id, report);
     } catch (err) {
       if (ac.signal.aborted) return null;
       writeCrashLog(
@@ -3542,6 +3570,21 @@ void (async () => {
     } finally {
       if (devRescanAbort.get(key) === ac) devRescanAbort.delete(key);
     }
+  });
+
+  // Just before the Dev tab offers to remove a checkout. Runs only on
+  // that click, in that one repo.
+  ipcMain.handle("diskhound:check-git-repo", async (_event, checkoutPath: unknown) => {
+    if (typeof checkoutPath !== "string" || !Path.isAbsolute(checkoutPath)) {
+      throw new Error("check-git-repo needs an absolute checkout path");
+    }
+    const check = await checkGitRepo(checkoutPath);
+    writeCrashLog(
+      "dev-artifacts",
+      `git check git=${check.gitAvailable} remotes=${check.remotes.length} unpushed=${check.unpushedCommits} `
+        + `changed=${check.changedFiles} stashes=${check.stashes} worktrees=${check.linkedWorktrees.length}`,
+    );
+    return check;
   });
 
   // ── IPC: Duplicate Detection ────────────────────────────

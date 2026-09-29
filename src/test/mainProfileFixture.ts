@@ -38,6 +38,8 @@ export interface SeedRoot {
   devSidecar?: "artifacts" | "empty" | "missing";
   /** false leaves out the folder-tree sidecar. */
   folderTree?: boolean;
+  /** Extra Dev sidecar roots (real folders, such as `.git` repos on disk), after the node_modules ones. */
+  devRoots?: DevArtifactRootRec[];
   /**
    * Each scan finds some files bigger than the one before, so Changes
    * has rows to show. Off by default: every scan is the same.
@@ -225,7 +227,8 @@ export async function seedProfile(userData: string, options: SeedOptions): Promi
           ? []
           : tree.folders
             .filter((folder) => Path.basename(folder) === "node_modules")
-            .map((folder, i) => ({ path: folder, kind: "node-modules", size: 40_000_000 + i * 1_000, files: 900 + i }));
+            .map((folder, i): DevArtifactRootRec => ({ path: folder, kind: "node-modules", size: 40_000_000 + i * 1_000, files: 900 + i }))
+            .concat(root.devRoots ?? []);
         await writeDevArtifactSidecar(devArtifactsSidecarPath(id), {
           version: 1,
           rootPath: root.rootPath,

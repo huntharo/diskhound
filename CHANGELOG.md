@@ -2,13 +2,47 @@
 
 ## Unreleased
 
+## 0.6.4 — 2026-09-29
+
+The Linux AppImage mounts on the runtimes AppImage catalogs use.
+
+### Linux
+
+The AppImage is a gzip squashfs again. 0.6.3 compressed it with xz, and
+the runtime AppImageHub uses can mount zlib and zstd only, so its test
+could not open the file. Windows and macOS packages are unchanged.
+
+## 0.6.3 — 2026-09-28
+
+Linux shows each process's real memory and each disk once. macOS shows
+how full the startup disk is. Unix scans are faster, and a file with
+several names counts once.
+
+### Linux processes
+
+The Processes list was counting every thread as its own process. A
+thread reports the whole process's resident memory, and rows that
+share a name were added together, so a thread pool could show hundreds
+of GB on a machine that does not have it. Each process is one row.
+Its memory and disk I/O are counted once, and its threads' CPU time is
+included. Windows and macOS already listed processes, not threads.
+
+### Linux drives
+
+A btrfs pool is one disk. `df` prints a row for every subvolume, and
+each row repeats the pool's free space, so `/`, `/home`,
+`/var/cache/pacman/pkg`, and `/var/log` on a default install were four
+copies of one disk. The monitor added them up: four rows of 92.9 GB
+free became a header of 371 GB. The drive pills, the picker, the
+system widget, and Settings › Monitoring now keep the shortest mount,
+which is `/` when the pool is the startup disk. A separate partition
+or USB disk still has its own row. A scan of `/` still walks the
+sibling subvolumes.
+
 ### macOS
 
 - The traffic lights are now vertically centred in the header, in line
   with the DiskHound name. They used to sit about 3.5pt high.
-
-### macOS drive list
-
 - The startup disk shows how full the disk is. `/` is the sealed System
   volume, and `df` counts only the OS there (about 12 GB), so a Mac
   that was 95% full showed "11.8 GB used" and an almost empty bar. `/`
@@ -21,6 +55,23 @@
   `/private/var/run`, `/private/var/folders`, and `/private/var/vm` are
   no longer listed as drives. `/Volumes` disks, shares, and other
   device mounts still are.
+- Time Machine snapshot mounts under `/Volumes/.timemachine`,
+  `/Volumes/com.apple.TimeMachine.localsnapshots`, and
+  `/.MobileBackups` are not listed as drives. A disk you named Time
+  Machine, or one whose name ends in `.backup`, still is.
+- The startup disk's free space is Finder's Available, clamped to the
+  volume size. Purgeable space is shown when macOS reports it. Windows
+  and Linux still show the raw free space from `df`.
+- macOS defaults to decimal sizes, where 1 KB is 1,000 bytes, matching
+  Finder. Windows and Linux default to binary sizes, where 1 KB is
+  1,024 bytes. Settings can switch either way.
+- Menus say Finder, Trash, and ⌘ on a Mac. Windows still says Explorer,
+  Recycle Bin, and Ctrl. A delete that asks for elevation mentions the
+  UAC prompt only then.
+- A scan of `/` walks the Data volume once. The firmlink twin under
+  `/System/Volumes/Data` is not a second copy of `/Users`. Other disks
+  mounted below the scan stay out, and Overview links the ones that
+  have a drive pill.
 
 ### Drive picker and header
 
@@ -30,6 +81,7 @@
   (`/Library/Developer/CoreSim…/iOS_21A342`). Hover for the full path.
 - Long Recent Scans paths stay inside the picker the same way, so the
   folder name at the end (`…/node_modules`) stays visible.
+- A long drive list scrolls from the top. A short one stays centered.
 
 ### Shares with spaces in their names
 
@@ -59,6 +111,91 @@
 - DiskHound runs one `df` at a time. It used to start a new one on
   every refresh, and a `df` stuck on an sshfs mount does not exit even
   when killed, so they piled up.
+
+### Scans
+
+- On macOS and Linux, a file with several hard links counts once. The
+  first name in the walk owns the bytes. Cargo `target/` folders, pnpm
+  stores, and snapshot-style trees no longer scan larger than `du`.
+  The first comparison after this upgrade is marked as an accounting
+  change, not space you freed.
+- The Unix walker follows directories with dua-core, on at most 8
+  threads. A full scan of `/` with 21.4 million files on an M5 Max
+  went from 11 minutes 14 seconds to 3 minutes 22 seconds, with less
+  CPU time.
+- Paths stored with JSON escapes, including quotes, decode to the path
+  on disk. A name with a control character or a quote survives a scan.
+
+### Dev Artifacts
+
+- Path tails on macOS and Linux use `/`. A shortened path keeps its
+  leading slash, so `/mnt/c/Users/dev` is not rewritten as `/Users/dev`.
+- Terraform artifacts are `.terraform/providers`,
+  `.terraform/plugins`, and `.terraform.d/plugin-cache`. The rest of
+  `.terraform` is left alone.
+- Git repositories are a row, one per `.git` directory. Removing one
+  checks for unpushed commits, uncommitted changes, and stashes, then
+  moves the whole checkout to the Trash, not only `.git`. A linked
+  worktree's `.git` file stays with its main repo. Homebrew, Scoop,
+  and a checkout that is the scan root can be revealed, not removed.
+- A tree that shrinks between scans shows a signed size change. It
+  used to display as NaN.
+- After a full scan of `/` (42 million files, 10 million directories),
+  every later launch died about 20 seconds in. The folder tree is no
+  longer held in the main process. A tree that does not fit is read in
+  pages, and the fallback worker is capped at 1 GB.
+- A finished folder-tree, Dev Artifacts, or Changes comparison was
+  sometimes reported as out of memory. A result that arrives as the
+  worker exits is kept.
+
+### Overview
+
+- The storage headline is the bytes the scan visited. When clone groups
+  were measured, a second figure subtracts the known full-clone repeats
+  and is labeled an estimate. It is omitted when clones were not
+  measured.
+- On macOS, Overview explains APFS clones and local snapshots, including
+  space a snapshot is still holding after a delete.
+
+### Changes and Windows rescan
+
+- Comparing two scans of about 20 million files sorted the whole index
+  through temporary files: two minutes and 12.4 GB of temporary writes
+  on a nearly full 2 TB disk. Changes keeps the top differences without
+  that sort. Pairs of indexes up to 1 GB load when you open the tab.
+- An incremental scan on Windows keeps a delete, and it keeps the old
+  path of a rename. A file the journal did not resolve is left in
+  place instead of being guessed deleted.
+
+### Cleaning up
+
+- Permanent delete reads one directory ahead and removes files on a few
+  workers, with progress for each file. A symlink is removed, not
+  followed.
+- Largest Files can trash or permanently delete the selection with
+  progress and Cancel. Cancel finishes the files already in flight.
+  What failed, and what never started, stays selected.
+
+### Layout
+
+- Opening search no longer steals the tab bar's row. The tabs used to
+  stretch to fill the window, and the view disappeared under them.
+- Expand and collapse chevrons lead the row. In Duplicates the chevron
+  used to wrap under the checkbox or jump to the far right.
+- Row actions on Largest Files, Duplicates, and Changes appear when
+  you hover or focus the row. While they are hidden they do not take
+  the click; the click reaches the name.
+
+### In the background
+
+- Drive, process, and GPU polls stop while the window is hidden or
+  minimized, and tick once when it is shown again.
+- Opening a view no longer re-reads a scan that is already in memory.
+
+### Development builds
+
+- A build launched from a checkout shows the Git branch in the header.
+  An installed build does not.
 
 ## 0.6.2 — 2026-09-23
 
