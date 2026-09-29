@@ -929,8 +929,9 @@ button, input, select, textarea { font: inherit; }
    * Pills are the column that shrinks and scrolls. Scan controls
    * used to be `1fr` with min-width: 0, so on a Linux window full of
    * mount pills the Stop button overflowed and painted on top of the
-   * root pill's "free" label. */
-  grid-template-columns: auto minmax(168px, 320px) minmax(0, 1fr) auto;
+   * root pill's "free" label. The column also holds the 44px Power
+   * Efficiency gauge and its gap, hence 168 + 52 and 320 + 52. */
+  grid-template-columns: auto minmax(220px, 372px) minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
   padding: 0 12px;
@@ -1057,6 +1058,156 @@ button, input, select, textarea { font: inherit; }
   border-color: rgba(245,158,11,0.35);
   background: rgba(245,158,11,0.08);
 }
+
+/* ── Power Efficiency (components/PowerEfficiencyControl.tsx) ──
+ * A 28px framed button like the scan buttons: four rising bars, lit in
+ * amber up to the saved preset, and a chevron. The menu and tooltip are
+ * fixed-position so the header's overflow can't clip them. */
+.power-control {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.power-btn {
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 7px 0 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.power-btn:hover,
+.power-btn.open {
+  background: var(--bg-row-hover);
+  color: var(--text-secondary);
+}
+.power-btn.open { border-color: var(--border-selected); }
+.power-btn:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
+.power-gauge {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 12px;
+}
+.power-gauge i {
+  display: block;
+  width: 3px;
+  border-radius: 1px;
+  background: var(--text-muted);
+  opacity: 0.45;
+}
+.power-gauge i:nth-child(1) { height: 3px; }
+.power-gauge i:nth-child(2) { height: 6px; }
+.power-gauge i:nth-child(3) { height: 9px; }
+.power-gauge i:nth-child(4) { height: 12px; }
+.power-gauge i.lit { background: var(--amber); opacity: 1; }
+.power-chevron { flex-shrink: 0; }
+
+.power-menu,
+.power-tip {
+  position: fixed;
+  z-index: 60;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+  -webkit-app-region: no-drag;
+  animation: power-pop-in 0.12s ease-out;
+}
+:root.light .power-menu,
+:root.light .power-tip { box-shadow: 0 6px 18px rgba(0, 0, 0, 0.1); }
+@keyframes power-pop-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.power-menu {
+  /* Wide enough for "Drain My Battery" beside the bar and count lanes. */
+  width: 320px;
+  padding: 4px;
+  background: var(--bg);
+  outline: none;
+  user-select: none;
+}
+.power-menu-head {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 8px 6px;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+.power-menu-item {
+  display: grid;
+  /* Check, name, share bar, count. */
+  grid-template-columns: 14px minmax(0, 1fr) 64px 72px;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+}
+.power-menu-item.highlighted { background: var(--bg-row-hover); }
+.power-menu-item.current .power-menu-name { font-weight: 700; }
+/* The saved preset keeps its check wherever the highlight goes. */
+.power-menu-check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--amber);
+}
+.power-menu-item[aria-disabled="true"] { opacity: 0.4; cursor: default; }
+.power-menu-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.power-menu-share {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-row-hover);
+  overflow: hidden;
+}
+.power-menu-share i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--amber);
+}
+.power-menu-count {
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.power-tip {
+  width: 280px;
+  padding: 8px 10px;
+  background: var(--bg-panel);
+  backdrop-filter: blur(12px);
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.power-tip-title { font-size: 12px; font-weight: 600; color: var(--text); }
+.power-tip-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.power-tip-body { font-size: 11px; line-height: 1.45; color: var(--text-tertiary); }
 
 /* Middle-ellipsis path label (components/MiddleEllipsis.tsx). The head
  * shrinks with "…" and the tail keeps the last segment, so long macOS
@@ -1209,7 +1360,7 @@ button, input, select, textarea { font: inherit; }
  * left, so the chip shrinks, down to its min-width, before the pills
  * start to scroll. With no chip the header keeps its release layout. */
 .header:has(> .dev-branch-chip) {
-  grid-template-columns: auto minmax(168px, 320px) minmax(0, max-content) 1fr auto;
+  grid-template-columns: auto minmax(220px, 372px) minmax(0, max-content) 1fr auto;
 }
 .dev-branch-chip {
   justify-self: end;
@@ -5759,6 +5910,24 @@ button, input, select, textarea { font: inherit; }
   border-radius: 3px;
 }
 .toast-close:hover { background: rgba(255,255,255,0.06); color: var(--text); }
+
+/* One action under the body, e.g. "Rescan now" after a Power Efficiency
+ * change. The scan-btn-primary palette at the toast's scale. */
+.toast-action {
+  margin-top: 8px;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--border-selected);
+  border-radius: var(--radius-sm);
+  background: var(--amber-glow);
+  color: var(--amber);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.toast-action:hover { background: color-mix(in srgb, var(--amber) 25%, transparent); }
+.toast-action:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
 
 @keyframes toast-in {
   from { opacity: 0; transform: translateX(24px); }

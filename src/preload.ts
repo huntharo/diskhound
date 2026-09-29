@@ -1,3 +1,5 @@
+import * as OS from "node:os";
+
 import { contextBridge, ipcRenderer } from "electron";
 
 import type {
@@ -40,6 +42,7 @@ const WINDOW_SHOWN_CHANNEL = "diskhound:window-shown";
 
 const api: DiskhoundNativeApi = {
   platform,
+  cpuCount: OS.availableParallelism(),
 
   // Scan
   pickRootPath: () => ipcRenderer.invoke("diskhound:pick-root"),
@@ -79,6 +82,7 @@ const api: DiskhoundNativeApi = {
   // Settings
   getSettings: () => ipcRenderer.invoke("diskhound:get-settings"),
   updateSettings: (settings) => ipcRenderer.invoke("diskhound:update-settings", settings),
+  setPowerEfficiency: (preset) => ipcRenderer.invoke("diskhound:set-power-efficiency", preset),
   getRecentScans: () => ipcRenderer.invoke("diskhound:get-recent-scans"),
 
   // Monitoring
