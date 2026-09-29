@@ -42,6 +42,13 @@ function isFocusVisible(element: HTMLElement): boolean {
   }
 }
 const EDGE = 8;
+const FLOATING_GAP = 4;
+
+interface FloatingAnchor {
+  top?: number;
+  bottom?: number;
+  right: number;
+}
 
 interface MenuButtonProps {
   preset: PowerEfficiency;
@@ -71,13 +78,24 @@ export function PowerEfficiencyMenuButton({ preset, cpus, onChoose, platform = n
   /** The highlighted row while the menu is open, or null when closed. */
   const [highlighted, setHighlighted] = useState<PowerEfficiency | null>(null);
   const [tipOpen, setTipOpen] = useState(false);
-  const [anchor, setAnchor] = useState<{ top: number; right: number } | null>(null);
+  const [anchor, setAnchor] = useState<FloatingAnchor | null>(null);
   const open = highlighted !== null;
 
   const measure = useCallback(() => {
     const rect = buttonRef.current?.getBoundingClientRect();
     if (!rect) return;
-    setAnchor({ top: rect.bottom + 4, right: Math.max(EDGE, window.innerWidth - rect.right) });
+    const right = Math.max(EDGE, window.innerWidth - rect.right);
+    const menuHeight = menuRef.current?.getBoundingClientRect().height ?? 0;
+    const belowTop = rect.bottom + FLOATING_GAP;
+    const belowFits = menuHeight === 0 || belowTop + menuHeight <= window.innerHeight - EDGE;
+    if (!belowFits && rect.top - FLOATING_GAP - menuHeight >= EDGE) {
+      setAnchor({ bottom: window.innerHeight - rect.top + FLOATING_GAP, right });
+      return;
+    }
+    const top = menuHeight === 0
+      ? belowTop
+      : Math.min(belowTop, Math.max(EDGE, window.innerHeight - menuHeight - EDGE));
+    setAnchor({ top, right });
   }, []);
 
   const clearTipTimer = () => {
@@ -109,8 +127,12 @@ export function PowerEfficiencyMenuButton({ preset, cpus, onChoose, platform = n
 
   // An open menu takes the keys; it hands focus back when it closes.
   useLayoutEffect(() => {
-    if (open) menuRef.current?.focus();
-  }, [open]);
+    if (!open) return;
+    // The first anchor renders the menu; now its real height is available
+    // so it can flip above the trigger or clamp inside the viewport.
+    measure();
+    menuRef.current?.focus();
+  }, [open, measure]);
 
   // A press anywhere else closes it. The button and the menu are both in
   // the wrapper, so pressing the button again leaves it to the click,
@@ -122,10 +144,12 @@ export function PowerEfficiencyMenuButton({ preset, cpus, onChoose, platform = n
     };
     const onResize = () => close(false);
     document.addEventListener("mousedown", onPointerDown, true);
+    document.addEventListener("scroll", onResize, true);
     window.addEventListener("resize", onResize);
     window.addEventListener("blur", onResize);
     return () => {
       document.removeEventListener("mousedown", onPointerDown, true);
+      document.removeEventListener("scroll", onResize, true);
       window.removeEventListener("resize", onResize);
       window.removeEventListener("blur", onResize);
     };
@@ -232,7 +256,14 @@ export function PowerEfficiencyMenuButton({ preset, cpus, onChoose, platform = n
 
       {/* An open menu says it all; the tooltip would only cover it. */}
       {tipOpen && !open && anchor && (
-        <div className="power-tip" role="tooltip" style={{ top: `${anchor.top}px`, right: `${anchor.right}px` }}>
+        <div
+          className="power-tip"
+          role="tooltip"
+          style={{
+            top: anchor.top === undefined ? undefined : `${anchor.top}px`,
+            right: `${anchor.right}px`,
+          }}
+        >
           <div className="power-tip-title">Power Efficiency: {name}</div>
           <div className="power-tip-count">{summary}</div>
           <div className="power-tip-body">{powerTradeoff(platform)}</div>
@@ -248,7 +279,11 @@ export function PowerEfficiencyMenuButton({ preset, cpus, onChoose, platform = n
           aria-label="Power Efficiency"
           tabIndex={-1}
           aria-activedescendant={`power-item-${highlighted}`}
-          style={{ top: `${anchor.top}px`, right: `${anchor.right}px` }}
+          style={{
+            top: anchor.top === undefined ? undefined : `${anchor.top}px`,
+            bottom: anchor.bottom === undefined ? undefined : `${anchor.bottom}px`,
+            right: `${anchor.right}px`,
+          }}
           onKeyDown={onMenuKey}
         >
           <div className="power-menu-head" aria-hidden="true">

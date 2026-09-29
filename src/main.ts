@@ -1152,7 +1152,8 @@ void (async () => {
         // Record in recent scans, and auto-seed defaultRootPath so monitoring
         // has a target to rescan without the user having to set one manually.
         if (settings && message.snapshot.rootPath) {
-          void settingsStore!.set(settingsWithRecentScan(settings, message.snapshot, session.trigger));
+          void settingsStore!.update((current) =>
+            settingsWithRecentScan(current, message.snapshot, session.trigger));
         }
 
         if (settings?.notifications.scanComplete) {
@@ -1991,17 +1992,19 @@ void (async () => {
   // the counts it hasn't saved yet, and saves keep its values.
   ipcMain.handle("diskhound:get-affinity-rules", () => affinityEnforcer.rules());
   ipcMain.handle("diskhound:upsert-affinity-rule", async (_event, rule: AffinityRule) => {
-    const settings = settingsStore?.get();
-    if (!settings) return { ok: false, message: "Settings unavailable" };
-    const next = upsertAffinityRule(settings.affinityRules, rule);
-    await settingsStore?.set({ ...settings, affinityRules: next });
+    if (!settingsStore) return { ok: false, message: "Settings unavailable" };
+    await settingsStore.update((current) => ({
+      ...current,
+      affinityRules: upsertAffinityRule(current.affinityRules, rule),
+    }));
     return { ok: true };
   });
   ipcMain.handle("diskhound:delete-affinity-rule", async (_event, id: string) => {
-    const settings = settingsStore?.get();
-    if (!settings) return { ok: false, message: "Settings unavailable" };
-    const next = settings.affinityRules.filter((r) => r.id !== id);
-    await settingsStore?.set({ ...settings, affinityRules: next });
+    if (!settingsStore) return { ok: false, message: "Settings unavailable" };
+    await settingsStore.update((current) => ({
+      ...current,
+      affinityRules: current.affinityRules.filter((candidate) => candidate.id !== id),
+    }));
     return { ok: true };
   });
 

@@ -136,6 +136,37 @@ describe("the Power Efficiency button", () => {
     expect(menu(view)).toBeNull();
   });
 
+  it("flips above a trigger near the viewport bottom and closes on scroll", async () => {
+    const originalHeight = window.innerHeight;
+    Object.defineProperty(window, "innerHeight", { value: 700, configurable: true });
+    const rect = (top: number, bottom: number, height: number) => ({
+      x: 900, y: top, top, bottom, left: 900, right: 960,
+      width: 60, height, toJSON: () => ({}),
+    }) as DOMRect;
+    const bounds = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.classList.contains("power-btn")) return rect(650, 678, 28);
+        if (this.classList.contains("power-menu")) return rect(0, 160, 160);
+        return rect(0, 0, 0);
+      });
+
+    try {
+      const { view, trigger } = mountButton("balanced", 18);
+      await press(trigger);
+      const open = menu(view)!;
+      expect(open.style.top).toBe("");
+      expect(open.style.bottom).toBe("54px");
+
+      await act(() => {
+        document.dispatchEvent(new Event("scroll", { bubbles: true }));
+      });
+      expect(menu(view)).toBeNull();
+    } finally {
+      bounds.mockRestore();
+      Object.defineProperty(window, "innerHeight", { value: originalHeight, configurable: true });
+    }
+  });
+
   it("chooses with the mouse, and a row this machine can't offer does nothing", async () => {
     const { view, trigger, chosen } = mountButton("aggressive", 8);
     await press(trigger);
