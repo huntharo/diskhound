@@ -51,6 +51,69 @@ pub struct CloneAttrs {
     pub ext_flags: u64,
 }
 
+/// Avoid asking APFS for identical metadata on every member of a full-clone
+/// group. The bulk directory read gives us the clone id for free; after the
+/// first member confirms that the id has multiple full clones, its refcount
+/// and zero private size apply to the other members of that immutable data
+/// stream too. Partially modified clones have a distinct id/refcount of one
+/// and still take their own lookup.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+pub struct CloneAttrCache {
+    full_groups: HashMap<u64, (CloneAttrs, u32)>,
+    lookups: u64,
+    hits: u64,
+}
+
+#[cfg(target_os = "macos")]
+impl CloneAttrCache {
+    pub fn get(
+        &mut self,
+        path: &std::path::Path,
+        clone_id: Option<std::num::NonZeroU64>,
+    ) -> CloneAttrs {
+        let Some(clone_id) = clone_id else {
+            return CloneAttrs::default();
+        };
+        if let Some((attrs, seen)) = self.full_groups.get_mut(&clone_id.get()) {
+            // If a live filesystem adds another clone after the first lookup,
+            // stop reusing once we have consumed the count we observed and
+            // refresh it on the next member.
+            if *seen < attrs.clone_refcnt {
+                *seen += 1;
+                self.hits += 1;
+                return *attrs;
+            }
+        }
+
+        self.lookups += 1;
+        let attrs = file_clone_attrs(path, Some(clone_id));
+        // A full-clone group has no blocks private to one member. Be
+        // deliberately conservative if a future APFS version reports a
+        // non-zero private size alongside refcnt >= 2: measure every member
+        // instead of assuming that value is reusable.
+        if attrs.clone_refcnt >= 2 && attrs.private_size == Some(0) {
+            if let Some((cached, seen)) = self.full_groups.get_mut(&clone_id.get()) {
+                cached.clone_refcnt = cached.clone_refcnt.max(attrs.clone_refcnt);
+                *seen = seen.saturating_add(1);
+            } else if self.full_groups.len() < MAX_CLONE_GROUPS {
+                // Use the same cap as the writer's clone-group index. Past
+                // this, exact accounting continues; only lookup reuse stops.
+                self.full_groups.insert(clone_id.get(), (attrs, 1));
+            }
+        }
+        attrs
+    }
+
+    pub fn lookups(&self) -> u64 {
+        self.lookups
+    }
+
+    pub fn hits(&self) -> u64 {
+        self.hits
+    }
+}
+
 impl CloneAttrs {
     /// Some or all blocks are shared with another file.
     pub fn may_share(&self) -> bool {
