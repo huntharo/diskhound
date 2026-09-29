@@ -52,15 +52,20 @@ export async function createSettingsStore(): Promise<SettingsStore> {
   const persist = async (settings: AppSettings) => {
     const text = JSON.stringify(settings, null, 2);
     if (text === persistedText) return;
-    // Claimed before the write so a concurrent identical save skips.
+    await FS.mkdir(settingsDir, { recursive: true });
+    await FS.writeFile(settingsPath, text, "utf8");
     persistedText = text;
-    try {
-      await FS.mkdir(settingsDir, { recursive: true });
-      await FS.writeFile(settingsPath, text, "utf8");
-    } catch (error) {
-      persistedText = null;
-      throw error;
-    }
+  };
+
+  // Keep mutations in call order. Besides preventing overlapping
+  // settings.json writes, this means update() transforms the value the
+  // previous successful mutation committed. A rejection is absorbed by
+  // the queue tail so later saves still get their turn.
+  let mutationTail: Promise<void> = Promise.resolve();
+  const enqueue = <T>(mutation: () => Promise<T>): Promise<T> => {
+    const result = mutationTail.then(mutation, mutation);
+    mutationTail = result.then(() => undefined, () => undefined);
+    return result;
   };
 
   const listeners = new Set<SettingsListener>();
@@ -76,17 +81,19 @@ export async function createSettingsStore(): Promise<SettingsStore> {
 
   return {
     get: () => current,
-    set: async (next) => {
-      current = normalizeAppSettings(next);
-      await persist(current);
+    set: (next) => enqueue(async () => {
+      const normalized = normalizeAppSettings(next);
+      await persist(normalized);
+      current = normalized;
       notify();
-    },
-    update: async (transform) => {
-      current = normalizeAppSettings(transform(current));
-      await persist(current);
+    }),
+    update: (transform) => enqueue(async () => {
+      const normalized = normalizeAppSettings(transform(current));
+      await persist(normalized);
+      current = normalized;
       notify();
-      return current;
-    },
+      return normalized;
+    }),
     subscribe: (listener) => {
       listeners.add(listener);
       return () => {

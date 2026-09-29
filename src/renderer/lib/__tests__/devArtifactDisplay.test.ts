@@ -87,6 +87,27 @@ describe("artifact display", () => {
     expect(artifactTail(cache)).toBe("/Users/me");
   });
 
+  it("names a Git repo by its checkout", () => {
+    const repo = artifact({
+      path: "/Users/me/github/openclaw/.git",
+      kind: "git-repo",
+      projectPath: "/Users/me/github/openclaw",
+      projectName: "openclaw",
+    });
+    expect(artifactHeadline(repo)).toBe("openclaw");
+    expect(artifactTail(repo)).toBe(".git");
+
+    // A dotfiles repo at home: home is not a name.
+    const dotfiles = artifact({
+      path: "/Users/me/.git",
+      kind: "git-repo",
+      projectPath: "/Users/me",
+      projectName: "me",
+    });
+    expect(artifactHeadline(dotfiles)).toBe(".git");
+    expect(artifactTail(dotfiles)).toBe("/Users/me");
+  });
+
   it("keeps a real project folder as the headline", () => {
     const hub = artifact({
       path: "C:\\Users\\thoma\\pour-over-hub\\.next",

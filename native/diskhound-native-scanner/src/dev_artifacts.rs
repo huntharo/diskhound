@@ -27,6 +27,7 @@ enum Kind {
     CompilerCache,
     CmakeBuild,
     Terraform,
+    GitRepo,
     DiagLogs,
 }
 
@@ -46,6 +47,7 @@ impl Kind {
             Kind::CompilerCache => "compiler-cache",
             Kind::CmakeBuild => "cmake-build",
             Kind::Terraform => "terraform",
+            Kind::GitRepo => "git-repo",
             Kind::DiagLogs => "diag-logs",
         }
     }
@@ -337,6 +339,12 @@ fn classify(path: &str) -> Option<(String, Kind)> {
         {
             return Some((join_segments(path, &parts, i + 2), Kind::Terraform));
         }
+        // The repo's history, not its working files. Every file here is
+        // below a `.git` folder; a linked worktree's or submodule's `.git`
+        // is a file and ends the path, so it never matches.
+        if lower == ".git" && i + 1 < parts.len() {
+            return Some((join_segments(path, &parts, i + 1), Kind::GitRepo));
+        }
         if let Some(kind) = mapped_kind(&lower) {
             let depth = if matches!(kind, Kind::Worktree) && i + 1 < parts.len() {
                 i + 2
@@ -504,6 +512,47 @@ mod tests {
             projects_for_roots(&acc.projects, &roots),
             vec!["/Users/dev/infra/prod".to_string()]
         );
+    }
+
+    #[test]
+    fn classifies_git_dir_as_one_repo() {
+        let (root, kind) =
+            classify("/Users/dev/github/openclaw/.git/objects/pack/pack-1234.pack").unwrap();
+        assert_eq!(root, "/Users/dev/github/openclaw/.git");
+        assert!(matches!(kind, Kind::GitRepo));
+
+        // Submodules keep their history under the parent's .git/modules.
+        let (root, kind) =
+            classify(r"C:\src\app\.git\modules\vendor\lib\objects\pack\pack-1.pack").unwrap();
+        assert_eq!(root, r"C:\src\app\.git");
+        assert!(matches!(kind, Kind::GitRepo));
+
+        // A branch named like a build folder is still history.
+        let (root, _) = classify("/Users/dev/app/.git/refs/heads/build").unwrap();
+        assert_eq!(root, "/Users/dev/app/.git");
+    }
+
+    #[test]
+    fn leaves_worktree_and_submodule_git_files_alone() {
+        for path in [
+            "/Users/dev/app-feature/.git",
+            "/Users/dev/app/vendor/lib/.git",
+            r"C:\src\app\.worktrees\feat\.git",
+        ] {
+            let classified = classify(path);
+            assert!(
+                !matches!(classified, Some((_, Kind::GitRepo))),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn git_dir_inside_node_modules_stays_node_modules() {
+        let (root, kind) =
+            classify("/Users/dev/app/node_modules/dep/.git/objects/ab/cdef").unwrap();
+        assert_eq!(root, "/Users/dev/app/node_modules");
+        assert!(matches!(kind, Kind::NodeModules));
     }
 
     #[test]

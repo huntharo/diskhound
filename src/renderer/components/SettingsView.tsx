@@ -14,8 +14,9 @@ import { formatDriveSpace, driveUsedPercent } from "../lib/driveSpace";
 import { formatBytes } from "../lib/format";
 import { reportPollFailure } from "../lib/pollFailure";
 import { nativeApi } from "../nativeApi";
-import { dispatchSettingsUpdated } from "../lib/uiEvents";
+import { dispatchSettingsUpdated, SETTINGS_UPDATED_EVENT } from "../lib/uiEvents";
 import { startVisiblePoll } from "../lib/visiblePoll";
+import { PowerEfficiencyControl } from "./PowerEfficiencyControl";
 import { toast } from "./Toasts";
 import { normPath } from "../../shared/pathUtils";
 import {
@@ -37,6 +38,19 @@ export function SettingsView() {
       setSettings(s);
       setLoaded(true);
     });
+    // Settings also change outside this view (the header's Power
+    // Efficiency control, a finished scan's recent-scans list). Keep this
+    // copy current so a save here doesn't write an older value back.
+    const apply = (next: AppSettings | null | undefined) => {
+      if (next) setSettings(next);
+    };
+    const onLocal = (event: Event) => apply((event as CustomEvent<AppSettings>).detail);
+    const unsubscribe = nativeApi.onSettingsUpdated(apply);
+    window.addEventListener(SETTINGS_UPDATED_EVENT, onLocal as EventListener);
+    return () => {
+      unsubscribe();
+      window.removeEventListener(SETTINGS_UPDATED_EVENT, onLocal as EventListener);
+    };
   }, []);
 
   useEffect(() => {
@@ -190,6 +204,20 @@ export function SettingsView() {
        * that don't exist. Gate on nativeApi.platform so the section
        * disappears entirely on non-Windows instead of half-working. */}
       {nativeApi.platform === "win32" && <PerformanceSection />}
+
+      {/* ── Scanning ── */}
+      <div className="settings-section">
+        <div className="settings-section-title">Scanning</div>
+        <div className="setting-row">
+          <div>
+            <div className="setting-label">Power Efficiency</div>
+            <div className="setting-desc">
+              How many folders a scan reads at once, up to one per CPU. Used from the next scan, manual or scheduled; a running scan keeps its workers.
+            </div>
+          </div>
+          <PowerEfficiencyControl />
+        </div>
+      </div>
 
       <ProtectedFoldersSection
         settings={settings}

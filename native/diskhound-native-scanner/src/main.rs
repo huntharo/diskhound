@@ -118,6 +118,10 @@ struct ScanInput {
     /// which it has no other use for.
     #[cfg_attr(windows, allow(dead_code))]
     expected_total_files: Option<u64>,
+    /// Walker workers, from the app's Power Efficiency setting
+    /// (`--workers`). None keeps the walker's own default. See
+    /// [`walk_workers`].
+    workers: Option<usize>,
 }
 
 /// Disk touches one scan makes. The visit-once tests check these against
@@ -1530,6 +1534,17 @@ fn scan_generic_with_plan(
     state: &mut ScanState,
     plan: walk_prune::PrunePlan,
 ) -> Result<(), String> {
+    scan_generic_with_plan_mode(root_path, state, plan, true)
+}
+
+#[cfg(not(windows))]
+fn scan_generic_with_plan_mode(
+    root_path: &Path,
+    state: &mut ScanState,
+    plan: walk_prune::PrunePlan,
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+    cache_clone_attrs: bool,
+) -> Result<(), String> {
     state.scan_phase = ScanPhase::Indexing;
     state.expected_total_files = state.input.expected_total_files;
 
@@ -1537,16 +1552,16 @@ fn scan_generic_with_plan(
     // Directory enumeration is embarrassingly parallel at the I/O layer,
     // since reads of separate directories hit different inode blocks.
     //
-    // At most 8 threads, like the Windows walker. On an 18-core M5 Max a
-    // full `/` scan (21.4M files) took 2m 51s at 16 threads and 3m 22s at
-    // 8, but 16 used 31% more CPU time (995 s vs 759 s) and peaked near
-    // 1,000% CPU instead of 650%. Past 8, extra threads mostly add kernel
-    // time. DISKHOUND_PARALLEL_THREADS overrides it.
-    let thread_override = std::env::var("DISKHOUND_PARALLEL_THREADS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n >= 1);
-    let thread_count = thread_override.unwrap_or_else(|| {
+    // The app passes the Power Efficiency choice as --workers (Balanced,
+    // 4, by default). On an 18-core M5 Max a full `/` scan (21.6M files,
+    // index and sidecars written; medians of 3 from
+    // scripts/bench-scan-workers.py) took 222 s and 577 CPU-s at 4
+    // workers, 182 s and 845 CPU-s at 8, 179 s and 1,382 CPU-s at 18, and
+    // 348 s and 495 CPU-s at 2 after caching APFS attributes per full-clone
+    // group. Eight workers are now within 2% of maximum speed; 4 still saves
+    // about a third of 8's CPU time. Without --workers (the CLI), at most 8,
+    // like the Windows walker. DISKHOUND_PARALLEL_THREADS overrides both.
+    let thread_count = walk_workers(state.input.workers, {
         let logical = num_cpus::get().max(1);
         if logical <= 2 {
             logical
@@ -1582,7 +1597,7 @@ fn scan_generic_with_plan(
 
     // macOS: dua-core's bulk folder reads also return each file's APFS
     // clone id (set only for files that may share blocks). The loop below
-    // reads the rest (copy count, private size) for those files alone.
+    // reads the rest (copy count, private size) once per full-clone group.
     #[cfg(target_os = "macos")]
     let clone_attrs_enabled = clone_attrs::enable_for_root(root_path);
     #[cfg(target_os = "macos")]
@@ -1630,6 +1645,8 @@ fn scan_generic_with_plan(
     );
     let walk_started = Instant::now();
     let mut hardlinks = hardlinks::HardlinkTracker::default();
+    #[cfg(target_os = "macos")]
+    let mut clone_cache = clone_attrs::CloneAttrCache::default();
 
     while let Some(entry) = walker.next_cancellable(&CANCELLED) {
         let entry = match entry {
@@ -1680,25 +1697,33 @@ fn scan_generic_with_plan(
             maybe_emit_progress(state)?;
             continue;
         };
+        let nlink = metadata.nlink();
+        let link_id = (nlink > 1).then(|| (metadata.dev(), metadata.ino()));
 
-        // One `getattrlist` per clone file for its copy count and private
-        // size; other files come back from the bulk read alone.
         #[cfg(target_os = "macos")]
         let clone = clone_attrs_enabled.then(|| {
-            if metadata.clone_id().is_some() {
-                state.io.count_stat();
+            if cache_clone_attrs {
+                let before = clone_cache.lookups();
+                let attrs = clone_cache.get(&path, metadata.clone_id(), link_id);
+                if clone_cache.lookups() != before {
+                    state.io.count_stat();
+                }
+                attrs
+            } else {
+                if metadata.clone_id().is_some() {
+                    state.io.count_stat();
+                }
+                clone_attrs::file_clone_attrs(&path, metadata.clone_id())
             }
-            clone_attrs::file_clone_attrs(&path, metadata.clone_id())
         });
         #[cfg(not(target_os = "macos"))]
         let clone = None;
-        let nlink = metadata.nlink();
         let link = hardlinks::Link {
             path,
             size: allocated_size(&metadata),
             modified_at: metadata_modified_at_ms(&metadata),
             // Every name of a multi-link file carries its id, owner included.
-            link_id: (nlink > 1).then(|| (metadata.dev(), metadata.ino())),
+            link_id,
             clone,
         };
         if nlink <= 1 {
@@ -1745,6 +1770,12 @@ fn scan_generic_with_plan(
         hardlinks.inodes_with_unseen_links(),
         hardlinks.peak_held(),
     );
+    #[cfg(target_os = "macos")]
+    eprintln!(
+        "[diskhound-native-scanner] clone attributes: {} lookups, {} group-member lookups avoided",
+        clone_cache.lookups(),
+        clone_cache.hits(),
+    );
     finalize_hottest_directories(state);
     Ok(())
 }
@@ -1779,7 +1810,13 @@ fn record_released(
     extra: bool,
 ) {
     if result.is_ok() {
-        *result = record_file_with_link_flag(state, unix_file_record(&link), extra, link.link_id, link.clone);
+        *result = record_file_with_link_flag(
+            state,
+            unix_file_record(&link),
+            extra,
+            link.link_id,
+            link.clone,
+        );
     }
 }
 
@@ -2018,15 +2055,16 @@ fn emit_mft_records_into_state(
     // merging at end remains correct because the global top-K is
     // guaranteed to be contained in the union of all shards' top-Ks.
     //
-    // Shard count: env override or num_cpus(), clamped to [1, 8] to
-    // match the pre-seed parallel walker's tuning. 8 threads on a
-    // 16-logical-core box gives good speedup without saturating L3.
-    let shard_count = std::env::var("DISKHOUND_EMIT_THREADS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n >= 1)
-        .unwrap_or_else(|| num_cpus::get().clamp(1, 8));
-    let shard_count = shard_count.max(1);
+    // Shard count: the MFT-specific env override wins for experiments,
+    // then the app's Power Efficiency choice, then num_cpus() clamped
+    // to [1, 8]. 8 threads on a 16-logical-core box gives good speedup
+    // without saturating L3.
+    let emit_override = std::env::var("DISKHOUND_EMIT_THREADS").ok();
+    let shard_count = choose_mft_emit_workers(
+        emit_override.as_deref(),
+        state.input.workers,
+        num_cpus::get().clamp(1, 8),
+    );
 
     // Slice the Vec into contiguous chunks. Using split_off shuffles
     // Strings between heaps unnecessarily; Vec::chunks_mut would work
@@ -3018,11 +3056,7 @@ fn try_scan_windows_parallel(root_path: &Path, state: &mut ScanState) -> Paralle
     }
 
     // Step 2 — set up parallel walk.
-    let worker_count = std::env::var("DISKHOUND_PARALLEL_THREADS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n >= 1)
-        .unwrap_or_else(|| num_cpus::get().clamp(2, 8));
+    let worker_count = walk_workers(state.input.workers, num_cpus::get().clamp(2, 8));
     // Don't clamp to root_children.len(). Extra workers block on the
     // Condvar waiting for subdirs to appear in the queue, then steal
     // them as the initial workers enumerate. Clamping here would starve
@@ -3837,7 +3871,12 @@ impl ScanState {
             .values()
             .cloned()
             .collect::<Vec<_>>();
-        top_extensions.sort_by(|left, right| right.size.cmp(&left.size));
+        top_extensions.sort_by(|left, right| {
+            right
+                .size
+                .cmp(&left.size)
+                .then_with(|| left.extension.cmp(&right.extension))
+        });
         top_extensions.truncate(TOP_EXTENSION_LIMIT);
 
         // largest_files: always included during Running, but CAPPED to
@@ -3980,6 +4019,7 @@ fn parse_args() -> Result<ScanInput, String> {
     let mut folder_tree_output: Option<PathBuf> = None;
     let mut dev_artifacts_output: Option<PathBuf> = None;
     let mut expected_total_files: Option<u64> = None;
+    let mut workers: Option<usize> = None;
     let mut args = std::env::args().skip(1);
 
     while let Some(argument) = args.next() {
@@ -4038,6 +4078,18 @@ fn parse_args() -> Result<ScanInput, String> {
                     value.parse::<u64>().map_err(|_| format!("Invalid --expected-files: {value}"))?,
                 );
             }
+            "--workers" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| String::from("Expected a number after --workers"))?;
+                workers = Some(
+                    value
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|&n| n >= 1)
+                        .ok_or_else(|| format!("Invalid --workers: {value}"))?,
+                );
+            }
             unknown => {
                 return Err(format!("Unknown argument: {unknown}"));
             }
@@ -4058,7 +4110,34 @@ fn parse_args() -> Result<ScanInput, String> {
         folder_tree_output,
         dev_artifacts_output,
         expected_total_files,
+        workers,
     })
+}
+
+/// How many workers a walker runs. `DISKHOUND_PARALLEL_THREADS` wins, for
+/// experiments; then `--workers`, the app's Power Efficiency choice; then
+/// the walker's own `default`.
+fn walk_workers(requested: Option<usize>, default: usize) -> usize {
+    let env = std::env::var("DISKHOUND_PARALLEL_THREADS").ok();
+    choose_walk_workers(env.as_deref(), requested, default)
+}
+
+fn choose_walk_workers(env: Option<&str>, requested: Option<usize>, default: usize) -> usize {
+    let from_env = env
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|&n| n >= 1);
+    from_env.or(requested).unwrap_or(default).max(1)
+}
+
+/// MFT emission uses its own diagnostic override, but otherwise honors
+/// the same Power Efficiency worker count as the directory walkers.
+#[cfg(any(windows, test))]
+fn choose_mft_emit_workers(
+    emit_env: Option<&str>,
+    requested: Option<usize>,
+    default: usize,
+) -> usize {
+    choose_walk_workers(emit_env, requested, default)
 }
 
 fn file_extension(file_name: &str) -> String {
@@ -4648,7 +4727,12 @@ fn append_folder_tree_line(
         // anyway for display — but we preserve the existing "biggest
         // first" convention so dumps look right in grep.
         let mut indices: Vec<usize> = (0..dir_list.len()).collect();
-        indices.sort_by(|&a, &b| dir_list[b].1.cmp(&dir_list[a].1));
+        indices.sort_by(|&a, &b| {
+            dir_list[b]
+                .1
+                .cmp(&dir_list[a].1)
+                .then_with(|| dir_list[a].0.cmp(&dir_list[b].0))
+        });
         for idx in indices {
             let (path, size, count) = &dir_list[idx];
             if !first {
@@ -4851,6 +4935,33 @@ fn windows_extended_path(path: &Path) -> String {
 }
 
 #[cfg(test)]
+mod walk_workers_tests {
+    use super::{choose_mft_emit_workers, choose_walk_workers};
+
+    #[test]
+    fn the_env_override_wins_then_the_app_choice_then_the_walker_default() {
+        assert_eq!(choose_walk_workers(None, None, 8), 8);
+        assert_eq!(choose_walk_workers(None, Some(2), 8), 2);
+        assert_eq!(choose_walk_workers(None, Some(18), 8), 18);
+        assert_eq!(choose_walk_workers(Some("12"), Some(2), 8), 12);
+        assert_eq!(choose_walk_workers(Some(" 3 "), None, 8), 3);
+        // A bad or zero override is ignored, as before.
+        assert_eq!(choose_walk_workers(Some("0"), Some(4), 8), 4);
+        assert_eq!(choose_walk_workers(Some("lots"), None, 8), 8);
+        assert_eq!(choose_walk_workers(None, None, 0), 1);
+    }
+
+    #[test]
+    fn mft_emit_honors_the_app_choice_but_keeps_its_explicit_override() {
+        assert_eq!(choose_mft_emit_workers(None, Some(2), 8), 2);
+        assert_eq!(choose_mft_emit_workers(None, Some(4), 8), 4);
+        assert_eq!(choose_mft_emit_workers(Some("6"), Some(2), 8), 6);
+        assert_eq!(choose_mft_emit_workers(Some("bad"), Some(4), 8), 4);
+        assert_eq!(choose_mft_emit_workers(None, None, 8), 8);
+    }
+}
+
+#[cfg(test)]
 mod index_line_parse_tests {
     use super::index_line::parse_index_line;
     use super::{append_json_escaped, append_u64_decimal};
@@ -4989,6 +5100,7 @@ mod scaling_tests {
             folder_tree_output: None,
             dev_artifacts_output: None,
             expected_total_files: None,
+            workers: None,
         };
         let mut state = ScanState::new(input, root, None, None, Arc::new(IoStats::default()));
         // Never emit: tests call refresh_hottest_directories directly.
@@ -5223,7 +5335,13 @@ mod scaling_tests {
 
     #[cfg(not(windows))]
     fn held(path: String) -> hardlinks::Link {
-        hardlinks::Link { path: path.into(), size: 4096, modified_at: 0, link_id: None, clone: None }
+        hardlinks::Link {
+            path: path.into(),
+            size: 4096,
+            modified_at: 0,
+            link_id: None,
+            clone: None,
+        }
     }
 
     /// `inodes` files with two names each, in two folders the walk reads
@@ -5500,6 +5618,7 @@ mod unix_visit_once_tests {
     use super::*;
     use crate::index_line::IndexLineRec;
     use crate::test_support::*;
+    use crate::walk_prune::PrunePlan;
     use std::os::unix::fs::symlink;
 
     const DIRS: u64 = 4;
@@ -5593,6 +5712,119 @@ mod unix_visit_once_tests {
                 &state.io,
                 Some(&first_index),
             ),
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cached_clone_enrichment_matches_the_serial_scanner_outputs() {
+        use std::io::Read;
+
+        fn gzip_text(path: &Path) -> String {
+            let mut text = String::new();
+            GzDecoder::new(File::open(path).unwrap())
+                .read_to_string(&mut text)
+                .unwrap();
+            text
+        }
+
+        fn scan_mode(
+            tree: &TempTree,
+            root: &Path,
+            label: &str,
+            cached: bool,
+        ) -> (serde_json::Value, Vec<String>, Vec<String>, serde_json::Value, u64) {
+            let index = tree.path(&format!("{label}.ndjson.gz"));
+            let folder_tree = tree.path(&format!("{label}.folder-tree.ndjson.gz"));
+            let dev = tree.path(&format!("{label}.dev-artifacts.json.gz"));
+            let mut input = scan_input(root, &index);
+            input.folder_tree_output = Some(folder_tree.clone());
+            input.dev_artifacts_output = Some(dev.clone());
+            input.workers = Some(4);
+            let root_string = normalize_path(root);
+            let writer = IndexWriter::create(&index, Some(dev.clone()), root_string.clone()).unwrap();
+            let mut state = ScanState::new(
+                input,
+                root_string,
+                Some(writer),
+                None,
+                Arc::new(IoStats::default()),
+            );
+
+            scan_generic_with_plan_mode(root, &mut state, PrunePlan::default(), cached).unwrap();
+            write_folder_tree_sidecar(&mut state).unwrap();
+            let (result, clone_summary) = state.index_writer.take().unwrap().finish();
+            result.unwrap();
+            state.clone_group_summary = clone_summary;
+
+            let mut snapshot = serde_json::to_value(state.snapshot(ScanStatus::Done, None)).unwrap();
+            let snapshot = snapshot.as_object_mut().unwrap();
+            snapshot.remove("startedAt");
+            snapshot.remove("finishedAt");
+            snapshot.remove("elapsedMs");
+            snapshot.remove("lastUpdatedAt");
+
+            let mut index_lines: Vec<String> = gzip_text(&index).lines().map(str::to_owned).collect();
+            index_lines.sort();
+            let mut folder_lines: Vec<String> =
+                gzip_text(&folder_tree).lines().map(str::to_owned).collect();
+            folder_lines.sort();
+            let mut dev_json: serde_json::Value =
+                serde_json::from_reader(File::open(&dev).unwrap()).unwrap();
+            dev_json.as_object_mut().unwrap().remove("generatedAt");
+            (
+                snapshot.clone().into(),
+                index_lines,
+                folder_lines,
+                dev_json,
+                state.io.stat_calls(),
+            )
+        }
+
+        let tree = TempTree::new("clone-cache-equivalence");
+        let original = tree.write("root/src/original.bin", 128 * 1024);
+        tree.write("root/plain.txt", 2048);
+        tree.write("root/nested/deeper/data.json", 4096);
+        let clone = tree.path("root/copies/clone.bin");
+        std::fs::create_dir_all(clone.parent().unwrap()).unwrap();
+        let status = std::process::Command::new("cp")
+            .args(["-c"])
+            .arg(&original)
+            .arg(&clone)
+            .status()
+            .unwrap();
+        assert!(status.success(), "the APFS clone fixture could not be created");
+        let modified_clone = tree.path("root/copies/modified-clone.bin");
+        let status = std::process::Command::new("cp")
+            .args(["-c"])
+            .arg(&original)
+            .arg(&modified_clone)
+            .status()
+            .unwrap();
+        assert!(status.success(), "the modified APFS clone fixture could not be created");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&modified_clone)
+            .unwrap()
+            .write_all(b"changed")
+            .unwrap();
+        const HARDLINK_ALIASES: u64 = 8;
+        for alias in 0..HARDLINK_ALIASES {
+            tree.link(&original, &format!("root/links/original-{alias}.bin"));
+        }
+        let root = tree.path("root");
+
+        let serial = scan_mode(&tree, &root, "serial", false);
+        let cached = scan_mode(&tree, &root, "cached", true);
+
+        assert_eq!(cached.0, serial.0, "final snapshots differ");
+        assert_eq!(cached.1, serial.1, "index rows differ");
+        assert_eq!(cached.2, serial.2, "folder-tree rows differ");
+        assert_eq!(cached.3, serial.3, "Dev sidecars differ");
+        assert_eq!(
+            serial.4 - cached.4,
+            HARDLINK_ALIASES + 1,
+            "the two-inode clone group should take one lookup; its hardlink aliases take none",
         );
     }
 }

@@ -4,6 +4,7 @@ import type {
   DevArtifact,
   DevArtifactKind,
   DevArtifactReport,
+  DevGitRepoCheck,
   ScanSnapshot,
   StorageAccountingReport,
 } from "../../shared/contracts";
@@ -17,7 +18,7 @@ import {
   mergeDiagLogHotspots,
 } from "../../shared/devArtifacts";
 import { inFlightDeleteBytes } from "../../shared/deleteProgress";
-import { formatScanRoot, normPath } from "../../shared/pathUtils";
+import { basenameOf, formatScanRoot, normPath } from "../../shared/pathUtils";
 import {
   devArtifactSharing,
   isMeaningfullyShared,
@@ -41,6 +42,13 @@ import {
 } from "../lib/devArtifactViewState";
 import { formatBytes, formatBytesRange, formatCount, relativeTime } from "../lib/format";
 import { checkFreedSpace, freeBytesBeforeDelete } from "../lib/freedSpaceCheck";
+import {
+  artifactsInsideCheckout,
+  gitCheckoutPath,
+  gitRemoteBadge,
+  gitRemovalConfirm,
+  gitRepoRemovalBlock,
+} from "../lib/gitRepoDisplay";
 import { dispatchDevArtifactsUpdated, STORAGE_ACCOUNTING_STALE_EVENT } from "../lib/uiEvents";
 import { nativeApi } from "../nativeApi";
 import { DEV_FOLDER_TREE_STAGES, DEV_SIDECAR_STAGES, IndexLoadingPanel } from "./IndexLoadingPanel";
@@ -178,6 +186,14 @@ function seedViewState(
   return seedDevViewState(root, finishedAt, status, sessionReport, lastGood, settledEmptyKey);
 }
 
+/**
+ * Bulk selection and Delete all skip Git repos. Each one is removed on
+ * its own, after `git` has been asked what would be lost.
+ */
+function isSelectable(artifact: DevArtifact): boolean {
+  return artifact.kind !== "git-repo";
+}
+
 function truncatePath(path: string, max = 56): string {
   if (path.length <= max) return path;
   return `…${path.slice(-(max - 1))}`;
@@ -206,6 +222,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
   const [deleteElapsedSec, setDeleteElapsedSec] = useState(0);
   const [loadPath, setLoadPath] = useState<"sidecar" | "folder-tree">("sidecar");
   const [storageReport, setStorageReport] = useState<StorageAccountingReport | null>(null);
+  const [gitBusy, setGitBusy] = useState<{ path: string; phase: "checking" | "moving" } | null>(null);
   const loadGenRef = useRef(0);
 
   if (heldKey !== key) {
@@ -435,12 +452,15 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     [rows, groupBy, listSort, cloneAwareTotal],
   );
 
+  const selectableRows = useMemo(() => rows.filter(isSelectable), [rows]);
+  const deletable = useMemo(() => remaining.filter(isSelectable), [remaining]);
+  const skippedRepos = remaining.length - deletable.length;
   const selectedVisible = useMemo(
-    () => rows.filter((a) => selected.has(a.path)),
-    [rows, selected],
+    () => selectableRows.filter((a) => selected.has(a.path)),
+    [selectableRows, selected],
   );
   const selectedSharing = useMemo(() => summarizeDevSharing(selectedVisible), [selectedVisible]);
-  const allVisibleSelected = rows.length > 0 && rows.every((a) => selected.has(a.path));
+  const allVisibleSelected = selectableRows.length > 0 && selectableRows.every((a) => selected.has(a.path));
 
   const toggleOne = (path: string) => {
     setSelected((prev) => {
@@ -455,15 +475,16 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     setSelected((prev) => {
       const next = new Set(prev);
       if (allVisibleSelected) {
-        for (const row of rows) next.delete(row.path);
+        for (const row of selectableRows) next.delete(row.path);
       } else {
-        for (const row of rows) next.add(row.path);
+        for (const row of selectableRows) next.add(row.path);
       }
       return next;
     });
   };
 
-  const toggleGroup = (artifacts: DevArtifact[]) => {
+  const toggleGroup = (group: DevArtifact[]) => {
+    const artifacts = group.filter(isSelectable);
     const allOn = artifacts.every((a) => selected.has(a.path));
     setSelected((prev) => {
       const next = new Set(prev);
@@ -610,6 +631,67 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     await deleteMany([path], "Delete this tree permanently?");
   };
 
+  // A repo is removed with its whole checkout, to the Trash rather than
+  // permanently: the history may exist nowhere else.
+  const removeGitRepo = async (artifact: DevArtifact) => {
+    if (!root || gitBusy || bulkBusy) return;
+    const trash = platformTerminology(nativeApi.platform).trash;
+    const blocked = gitRepoRemovalBlock(artifact, root);
+    if (blocked) {
+      toast("info", "Not removed from DiskHound", blocked);
+      return;
+    }
+    const checkout = gitCheckoutPath(artifact);
+    setGitBusy({ path: artifact.path, phase: "checking" });
+    setBusyPaths((prev) => new Set(prev).add(artifact.path));
+    try {
+      let check: DevGitRepoCheck;
+      try {
+        check = await nativeApi.checkGitRepo(checkout);
+      } catch (err) {
+        toast("error", "Could not check this repo", err instanceof Error ? err.message : String(err));
+        return;
+      }
+      const inside = artifactsInsideCheckout(remaining, artifact);
+      const text = gitRemovalConfirm({ artifact, check, inside, trash });
+      if (!window.confirm(text.first)) return;
+      if (text.second && !window.confirm(text.second)) return;
+
+      setGitBusy({ path: artifact.path, phase: "moving" });
+      const result = await nativeApi.trashPath(checkout);
+      if (!result?.ok) {
+        toast("error", `Could not move to the ${trash}`, result?.message ?? checkout);
+        return;
+      }
+      const paths = [artifact.path, ...inside.map((a) => a.path)];
+      const scanKey = reportKey(root, snapshot.finishedAt);
+      noteForgotten(scanKey, paths);
+      let live = overlayForgotten(dropArtifactsFromReport(report ?? emptyDevReport(root), paths), scanKey);
+      setReport(live);
+      rememberReport(root, scanKey, live, live.artifacts.length === 0);
+      setSelected((prev) => {
+        const next = new Set(prev);
+        for (const path of paths) next.delete(path);
+        return next;
+      });
+      const persisted = await nativeApi.forgetDevArtifactPaths(root, paths);
+      if (persisted) {
+        live = overlayForgotten(persisted, scanKey);
+        setReport(live);
+        rememberReport(root, scanKey, live, live.artifacts.length === 0);
+      }
+      dispatchDevArtifactsUpdated(root);
+      toast("success", `Moved ${basenameOf(checkout)} to the ${trash}`, `Empty the ${trash} to free the space.`);
+    } finally {
+      setGitBusy(null);
+      setBusyPaths((prev) => {
+        const next = new Set(prev);
+        next.delete(artifact.path);
+        return next;
+      });
+    }
+  };
+
   const rootLabel = root ? formatScanRoot(root) : null;
   const otherDriveNote = otherScannedRoots.length > 0
     ? "A finished scan is on another drive. Switch with the header drive pills."
@@ -624,7 +706,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     return (
       <div className="dev-view">
         <div className="empty-view">
-          <span>Scan a drive to find worktrees, node_modules, Rust targets, and RDP/diag traces.</span>
+          <span>Scan a drive to find worktrees, Git repos, node_modules, Rust targets, and RDP/diag traces.</span>
           <span className="empty-view-sub">
             {otherDriveNote ?? "Pick a drive in the header. Dev Artifacts follows that drive, not the whole PC."}
           </span>
@@ -695,7 +777,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
         <div className="empty-view">
           <span className="scan-root-chip">{rootLabel}</span>
           <span>No developer artifacts left on this scan.</span>
-          <span className="empty-view-sub">Looks for worktrees, package trees, Rust targets, venvs, compiler caches, and DiagOutputDir RDP traces on this scan. Switch drives in the header to see another root.</span>
+          <span className="empty-view-sub">Looks for worktrees, Git repos, package trees, Rust targets, venvs, compiler caches, and DiagOutputDir RDP traces on this scan. Switch drives in the header to see another root.</span>
           {!report && <button className="action-btn" onClick={() => void load()}>Retry</button>}
         </div>
       </div>
@@ -922,7 +1004,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
             <button
               type="button"
               className="dev-select-bar-ghost"
-              disabled={rows.length === 0 || bulkBusy}
+              disabled={selectableRows.length === 0 || bulkBusy}
               onClick={toggleVisible}
             >
               {allVisibleSelected ? "Clear visible" : "Select visible"}
@@ -933,7 +1015,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
             <button
               type="button"
               className="dev-select-bar-ghost"
-              disabled={rows.length === 0 || bulkBusy}
+              disabled={selectableRows.length === 0 || bulkBusy}
               onClick={toggleVisible}
             >
               Select visible
@@ -942,9 +1024,15 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
             <button
               type="button"
               className="dev-select-bar-quiet"
-              disabled={remaining.length === 0 || bulkBusy}
-              title={`Permanently delete every listed tree. Cannot be undone. Skips ${platformTerminology(nativeApi.platform).trash}.`}
-              onClick={() => void deleteMany(remaining.map((a) => a.path), "Delete all listed developer trees permanently?")}
+              disabled={deletable.length === 0 || bulkBusy}
+              title={`Permanently delete every listed tree. Cannot be undone. Skips ${platformTerminology(nativeApi.platform).trash}.`
+                + (skippedRepos > 0 ? ` Git repos are left alone; remove each one from its row.` : "")}
+              onClick={() => void deleteMany(
+                deletable.map((a) => a.path),
+                skippedRepos > 0
+                  ? `Delete all listed developer trees permanently?\n\nGit repos are not included.`
+                  : "Delete all listed developer trees permanently?",
+              )}
             >
               Delete all
             </button>
@@ -954,7 +1042,8 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
 
       <div className="dev-list">
         {groups.map((group) => {
-          const groupAll = group.artifacts.every((a) => selected.has(a.path));
+          const groupSelectable = group.artifacts.filter(isSelectable);
+          const groupAll = groupSelectable.length > 0 && groupSelectable.every((a) => selected.has(a.path));
           const groupKind = groupBy === "kind" ? group.artifacts[0]?.kind : undefined;
           const flat = groupBy === "all";
           return (
@@ -962,12 +1051,14 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
               {!flat && (
               <header className="dev-group-header">
                 <label className="dev-group-select">
-                  <input
-                    type="checkbox"
-                    className="dev-check"
-                    checked={groupAll}
-                    onChange={() => toggleGroup(group.artifacts)}
-                  />
+                  {groupSelectable.length > 0 ? (
+                    <input
+                      type="checkbox"
+                      className="dev-check"
+                      checked={groupAll}
+                      onChange={() => toggleGroup(group.artifacts)}
+                    />
+                  ) : null}
                   {groupKind ? (
                     <span className="dev-row-pip" style={{ background: devKindCssVar(groupKind) }} aria-hidden="true" />
                   ) : null}
@@ -985,20 +1076,27 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                 const sharing = devArtifactSharing(artifact);
                 const shared = isMeaningfullyShared(sharing, artifact.size);
                 const freesLess = sharing.freesBytes !== null && sharing.freesBytes < artifact.size * 0.9;
+                const repo = artifact.kind === "git-repo";
+                const remote = repo ? gitRemoteBadge(artifact.git) : null;
+                const removalBlock = repo ? gitRepoRemovalBlock(artifact, root) : null;
                 return (
                 <div
                   key={artifact.path}
                   className={`dev-row ${selected.has(artifact.path) ? "selected" : ""} ${busyPaths.has(artifact.path) ? "is-busy" : ""}`}
                 >
-                  <label className="dev-row-check">
-                    <input
-                      type="checkbox"
-                      className="dev-check"
-                      checked={selected.has(artifact.path)}
-                      disabled={busyPaths.has(artifact.path)}
-                      onChange={() => toggleOne(artifact.path)}
-                    />
-                  </label>
+                  {repo ? (
+                    <span className="dev-row-check" aria-hidden="true" />
+                  ) : (
+                    <label className="dev-row-check">
+                      <input
+                        type="checkbox"
+                        className="dev-check"
+                        checked={selected.has(artifact.path)}
+                        disabled={busyPaths.has(artifact.path)}
+                        onChange={() => toggleOne(artifact.path)}
+                      />
+                    </label>
+                  )}
                   <span className="dev-row-pip" style={{ background: devKindCssVar(artifact.kind) }} aria-hidden="true" />
                   <div className="dev-row-main">
                     <div className="dev-row-name" title={artifact.path}>{artifactHeadline(artifact)}</div>
@@ -1011,6 +1109,14 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                           {` · ${artifactDeltaLabel(artifact.deltaBytes)}`}
                         </span>
                       ) : null}
+                      {remote && (
+                        <>
+                          {" · "}
+                          <span className={`dev-git-badge ${remote.warn ? "warn" : ""}`} title={remote.title}>
+                            {remote.label}
+                          </span>
+                        </>
+                      )}
                       {shared && (
                         <>
                           {" · "}
@@ -1028,7 +1134,10 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                       )}
                     </div>
                   </div>
-                  <div className="dev-row-size">
+                  <div
+                    className="dev-row-size"
+                    title={repo ? "History in .git. Removing the repo also removes its working files." : undefined}
+                  >
                     {formatBytes(artifact.size)}
                     {freesLess && (
                       <span className="dev-row-frees" title={sharingTitle(sharing, artifact.size)}>
@@ -1037,15 +1146,35 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                     )}
                   </div>
                   <div className="dev-row-actions">
-                    <button className="action-btn" onClick={() => void nativeApi.revealPath(artifact.path)}>Reveal</button>
                     <button
-                      className="action-btn warn"
-                      disabled={bulkBusy || busyPaths.has(artifact.path)}
-                      title={`Permanently delete this tree. Cannot be undone. Skips ${platformTerminology(nativeApi.platform).trash}.`}
-                      onClick={() => void deleteOne(artifact.path)}
+                      className="action-btn"
+                      onClick={() => void nativeApi.revealPath(repo ? gitCheckoutPath(artifact) : artifact.path)}
                     >
-                      {busyPaths.has(artifact.path) ? "Deleting…" : "Delete"}
+                      Reveal
                     </button>
+                    {repo ? (
+                      <button
+                        className={`action-btn warn ${removalBlock ? "is-blocked" : ""}`}
+                        aria-disabled={removalBlock !== null}
+                        disabled={bulkBusy || gitBusy !== null}
+                        title={removalBlock
+                          ?? `Check this repo with git, then move its whole folder to the ${platformTerminology(nativeApi.platform).trash}.`}
+                        onClick={() => void removeGitRepo(artifact)}
+                      >
+                        {gitBusy?.path === artifact.path
+                          ? gitBusy.phase === "checking" ? "Checking…" : "Moving…"
+                          : "Remove…"}
+                      </button>
+                    ) : (
+                      <button
+                        className="action-btn warn"
+                        disabled={bulkBusy || busyPaths.has(artifact.path)}
+                        title={`Permanently delete this tree. Cannot be undone. Skips ${platformTerminology(nativeApi.platform).trash}.`}
+                        onClick={() => void deleteOne(artifact.path)}
+                      >
+                        {busyPaths.has(artifact.path) ? "Deleting…" : "Delete"}
+                      </button>
+                    )}
                   </div>
                 </div>
                 );
