@@ -61,6 +61,9 @@ pub struct CloneAttrs {
 #[derive(Default)]
 pub struct CloneAttrCache {
     full_groups: HashMap<u64, (CloneAttrs, u32)>,
+    /// `(clone id, device, inode)` for multi-link members already counted
+    /// against a group's APFS refcount. Ordinary files need no identity set.
+    hardlink_members: std::collections::HashSet<(u64, u64, u64)>,
     lookups: u64,
     hits: u64,
 }
@@ -71,18 +74,32 @@ impl CloneAttrCache {
         &mut self,
         path: &std::path::Path,
         clone_id: Option<std::num::NonZeroU64>,
+        hardlink_id: Option<(u64, u64)>,
     ) -> CloneAttrs {
         let Some(clone_id) = clone_id else {
             return CloneAttrs::default();
         };
-        if let Some((attrs, seen)) = self.full_groups.get_mut(&clone_id.get()) {
+        let clone_id_value = clone_id.get();
+        let hardlink_member = hardlink_id.map(|(dev, ino)| (clone_id_value, dev, ino));
+        let hardlink_already_counted = hardlink_member
+            .is_some_and(|member| self.hardlink_members.contains(&member));
+        if let Some((attrs, seen)) = self.full_groups.get_mut(&clone_id_value) {
+            // APFS counts cloned inodes, not directory entries. Reusing the
+            // result for another name of this inode must not consume another
+            // slot from clone_refcnt.
+            if hardlink_already_counted {
+                self.hits += 1;
+                return *attrs;
+            }
             // If a live filesystem adds another clone after the first lookup,
             // stop reusing once we have consumed the count we observed and
             // refresh it on the next member.
             if *seen < attrs.clone_refcnt {
                 *seen += 1;
                 self.hits += 1;
-                return *attrs;
+                let attrs = *attrs;
+                self.remember_hardlink(hardlink_member);
+                return attrs;
             }
         }
 
@@ -93,16 +110,36 @@ impl CloneAttrCache {
         // non-zero private size alongside refcnt >= 2: measure every member
         // instead of assuming that value is reusable.
         if attrs.clone_refcnt >= 2 && attrs.private_size == Some(0) {
-            if let Some((cached, seen)) = self.full_groups.get_mut(&clone_id.get()) {
+            let cached = if let Some((cached, seen)) = self.full_groups.get_mut(&clone_id_value) {
                 cached.clone_refcnt = cached.clone_refcnt.max(attrs.clone_refcnt);
                 *seen = seen.saturating_add(1);
+                true
             } else if self.full_groups.len() < MAX_CLONE_GROUPS {
                 // Use the same cap as the writer's clone-group index. Past
                 // this, exact accounting continues; only lookup reuse stops.
-                self.full_groups.insert(clone_id.get(), (attrs, 1));
+                self.full_groups.insert(clone_id_value, (attrs, 1));
+                true
+            } else {
+                false
+            };
+            if cached {
+                self.remember_hardlink(hardlink_member);
             }
         }
         attrs
+    }
+
+    fn remember_hardlink(&mut self, member: Option<(u64, u64, u64)>) {
+        if let Some(member) = member {
+            // Bound the exceptional identity set independently of the group
+            // map. At the cap, aliases may cost another lookup but accounting
+            // remains exact.
+            if self.hardlink_members.len() < MAX_CLONE_GROUPS
+                || self.hardlink_members.contains(&member)
+            {
+                self.hardlink_members.insert(member);
+            }
+        }
     }
 
     pub fn lookups(&self) -> u64 {

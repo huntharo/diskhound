@@ -1697,12 +1697,14 @@ fn scan_generic_with_plan_mode(
             maybe_emit_progress(state)?;
             continue;
         };
+        let nlink = metadata.nlink();
+        let link_id = (nlink > 1).then(|| (metadata.dev(), metadata.ino()));
 
         #[cfg(target_os = "macos")]
         let clone = clone_attrs_enabled.then(|| {
             if cache_clone_attrs {
                 let before = clone_cache.lookups();
-                let attrs = clone_cache.get(&path, metadata.clone_id());
+                let attrs = clone_cache.get(&path, metadata.clone_id(), link_id);
                 if clone_cache.lookups() != before {
                     state.io.count_stat();
                 }
@@ -1716,13 +1718,12 @@ fn scan_generic_with_plan_mode(
         });
         #[cfg(not(target_os = "macos"))]
         let clone = None;
-        let nlink = metadata.nlink();
         let link = hardlinks::Link {
             path,
             size: allocated_size(&metadata),
             modified_at: metadata_modified_at_ms(&metadata),
             // Every name of a multi-link file carries its id, owner included.
-            link_id: (nlink > 1).then(|| (metadata.dev(), metadata.ino())),
+            link_id,
             clone,
         };
         if nlink <= 1 {
@@ -5807,7 +5808,10 @@ mod unix_visit_once_tests {
             .unwrap()
             .write_all(b"changed")
             .unwrap();
-        tree.link(&original, "root/links/original.bin");
+        const HARDLINK_ALIASES: u64 = 8;
+        for alias in 0..HARDLINK_ALIASES {
+            tree.link(&original, &format!("root/links/original-{alias}.bin"));
+        }
         let root = tree.path("root");
 
         let serial = scan_mode(&tree, &root, "serial", false);
@@ -5817,7 +5821,11 @@ mod unix_visit_once_tests {
         assert_eq!(cached.1, serial.1, "index rows differ");
         assert_eq!(cached.2, serial.2, "folder-tree rows differ");
         assert_eq!(cached.3, serial.3, "Dev sidecars differ");
-        assert!(cached.4 < serial.4, "the full-clone group should reuse at least one lookup");
+        assert_eq!(
+            serial.4 - cached.4,
+            HARDLINK_ALIASES + 1,
+            "the two-inode clone group should take one lookup; its hardlink aliases take none",
+        );
     }
 }
 
