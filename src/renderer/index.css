@@ -1144,9 +1144,10 @@ button, input, select, textarea { font: inherit; }
 }
 .power-menu-item {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 72px 72px;
+  /* Check, name, share bar, count. */
+  grid-template-columns: 14px minmax(0, 1fr) 64px 72px;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   padding: 6px 8px;
   border-radius: var(--radius-sm);
   font-size: 12px;
@@ -1155,6 +1156,13 @@ button, input, select, textarea { font: inherit; }
 }
 .power-menu-item.highlighted { background: var(--bg-row-hover); }
 .power-menu-item.current .power-menu-name { font-weight: 700; }
+/* The saved preset keeps its check wherever the highlight goes. */
+.power-menu-check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--amber);
+}
 .power-menu-item[aria-disabled="true"] { opacity: 0.4; cursor: default; }
 .power-menu-name {
   white-space: nowrap;

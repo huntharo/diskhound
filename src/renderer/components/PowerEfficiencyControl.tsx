@@ -277,6 +277,13 @@ export function PowerEfficiencyMenuButton({ preset, cpus, onChoose, platform = n
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => choose(p)}
               >
+                <span className="power-menu-check" aria-hidden="true">
+                  {p === current && (
+                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="2.5,6.5 5,9 9.5,3.5" />
+                    </svg>
+                  )}
+                </span>
                 <span className="power-menu-name">{powerEfficiencyName(p)}</span>
                 <span className="power-menu-share" aria-hidden="true">
                   <i style={{ width: `${Math.min(100, (count / Math.max(1, cpus)) * 100)}%` }} />

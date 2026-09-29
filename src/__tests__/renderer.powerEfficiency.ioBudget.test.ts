@@ -150,6 +150,11 @@ describe("the Power Efficiency button", () => {
     const miser = row(view, "Miser");
     await pointer(miser, "mouseenter");
     expect(highlighted(view)).toBe("Miser");
+    // The check stays on the saved preset while the highlight moves.
+    const checked = () => [...view.querySelectorAll(".power-menu-item")]
+      .filter((item) => item.querySelector(".power-menu-check svg"))
+      .map((item) => item.querySelector(".power-menu-name")?.textContent);
+    expect(checked()).toEqual(["Aggressive"]);
     await click(miser);
     expect(chosen).toEqual(["miser"]);
     expect(menu(view)).toBeNull();
