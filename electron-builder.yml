@@ -95,6 +95,12 @@ mac:
 
 linux:
   executableName: diskhound
+  # `compression: maximum` above makes the AppImage squashfs use xz.
+  # AppImageHub mounts type-2 AppImages with a runtime that only accepts
+  # zlib and zstd, so xz fails its catalog test ("Squashfs image uses xz
+  # compression"). normal keeps the default gzip squashfs, which that
+  # runtime can mount. Windows and macOS stay on maximum.
+  compression: normal
   target:
     # AppImage is the "just works" option — single-file binary with
     # built-in auto-update via electron-updater. Primary recommended
