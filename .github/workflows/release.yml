@@ -125,6 +125,10 @@ jobs:
           echo "=== Searching for native scanner ==="
           find release -name "diskhound-native-scanner*" -type f 2>/dev/null || true
 
+      # The publish job downloads these in the same run, and the GitHub
+      # Release keeps the installers. One day is enough to retry a
+      # failed publish. The default 90 days was leaving a full copy of
+      # every release in Actions storage.
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -137,6 +141,7 @@ jobs:
             release/*.yml
             release/*.blockmap
           if-no-files-found: ignore
+          retention-days: 1
 
   publish:
     needs: build
