@@ -24,16 +24,16 @@ afterEach(async () => {
 });
 
 describe("updater state store", () => {
-  it("writes updater-state.json once per update check", async () => {
+  it("writes updater-state.json once per changed timestamp patch", async () => {
     const filePath = Path.join(dataDir, "updater-state.json");
     const store = createUpdaterStateStore(filePath);
 
-    // main.ts's recordCheck, on update-available, update-not-available or error.
+    // The complete scheduler operation is budgeted in updateScheduler.ioBudget.test.ts.
     const { io } = await measureFsIo(() => store.update({ lastCheckedAt: 1_758_800_000_000 }));
 
     expectIoBudget({
       scenario: "updater-check",
-      note: "one update check: 1 sync rewrite of the ~90-byte updater-state.json; 6/day on stable (4 h), 48/day on beta (30 min)",
+      note: "one changed timestamp patch: 1 small JSON rewrite; complete checks use 2 patches, budgeted separately (stable: 12 writes/day <0.01 MB/day; beta: 96 writes/day <0.05 MB/day)",
       io,
     });
     expect(createUpdaterStateStore(filePath).get().lastCheckedAt).toBe(1_758_800_000_000);

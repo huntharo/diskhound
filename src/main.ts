@@ -75,6 +75,7 @@ import { createAffinityEnforcer, upsertAffinityRule } from "./shared/affinityEnf
 import { formatSizeBytes, resolveSizeUnitBase } from "./shared/sizeUnits";
 import { createSettingsStore, type SettingsStore } from "./shared/settingsStore";
 import { createUpdaterStateStore } from "./shared/updaterStateStore";
+import { createUpdateScheduler, STABLE_UPDATE_INTERVAL_MS, BETA_UPDATE_INTERVAL_MS } from "./shared/updateScheduler";
 import { createWindowStateStore, type WindowStateStore } from "./shared/windowStateStore";
 import { CRASH_LOG_FILENAME, createCrashLog, formatRendererError } from "./shared/crashLog";
 import { createMemoryDiagnostics, type MemorySample } from "./shared/memoryDiagnostics";
@@ -4605,9 +4606,7 @@ void (async () => {
   const linuxManualUpdateBuild = process.platform === "linux" && !process.env.APPIMAGE;
   // Stable checks stay conservative; beta checks poll faster so
   // prerelease builds reach opted-in clients promptly.
-  const STABLE_UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
-  const BETA_UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
-  let updateCheckTimer: ReturnType<typeof setTimeout> | null = null;
+  let updateScheduler: ReturnType<typeof createUpdateScheduler> | null = null;
   let lastUpdateStatus: UpdateStatus | null = null;
 
   const updaterState = createUpdaterStateStore(
@@ -4628,8 +4627,8 @@ void (async () => {
 
   const updateCheckIntervalForSettings = (value = settingsStore!.get()) =>
     updateChannelForSettings(value) === "beta"
-      ? BETA_UPDATE_CHECK_INTERVAL_MS
-      : STABLE_UPDATE_CHECK_INTERVAL_MS;
+      ? BETA_UPDATE_INTERVAL_MS
+      : STABLE_UPDATE_INTERVAL_MS;
 
   const emitUpdateStatus = (status: UpdateStatus) => {
     const enriched: UpdateStatus = {
@@ -4639,10 +4638,6 @@ void (async () => {
     };
     lastUpdateStatus = enriched;
     mainWindow?.webContents.send(UPDATE_STATUS_CHANNEL, enriched);
-  };
-
-  const recordCheck = () => {
-    updaterState.update({ lastCheckedAt: Date.now() });
   };
 
   const clearPendingInstall = () => {
@@ -4666,30 +4661,11 @@ void (async () => {
     });
   };
 
-  const clearUpdateCheckTimer = () => {
-    if (updateCheckTimer) {
-      clearTimeout(updateCheckTimer);
-      updateCheckTimer = null;
-    }
-  };
-
-  const scheduleNextUpdateCheck = (immediate = false) => {
-    clearUpdateCheckTimer();
-    if (!autoUpdater || !settingsStore!.get().general.autoUpdate) return;
-
-    const delay = immediate ? 1_500 : updateCheckIntervalForSettings();
-    updateCheckTimer = setTimeout(() => {
-      updateCheckTimer = null;
-      if (!autoUpdater || !settingsStore!.get().general.autoUpdate) return;
-      configureAutoUpdaterForSettings();
-      autoUpdater.checkForUpdates().catch(() => {}).finally(() => {
-        scheduleNextUpdateCheck(false);
-      });
-    }, delay);
-    updateCheckTimer.unref?.();
-  };
-
-  if (!isDevelopment && !linuxManualUpdateBuild) {
+  const clearUpdateCheckTimer = () => updateScheduler?.stop();
+  // Unpacked launches (including direct Playwright launches) cannot initialize
+  // the updater. The test-runner flag also covers packaged-app tests.
+  const updatesDisabled = process.env.DISKHOUND_DISABLE_UPDATES === "1";
+  if (app.isPackaged && !isDevelopment && !linuxManualUpdateBuild && !updatesDisabled) {
     try {
       autoUpdater = require("electron-updater").autoUpdater;
       autoUpdater.autoDownload = false;
@@ -4703,13 +4679,11 @@ void (async () => {
         emitUpdateStatus({ phase: "checking", currentVersion });
       });
       autoUpdater.on("update-available", (info: any) => {
-        recordCheck();
         emitUpdateStatus({ phase: "available", currentVersion, availableVersion: info?.version });
         sendToast("info", "Update available", `DiskHound ${info?.version ?? ""} is available. Downloading...`);
         autoUpdater.downloadUpdate().catch(() => {});
       });
       autoUpdater.on("update-not-available", (info: any) => {
-        recordCheck();
         emitUpdateStatus({ phase: "up-to-date", currentVersion, availableVersion: info?.version });
       });
       autoUpdater.on("download-progress", (p: any) => {
@@ -4720,10 +4694,18 @@ void (async () => {
         sendToast("success", "Update ready", "Restart DiskHound to apply the update.");
       });
       autoUpdater.on("error", (err: Error) => {
-        // Still record the attempt — users ask "did it try?" and
-        // repeated network errors shouldn't look like no activity.
-        recordCheck();
+        // The scheduler records attempts before calling the updater.
         emitUpdateStatus({ phase: "error", currentVersion, errorMessage: err?.message });
+      });
+
+      updateScheduler = createUpdateScheduler({
+        state: updaterState,
+        enabled: () => settingsStore!.get().general.autoUpdate,
+        interval: () => updateCheckIntervalForSettings(),
+        check: () => {
+          configureAutoUpdaterForSettings();
+          return autoUpdater.checkForUpdates();
+        },
       });
 
       handleUpdateSettingsChanged = (previousSettings, nextSettings) => {
@@ -4732,14 +4714,14 @@ void (async () => {
         if (!autoUpdateChanged && !betaChanged) return;
 
         configureAutoUpdaterForSettings(nextSettings);
-        scheduleNextUpdateCheck(nextSettings.general.autoUpdate);
+        updateScheduler!.schedule();
       };
 
       emitCompletedInstallIfNeeded();
 
       // Check on boot only if the user has auto-update enabled
       if (settings.general.autoUpdate) {
-        scheduleNextUpdateCheck(true);
+        updateScheduler.schedule();
       }
     } catch {
       // electron-updater not available (dev mode or build issue)
@@ -4755,6 +4737,7 @@ void (async () => {
   }
 
   ipcMain.handle("diskhound:check-for-updates", async () => {
+    if (updatesDisabled) return;
     if (linuxManualUpdateBuild) {
       void shell.openExternal(RELEASES_URL);
       emitUpdateStatus({
@@ -4765,8 +4748,7 @@ void (async () => {
       return;
     }
     if (!autoUpdater) return;
-    configureAutoUpdaterForSettings();
-    try { await autoUpdater.checkForUpdates(); } catch { /* ignore */ }
+    await updateScheduler?.checkNow();
   });
 
   // Returns the persisted last-checked timestamp so the Settings UI can
