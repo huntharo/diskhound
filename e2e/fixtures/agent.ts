@@ -5,7 +5,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { Page } from "@playwright/test";
 
-import { MCP_AGENT_CAPABILITIES } from "../../src/shared/agentAccess";
+import { BUILT_IN_MCP_ROLES, MCP_AGENT_CAPABILITIES } from "../../src/shared/agentAccess";
 import { expect, type AppHandle } from "./electron-app";
 import { openTab } from "./steps";
 
@@ -129,7 +129,7 @@ export type SignInOptions = {
   clientName?: string;
   /** Typed over the suggested name (the client's own) when set. */
   sessionName?: string;
-  /** Picked in the Role select. The window preselects Cleanup Guide. */
+  /** Picked from the role cards. The window preselects Cleanup Guide. */
   roleId?: string;
 };
 
@@ -144,7 +144,18 @@ export async function signIn(handle: AppHandle, opts: SignInOptions = {}): Promi
   const name = approval.locator(".agent-consent-field input");
   await expect(name).toHaveValue(clientName);
   if (opts.sessionName) await name.fill(opts.sessionName);
-  if (opts.roleId) await approval.locator(".agent-consent-field select").selectOption(opts.roleId);
+  if (opts.roleId) {
+    const role = BUILT_IN_MCP_ROLES.find((candidate) => candidate.id === opts.roleId);
+    if (!role) throw new Error(`unknown role ${opts.roleId}`);
+    const card = approval.locator(".agent-role-card", { has: approval.locator(".agent-role-name", { hasText: role.name }) });
+    await card.click();
+    await expect(card).toHaveAttribute("aria-checked", "true");
+    await expect(approval.getByRole("button", { name: `Approve as ${role.name}` })).toBeEnabled();
+    // Anything past the default says what it adds; a delete says it can't be undone.
+    if (role.permissions.includes("files.delete")) {
+      await expect(approval.locator(".agent-consent-delta.destructive")).toContainText("can't be restored");
+    }
+  }
   await decide(approval, "Approve");
 
   const callback = await redirect();
@@ -223,7 +234,10 @@ export async function mcpStatus(handle: AppHandle, token: string): Promise<numbe
 export type TrashPrompt = { message: string; detail: string };
 
 export type TrashStub = {
-  /** The button the next confirmations answer with. Starts as Cancel. */
+  /**
+   * The button the next confirmations answer with. Starts as Cancel.
+   * "move" is the first button: Move to Trash, or Delete Permanently.
+   */
   answer: (button: "move" | "cancel") => Promise<void>;
   /** Every confirmation shown so far, oldest first. */
   prompts: () => Promise<TrashPrompt[]>;
@@ -262,7 +276,7 @@ export async function stubTrash(handle: AppHandle, trashDir: string): Promise<Tr
 
   return {
     answer: async (button) => {
-      // Button 0 is "Move to Trash", 1 is "Cancel".
+      // Button 0 is "Move to Trash" (or "Delete Permanently"), 1 is "Cancel".
       await handle.app.evaluate(({ dialog }, response) => {
         (dialog as unknown as StubbedDialog).__e2eResponse = response;
       }, button === "move" ? 0 : 1);

@@ -100,7 +100,7 @@ describe("McpPolicyStore", () => {
     const store = new McpPolicyStore(policyFile);
     expectCode(() => store.createSession("   ", "builtin.reader", oauth()), "invalid_input");
     expectCode(() => store.createSession("x".repeat(201), "builtin.reader", oauth()), "invalid_input");
-    expectCode(() => store.createSession("Agent", "builtin.admin", oauth()), "invalid_input");
+    expectCode(() => store.createSession("Agent", "builtin.root", oauth()), "invalid_input");
     expect(store.sessions()).toEqual([]);
   });
 

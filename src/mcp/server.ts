@@ -6,24 +6,29 @@ import type { CallToolResult, GetPromptResult, ToolAnnotations } from "@modelcon
 import { z } from "zod";
 
 import { duplicateGroupReclaimable, entryReclaimable } from "../shared/duplicateReclaim";
+import { devArtifactSharing, summarizeDevSharing } from "../shared/storageSharing";
 import type { AppView, ScanHistoryEntry, ScanSnapshot } from "../shared/contracts";
 import { MCP_SERVER_NAME, type McpAgentCapability } from "../shared/agentAccess";
 import { normPath } from "../shared/pathUtils";
 import type { McpAccessError, McpAuthorization, McpAuthorizer } from "./accessPolicy";
 import type { AgentActivitySink, DiskhoundAgentBackend } from "./backend";
+import type { AgentSecuritySink } from "./securityLog";
 import { agentPath, isInside } from "./paths";
-import { registerSkills, type SkillCatalog } from "./skills";
+import { readSkillDirectory, registerSkills, type SkillCatalog } from "./skills";
 
 /**
  * DiskHound's MCP surface: tools that read the same scan data the
- * window shows, a few that start work or steer the window, one that
- * asks the user to move items to the Trash, the SEP-2640 skills, and
- * prompt fallbacks for hosts that don't load MCP skills yet.
+ * window shows, a few that start work or steer the window, two that
+ * ask the user to move items to the Trash or delete them, the SEP-2640
+ * skills, and prompt fallbacks for hosts that don't load MCP skills yet.
  *
  * One server is built per HTTP request (stateless Streamable HTTP, as
- * in PwrSnap), bound to that request's bearer token. Every tool call
+ * in PwrSnap), bound to that request's bearer token and to what that
+ * session may do right now: a tool its role doesn't grant is not
+ * registered, so it is missing from tools/list. Every tool call still
  * re-authorizes against the policy file, so a revoke or role change in
- * Settings applies to the next call.
+ * Settings applies to the next call, and a refusal goes to the
+ * security log.
  */
 
 export const FREE_UP_SPACE_SKILL = "skill://diskhound-free-up-space/SKILL.md";
@@ -32,18 +37,67 @@ export const INVESTIGATE_GROWTH_SKILL = "skill://diskhound-investigate-growth/SK
 /** Items per trash request. The dialog lists every one, so keep it readable. */
 const MAX_TRASH_PATHS = 20;
 
+/**
+ * What each tool needs, before its arguments add anything (showInApp
+ * adds app.navigate). A session that lacks any of these doesn't see the
+ * tool, and agentAccessServer refuses and logs a call to it.
+ */
+export const TOOL_CAPABILITIES: Readonly<Record<string, readonly McpAgentCapability[]>> = {
+  diskhound_status: ["disk.read"],
+  diskhound_read_skill: ["disk.read"],
+  diskhound_scan_summary: ["disk.read"],
+  diskhound_list_folder: ["disk.read"],
+  diskhound_search_files: ["disk.read"],
+  diskhound_cleanup_suggestions: ["disk.read"],
+  diskhound_dev_artifacts: ["disk.read"],
+  diskhound_measure_removal: ["disk.read"],
+  diskhound_scan_history: ["disk.read"],
+  diskhound_changes: ["disk.read"],
+  diskhound_duplicates: ["disk.read"],
+  diskhound_start_scan: ["scan.run"],
+  diskhound_cancel_scan: ["scan.run"],
+  diskhound_find_duplicates: ["scan.run"],
+  diskhound_show: ["app.navigate"],
+  diskhound_reveal_path: ["app.navigate"],
+  diskhound_move_to_trash: ["files.trash"],
+  diskhound_delete_permanently: ["files.delete"],
+};
+
+/** Plain words for a refusal the user reads in Settings. */
+const TOOL_ACTION: Readonly<Record<string, string>> = {
+  diskhound_move_to_trash: "move items to the Trash",
+  diskhound_delete_permanently: "delete items permanently",
+  diskhound_start_scan: "start a scan",
+  diskhound_cancel_scan: "cancel a scan",
+  diskhound_find_duplicates: "start a duplicate search",
+  diskhound_show: "steer the DiskHound window",
+  diskhound_reveal_path: "reveal an item in the file manager",
+};
+
+export function toolActionText(tool: string): string {
+  return TOOL_ACTION[tool] ?? `use ${tool}`;
+}
+
 const VIEWS = ["overview", "files", "folders", "dev", "duplicates", "easyMove", "changes", "settings"] as const;
 
 const readOnly: ToolAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const startsWork: ToolAnnotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
 const steersApp: ToolAnnotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const trashes: ToolAnnotations = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false };
+const deletes: ToolAnnotations = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false };
 
 export interface DiskhoundMcpServerOptions {
   backend: DiskhoundAgentBackend;
   authorizer: McpAuthorizer;
   activity: AgentActivitySink;
   skills: SkillCatalog;
+  /**
+   * What this request's session may do. Tools and arguments it can't use
+   * are left out of the server. Omitted in tests that want every tool.
+   */
+  granted?: readonly McpAgentCapability[];
+  /** Where refusals go (Settings → AI Agents → Blocked requests). */
+  security?: AgentSecuritySink;
   /** Aborted when the HTTP request behind this server closes. */
   signal?: AbortSignal;
   now?: () => number;
@@ -51,13 +105,15 @@ export interface DiskhoundMcpServerOptions {
 
 // ── Formatting helpers ──────────────────────────────────────
 
-export function bytesText(bytes: number): string {
+/** Sizes in the units the user picked in Settings, so the agent's numbers match the window's. */
+export function bytesText(bytes: number, base: 1000 | 1024 = 1024): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB", "PB"];
-  const exp = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  const value = bytes / 1024 ** exp;
+  const exp = Math.min(Math.floor(Math.log(bytes) / Math.log(base)), units.length - 1);
+  const value = bytes / base ** exp;
   return `${value.toFixed(value >= 100 || exp === 0 ? 0 : 1)} ${units[exp]}`;
 }
+const bytesTextIn = bytesText;
 
 export function ageText(fromMs: number, nowMs: number): string {
   const minutes = Math.max(0, Math.round((nowMs - fromMs) / 60_000));
@@ -99,23 +155,41 @@ function platformSpaceNote(platform: NodeJS.Platform): string {
   return "Trashed items keep using space until the Trash is emptied. btrfs/ZFS snapshots and hardlinks (e.g. pnpm stores) can keep space in use after deletion. See skill://diskhound-free-up-space/references/linux.md.";
 }
 
-export function serverInstructions(platform: NodeJS.Platform): string {
+export function serverInstructions(
+  platform: NodeJS.Platform,
+  granted: readonly McpAgentCapability[] = ["disk.read", "scan.run", "app.navigate", "files.trash", "files.delete"],
+): string {
   const os = platform === "darwin" ? "macOS" : platform === "win32" ? "Windows" : "Linux";
+  const can = (capability: McpAgentCapability) => granted.includes(capability);
+  const removal = can("files.delete")
+    ? "Never remove anything on your own. diskhound_move_to_trash and diskhound_delete_permanently ask the user to confirm in DiskHound; prefer the Trash, and delete permanently only when the user asks for it."
+    : can("files.trash")
+      ? "Never remove anything on your own. diskhound_move_to_trash asks the user to confirm in DiskHound; this session can't delete permanently."
+      : "This session can't move or delete files. Recommend what to remove and let the user do it, or ask them to give this session a bigger role in DiskHound → Settings → AI Agents.";
   return [
     `DiskHound is a disk-space analyzer running on the user's ${os} computer. Use DiskHound for disk usage, full drives, large files, duplicates, caches, cleanup, or disk growth. If tools are deferred, search your host's tool catalog for DiskHound and the task before calling them.`,
-    "Start with diskhound_status (drives, scanned roots, active scans). If the drive has no recent scan, call diskhound_start_scan and poll diskhound_status until it finishes.",
+    can("scan.run")
+      ? "Start with diskhound_status (drives, scanned roots, active scans). If the drive has no recent scan, call diskhound_start_scan and poll diskhound_status until it finishes."
+      : "Start with diskhound_status (drives, scanned roots, active scans). This session can't start scans; if the data is old, ask the user to rescan in DiskHound.",
     "Drill down with diskhound_list_folder from the scan root. Targeted views: diskhound_dev_artifacts (node_modules, build output, caches, worktrees), diskhound_cleanup_suggestions, diskhound_duplicates, diskhound_search_files, and diskhound_changes (what grew between scans).",
-    `Before recommending deletions, read the skill ${FREE_UP_SPACE_SKILL} (resources/read works if your host does not load MCP skills). It covers cases where deleting files does not free space: APFS clones, Time Machine local snapshots, hardlinks, shadow copies, and snapshots on btrfs/ZFS. For "why did my disk fill up?", read ${INVESTIGATE_GROWTH_SKILL}.`,
-    "The user may be watching DiskHound. Pass showInApp: true, or call diskhound_show, so the window follows along.",
-    "Never delete on your own. diskhound_move_to_trash asks the user to confirm in DiskHound, and nothing here deletes permanently. Sizes are bytes on disk (allocated), not logical file length.",
+    `Before recommending deletions, read the skill ${FREE_UP_SPACE_SKILL} (resources/read, or diskhound_read_skill if your host only passes tools on). It covers cases where deleting files does not free space: APFS clones, Time Machine local snapshots, hardlinks, shadow copies, and snapshots on btrfs/ZFS. For "why did my disk fill up?", read ${INVESTIGATE_GROWTH_SKILL}.`,
+    ...(can("app.navigate")
+      ? ["The user may be watching DiskHound. Pass showInApp: true, or call diskhound_show, so the window follows along."]
+      : []),
+    `${removal} Sizes are bytes on disk (allocated), not logical file length.`,
   ].join("\n\n");
 }
 
 // ── Server ──────────────────────────────────────────────────
 
 export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): McpServer {
-  const { backend, authorizer, activity, skills } = options;
+  const { backend, authorizer, activity, skills, security } = options;
   const now = options.now ?? Date.now;
+  const sizeBase = backend.sizeUnitBase?.() ?? 1024;
+  const bytesText = (bytes: number) => bytesTextIn(bytes, sizeBase);
+  const granted = options.granted;
+  const allows = (capability: McpAgentCapability) => !granted || granted.includes(capability);
+  const canNavigate = allows("app.navigate");
 
   const mcp = new McpServer(
     { name: MCP_SERVER_NAME, title: "DiskHound", version: backend.appVersion },
@@ -123,10 +197,25 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
       // prompts and resources are added by the SDK when the first one
       // registers. Declaring them up front would advertise list methods
       // with no handler behind them when the skill catalog is empty.
-      capabilities: { tools: {} },
-      instructions: serverInstructions(backend.platform),
+      // listChanged: the stdio helper announces role changes.
+      capabilities: { tools: { listChanged: true } },
+      instructions: serverInstructions(backend.platform, granted),
     },
   );
+
+  /**
+   * `showInApp` only for sessions that may steer the window. The types
+   * always include it; without the field, zod strips the argument and
+   * the handler sees undefined.
+   */
+  const showInAppField = (description: string) =>
+    (canNavigate ? { showInApp: z.boolean().optional().describe(description) } : {}) as {
+      showInApp: z.ZodOptional<z.ZodBoolean>;
+    };
+  const showInAppByDefault = (description: string) =>
+    (canNavigate ? { showInApp: z.boolean().default(true).describe(description) } : {}) as {
+      showInApp: z.ZodDefault<z.ZodBoolean>;
+    };
 
   type ToolOutcome = { value: Record<string, unknown>; summary: string; activity?: string };
 
@@ -141,6 +230,9 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
     capabilities: (input: ShapeOutput<Shape>) => McpAgentCapability[],
     run: (input: ShapeOutput<Shape>, auth: McpAuthorization) => Promise<ToolOutcome>,
   ) => {
+    const required = TOOL_CAPABILITIES[name];
+    if (!required) throw new Error(`${name} is missing from TOOL_CAPABILITIES`);
+    if (!required.every(allows)) return;
     mcp.registerTool(name, config, (async (input: ShapeOutput<Shape>) => {
       let auth: McpAuthorization | null = null;
       try {
@@ -163,6 +255,18 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
         // so each has its own copy of McpAccessError.
         if (!auth && (error as Partial<McpAccessError> | null)?.code === "missing_capability") {
           auth = await authorizer.authorize([]).catch(() => null);
+          // The role changed after this server was built (its tool list
+          // is stale). Same refusal as a hidden tool.
+          if (auth) {
+            security?.record({
+              sessionId: auth.sessionId,
+              sessionName: auth.sessionName,
+              roleName: auth.roleName,
+              kind: "tool_not_allowed",
+              tool: name,
+              detail: `Tried to ${toolActionText(name)}; ${auth.roleName} doesn't allow it.`,
+            });
+          }
         }
         if (auth) {
           activity.record({
@@ -221,7 +325,7 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
     {
       title: "DiskHound status",
       description:
-        "Start here. Returns every drive's capacity and free space, which roots DiskHound has scanned (and how long ago), scans in progress, what this Session is allowed to do, and the skills to read before recommending cleanup.",
+        "Start here. Returns every drive's capacity and free space, which roots DiskHound has scanned (and how long ago), scans in progress, what this Session is allowed to do, and the skills to read before recommending cleanup (diskhound_read_skill reads them).",
       inputSchema: {},
       annotations: readOnly,
     },
@@ -282,8 +386,72 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
           ? `The DiskHound window shows the ${value.window.view} tab${value.window.rootPath ? ` for ${value.window.rootPath}` : ""}.`
           : null,
         `Session "${auth.sessionName}" (${auth.roleName}) may: ${auth.capabilities.join(", ")}.`,
+        skills.skills.length ? `Before recommending cleanup, read ${FREE_UP_SPACE_SKILL} with diskhound_read_skill.` : null,
       ].filter(Boolean).join("\n");
       return { value, summary, activity: "Checked drives and scan status" };
+    },
+  );
+
+  // Claude Desktop passes an extension's tools on to its chats and Code
+  // sessions, but not its resources, so a skill has to be reachable as a
+  // tool too. Same text as resources/read.
+  tool(
+    "diskhound_read_skill",
+    {
+      title: "Read a DiskHound skill",
+      description:
+        "DiskHound's skills: how to free up space without being misled by APFS clones, snapshots or hardlinks, and how to find out what made a disk grow. " +
+        "Pass a skill:// URI from diskhound_status or from another skill file; omit it to list the skills. " +
+        "Use this when your host can't read MCP resources. resources/read returns the same text.",
+      inputSchema: {
+        uri: z
+          .string()
+          .min(1)
+          .max(512)
+          .optional()
+          .describe("A skill:// file or folder, e.g. skill://diskhound-free-up-space/SKILL.md. Omit to list every skill."),
+      },
+      annotations: readOnly,
+    },
+    () => ["disk.read"],
+    async (input) => {
+      if (!input.uri) {
+        const value = {
+          skills: skills.skills.map((skill) => ({
+            uri: skill.uri,
+            name: skill.name,
+            description: skill.frontmatter.description ?? "",
+            files: skill.files.map((file) => file.uri),
+          })),
+        };
+        const summary = value.skills.length
+          ? value.skills.map((skill) => `${skill.uri}: ${skill.description}`).join("\n")
+          : "This DiskHound build has no skills.";
+        return { value, summary, activity: "Listed DiskHound's skills" };
+      }
+      const uri = input.uri.trim().replace(/\/+$/, "");
+      for (const skill of skills.skills) {
+        const file = skill.files.find((candidate) => candidate.uri === uri);
+        if (!file) continue;
+        const value = {
+          uri: file.uri,
+          mimeType: file.mimeType,
+          size: file.size,
+          digest: file.digest,
+          otherFiles: skill.files.filter((other) => other !== file).map((other) => other.uri),
+        };
+        const name = file.relativePath === "SKILL.md" ? `the ${skill.name} skill` : `${skill.name}/${file.relativePath}`;
+        return { value, summary: file.text, activity: `Read ${name}` };
+      }
+      const children = readSkillDirectory(skills, uri);
+      if (children) {
+        return {
+          value: { uri, children },
+          summary: children.map((child) => `${child.uri}${child.mimeType === "inode/directory" ? "/" : ""}`).join("\n"),
+          activity: `Listed ${uri.slice("skill://".length)}`,
+        };
+      }
+      throw new Error(`DiskHound has no skill file at ${uri}. Call diskhound_read_skill without a uri to list them.`);
     },
   );
 
@@ -296,7 +464,7 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
       inputSchema: {
         rootPath: z.string().min(1).max(4096).optional().describe("A scanned root, or any path inside one."),
         limit: z.number().int().min(1).max(100).default(15).describe("Rows per list (default 15)."),
-        showInApp: z.boolean().optional().describe("Also switch the DiskHound window to this root's Overview."),
+        ...showInAppField("Also switch the DiskHound window to this root's Overview."),
       },
       annotations: readOnly,
     },
@@ -356,7 +524,7 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
         path: z.string().min(1).max(4096).describe("Absolute path of the folder to list (must be inside a scanned root)."),
         limit: z.number().int().min(1).max(200).default(30).describe("Max folders and max files to return (default 30 each)."),
         includeFiles: z.boolean().default(true).describe("Include loose files in this folder (default true)."),
-        showInApp: z.boolean().optional().describe("Also open this folder in DiskHound's Folders tab."),
+        ...showInAppField("Also open this folder in DiskHound's Folders tab."),
       },
       annotations: readOnly,
     },
@@ -508,7 +676,7 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
     {
       title: "Developer artifacts",
       description:
-        "Developer disk hogs found in the latest scan, grouped by kind: git worktrees, node_modules, Rust target/, JS build output, Python venvs, Go/JVM/.NET caches, package caches, compiler caches. Each entry names its project, size, and growth since the previous scan.",
+        "Developer disk hogs found in the latest scan, grouped by kind: git worktrees, node_modules, Rust target/, JS build output, Python venvs, Go/JVM/.NET caches, package caches, compiler caches. Each entry names its project, size, and growth since the previous scan. On APFS it also says what removing that tree alone frees once clones are counted, and the result bounds what removing every listed tree together frees.",
       inputSchema: {
         rootPath: z.string().min(1).max(4096).optional().describe("A scanned root, or any path inside one."),
         kind: z
@@ -516,7 +684,7 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
           .optional()
           .describe("Only this kind."),
         limit: z.number().int().min(1).max(200).default(30).describe("Max artifacts (default 30)."),
-        showInApp: z.boolean().optional().describe("Also open DiskHound's Dev Artifacts tab."),
+        ...showInAppField("Also open DiskHound's Dev Artifacts tab."),
       },
       annotations: readOnly,
     },
@@ -534,8 +702,14 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
       const artifacts = report.artifacts
         .filter((artifact) => !input.kind || artifact.kind === input.kind)
         .sort((a, b) => b.size - a.size);
+      const listed = artifacts.slice(0, input.limit);
+      const together = summarizeDevSharing(listed);
       const notes: string[] = [];
-      if (backend.platform === "darwin" && artifacts.some((a) => a.kind === "node-modules" || a.kind === "package-cache")) {
+      if (together.measuredTrees > 0) {
+        notes.push(
+          "freesAlone is what removing only that tree frees: its own blocks, plus clone groups whose every copy is inside it. sharedBytes are blocks it shares with files outside it; sharedWith names up to three other Dev Artifacts trees that hold copies. listed.freesTogether bounds what removing every listed tree frees; the low end assumes no two of them share a clone, the high end that they share every one. Both are before the Trash and Time Machine local snapshots.",
+        );
+      } else if (backend.platform === "darwin" && artifacts.some((a) => a.kind === "node-modules" || a.kind === "package-cache")) {
         notes.push(
           "On APFS, pnpm (and other tools using clonefile) clone package files from a shared store, so node_modules trees share blocks with the store and each other. Deleting one tree frees only its unshared blocks; the space returns when the last clone (including the store copy, via `pnpm store prune`) is gone.",
         );
@@ -554,25 +728,159 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
           .slice()
           .sort((a, b) => b.size - a.size)
           .map((bucket) => ({ kind: bucket.kind, sizeBytes: bucket.size, size: bytesText(bucket.size), count: bucket.count })),
-        artifacts: artifacts.slice(0, input.limit).map((artifact) => ({
-          path: artifact.path,
-          kind: artifact.kind,
-          project: artifact.projectName,
-          projectPath: artifact.projectPath,
-          sizeBytes: artifact.size,
-          size: bytesText(artifact.size),
-          fileCount: artifact.fileCount,
-          growthSincePreviousScan: artifact.deltaBytes === null ? null : bytesText(Math.abs(artifact.deltaBytes)) + (artifact.deltaBytes < 0 ? " smaller" : " larger"),
-        })),
+        artifacts: listed.map((artifact) => {
+          const sharing = devArtifactSharing(artifact);
+          return {
+            path: artifact.path,
+            kind: artifact.kind,
+            project: artifact.projectName,
+            projectPath: artifact.projectPath,
+            sizeBytes: artifact.size,
+            size: bytesText(artifact.size),
+            ...(sharing.measured && sharing.freesBytes !== null
+              ? {
+                  freesAloneBytes: sharing.freesBytes,
+                  freesAlone: bytesText(sharing.freesBytes),
+                  sharedBytes: sharing.sharedBytes,
+                  sharedWith: sharing.sharedWith,
+                }
+              : sharing.hint
+                ? { sharingHint: sharing.hint.detail }
+                : {}),
+            fileCount: artifact.fileCount,
+            growthSincePreviousScan: artifact.deltaBytes === null ? null : bytesText(Math.abs(artifact.deltaBytes)) + (artifact.deltaBytes < 0 ? " smaller" : " larger"),
+          };
+        }),
+        ...(together.measuredTrees > 0
+          ? {
+              listed: {
+                count: listed.length,
+                sizeBytes: together.totalBytes,
+                size: bytesText(together.totalBytes),
+                freesTogether: {
+                  atLeastBytes: together.freesBytes,
+                  atMostBytes: together.freesAtMostBytes,
+                  atLeast: bytesText(together.freesBytes),
+                  atMost: bytesText(together.freesAtMostBytes),
+                },
+              },
+            }
+          : {}),
         truncated: artifacts.length > input.limit,
         notes,
       };
       const summary =
         `${value.total} of developer artifacts across ${report.projectCount} projects in ${rootPath}.` +
-        `\n${value.kindTotals.slice(0, 6).map((bucket) => `${bucket.kind}: ${bucket.size} (${bucket.count})`).join(", ")}`;
+        `\n${value.kindTotals.slice(0, 6).map((bucket) => `${bucket.kind}: ${bucket.size} (${bucket.count})`).join(", ")}` +
+        (value.listed
+          ? `\nRemoving the ${value.listed.count} listed (${value.listed.size}) frees ${
+              together.freesBytes === together.freesAtMostBytes
+                ? value.listed.freesTogether.atLeast
+                : `${value.listed.freesTogether.atLeast}–${value.listed.freesTogether.atMost}`
+            }, after APFS clones.`
+          : "") +
+        (value.listed && backend.measureRemoval
+          ? "\nFor the exact figure for the trees you pick, call diskhound_measure_removal with their paths."
+          : "");
       return { value, summary, activity: `Reviewed dev artifacts in ${rootPath}` };
     },
   );
+
+  // Missing on Windows, where the scan counts each file once already.
+  const measureRemoval = backend.measureRemoval?.bind(backend);
+  if (measureRemoval) {
+    tool(
+      "diskhound_measure_removal",
+      {
+        title: "Measure what removing items frees",
+        description:
+          "How much space removing a set of files and folders together would free, measured on disk now. Sizes overstate it when blocks are shared: " +
+          "an APFS clone's blocks come back only when every clone is gone, including clones outside the set and outside any scan, and a hardlinked file only when every name is gone. " +
+          "Returns the total for the whole set and what each path frees alone. Use it before saying what a cleanup frees, or to pick the items that free the most. " +
+          "Reads metadata only. Millions of files take a minute or two; if your client times out, call again with the same paths and DiskHound answers from the measurement it finished.",
+        inputSchema: {
+          paths: z
+            .array(z.string().min(1).max(4096))
+            .min(1)
+            .max(1000)
+            .describe("Absolute paths of the files and folders to measure as one set."),
+          limit: z.number().int().min(1).max(1000).default(50).describe("Paths to list, most freed first (default 50). The totals cover every path."),
+        },
+        annotations: readOnly,
+      },
+      () => ["disk.read"],
+      async (input) => {
+        const paths = [...new Set(input.paths.map((path) => agentPath(path, backend.platform)))];
+        const root = paths.find((path) => normPath(path) === normPath(Path.parse(path).root));
+        if (root) {
+          throw new Error(`${root} is a whole drive. Measure the folders you might remove; diskhound_scan_summary covers the drive.`);
+        }
+        const measured = await measureRemoval(paths, options.signal);
+        const { total } = measured;
+        const ranked = [...measured.paths].sort((a, b) => b.freesAloneBytes - a.freesAloneBytes || b.sizeBytes - a.sizeBytes);
+        const aloneBytes = ranked.reduce((sum, path) => sum + path.freesAloneBytes, 0);
+        const notes: string[] = [];
+        if (backend.platform === "darwin") {
+          if (!measured.cloneMetadata) notes.push("These paths aren't on APFS, so clones weren't checked.");
+          notes.push(
+            "Blocks come back once the Trash is emptied (DiskHound's permanent delete skips it), and a Time Machine local snapshot can hold them until it expires.",
+          );
+        } else {
+          notes.push("Hardlinks are counted. btrfs/XFS reflinks and snapshots aren't, so the space may come back later than this says.");
+        }
+        if (total.uncertainBytes > 0) {
+          notes.push(
+            "uncertainBytes belong to rewritten clones: they share them with clones DiskHound can't identify, so removal frees between freesBytes and freesBytes + uncertainBytes.",
+          );
+        }
+        const value = {
+          measuredAt: new Date(measured.measuredAt).toISOString(),
+          elapsedMs: measured.elapsedMs,
+          total: {
+            files: total.files,
+            sizeBytes: total.sizeBytes,
+            size: bytesText(total.sizeBytes),
+            freesBytes: total.freesBytes,
+            frees: bytesText(total.freesBytes),
+            freesOneAtATimeBytes: aloneBytes,
+            heldElsewhereBytes: total.heldElsewhereBytes,
+            heldElsewhere: bytesText(total.heldElsewhereBytes),
+            uncertainBytes: total.uncertainBytes,
+          },
+          paths: ranked.slice(0, input.limit).map((path) => ({
+            path: path.path,
+            kind: path.kind,
+            files: path.files,
+            sizeBytes: path.sizeBytes,
+            size: bytesText(path.sizeBytes),
+            freesAloneBytes: path.freesAloneBytes,
+            freesAlone: bytesText(path.freesAloneBytes),
+            sharedBytes: path.sharedBytes,
+            uncertainBytes: path.uncertainBytes,
+          })),
+          truncated: ranked.length > input.limit,
+          missing: measured.missing,
+          nested: measured.nested,
+          skippedEntries: measured.skippedEntries,
+          notes,
+        };
+        const count = plural(ranked.length, "item");
+        const summary = [
+          `Removing these ${count} together frees ${bytesText(total.freesBytes)} of the ${bytesText(total.sizeBytes)} they take up (${total.files.toLocaleString()} files).`,
+          total.heldElsewhereBytes > 0
+            ? `${bytesText(total.heldElsewhereBytes)} stays in use because files outside them share it (APFS clones or hardlinks).`
+            : null,
+          total.freesBytes > aloneBytes && ranked.length > 1
+            ? `One at a time they'd free ${bytesText(aloneBytes)}; together frees ${bytesText(total.freesBytes - aloneBytes)} more, because they share clones or hardlinks with each other.`
+            : null,
+          total.uncertainBytes > 0 ? `Up to ${bytesText(total.uncertainBytes)} more might come back (rewritten clones).` : null,
+          ...ranked.slice(0, 5).map((path) => `${path.path}: frees ${bytesText(path.freesAloneBytes)} alone (${bytesText(path.sizeBytes)} on disk)`),
+          measured.missing.length ? `Not found: ${measured.missing.join(", ")}.` : null,
+        ].filter(Boolean).join("\n");
+        return { value, summary, activity: `Measured what removing ${count} frees` };
+      },
+    );
+  }
 
   tool(
     "diskhound_scan_history",
@@ -620,7 +928,7 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
         currentId: z.string().max(200).optional().describe("Newer scan id (default: latest)."),
         detail: z.enum(["summary", "files"]).default("summary"),
         limit: z.number().int().min(1).max(200).default(25).describe("Rows per list (default 25)."),
-        showInApp: z.boolean().optional().describe("Also open DiskHound's Changes tab."),
+        ...showInAppField("Also open DiskHound's Changes tab."),
       },
       annotations: readOnly,
     },
@@ -734,7 +1042,7 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
       inputSchema: {
         rootPath: z.string().min(1).max(4096).optional().describe("The root the duplicate search ran on."),
         limit: z.number().int().min(1).max(200).default(20).describe("Max groups (default 20)."),
-        showInApp: z.boolean().optional().describe("Also open DiskHound's Duplicates tab."),
+        ...showInAppField("Also open DiskHound's Duplicates tab."),
       },
       annotations: readOnly,
     },
@@ -808,7 +1116,7 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
       inputSchema: {
         rootPath: z.string().min(1).max(4096).describe("Drive root (e.g. '/', 'C:\\\\') or any folder."),
         restart: z.boolean().default(false).describe("Cancel and restart if this root is already scanning."),
-        showInApp: z.boolean().default(true).describe("Switch the DiskHound window to this root so the user sees progress (default true)."),
+        ...showInAppByDefault("Switch the DiskHound window to this root so the user sees progress (default true)."),
       },
       annotations: startsWork,
     },
@@ -863,7 +1171,7 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
       inputSchema: {
         rootPath: z.string().min(1).max(4096).describe("Folder or drive to search."),
         minSizeBytes: z.number().int().min(0).default(1024 * 1024).describe("Ignore files smaller than this (default 1 MiB)."),
-        showInApp: z.boolean().default(true).describe("Open DiskHound's Duplicates tab on this root (default true)."),
+        ...showInAppByDefault("Open DiskHound's Duplicates tab on this root (default true)."),
       },
       annotations: startsWork,
     },
@@ -939,14 +1247,17 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
     },
   );
 
-  // ── Trash (user-confirmed) ───────────────────────────────
+  // ── Trash and delete (user-confirmed) ───────────────────
+
+  const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`;
+  const bin = backend.platform === "win32" ? "Recycle Bin" : "Trash";
 
   tool(
     "diskhound_move_to_trash",
     {
       title: "Move to Trash (asks the user)",
       description:
-        "Ask the user to move files or folders to the Trash / Recycle Bin. DiskHound shows a confirmation dialog listing every item and its size; nothing moves unless the user clicks Move to Trash, and nothing is permanently deleted. Protected folders from DiskHound settings are always refused, and so are drive roots, the home folder and its standard folders (Documents, Downloads, Library, AppData…), and anything containing them. Explain to the user what you are proposing and why before calling this.",
+        "Ask the user to move files or folders to the Trash / Recycle Bin. DiskHound shows a confirmation dialog listing every item and its size; nothing moves unless the user clicks Move to Trash, and the user can restore items until the Trash is emptied. Protected folders from DiskHound settings are always refused, and so are drive roots, the home folder and its standard folders (Documents, Downloads, Library, AppData…), and anything containing them. Explain to the user what you are proposing and why before calling this.",
       inputSchema: {
         paths: z.array(z.string().min(1).max(4096)).min(1).max(MAX_TRASH_PATHS).describe("Absolute paths to move to the Trash."),
         reason: z.string().max(500).optional().describe("One sentence shown in the dialog explaining why."),
@@ -957,7 +1268,9 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
     async (input, auth) => {
       const paths = [...new Set(input.paths.map((p) => agentPath(p, backend.platform)))];
       const outcome = await backend.confirmAndTrash({
+        sessionId: auth.sessionId,
         sessionName: auth.sessionName,
+        roleName: auth.roleName,
         paths,
         reason: input.reason,
         recheck: async () => {
@@ -969,7 +1282,7 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
         return {
           value: { confirmed: false, results: [] },
           summary: "The user declined. Nothing was moved.",
-          activity: `Asked to trash ${paths.length} item(s); declined`,
+          activity: `Asked to move ${plural(paths.length, "item")} to the ${bin}; declined`,
         };
       }
       const moved = outcome.results.filter((result) => result.ok);
@@ -984,12 +1297,68 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
           note: platformSpaceNote(backend.platform),
         },
         summary:
-          `Moved ${moved.length} of ${outcome.results.length} item(s) (${bytesText(movedBytes)}) to the Trash.` +
+          `Moved ${moved.length} of ${plural(outcome.results.length, "item")} (${bytesText(movedBytes)}) to the ${bin}.` +
           (moved.length < outcome.results.length
             ? `\nNot moved: ${outcome.results.filter((r) => !r.ok).map((r) => `${r.path} (${r.message})`).join("; ")}`
             : "") +
           `\n${platformSpaceNote(backend.platform)}`,
-        activity: `Moved ${moved.length} item(s) (${bytesText(movedBytes)}) to the Trash`,
+        activity: `Moved ${plural(moved.length, "item")} (${bytesText(movedBytes)}) to the ${bin}`,
+      };
+    },
+  );
+
+  tool(
+    "diskhound_delete_permanently",
+    {
+      title: "Delete permanently (asks the user)",
+      description:
+        `Ask the user to delete files or folders permanently, without the ${bin}. DiskHound shows a confirmation dialog listing every item and its size; nothing is deleted unless the user clicks Delete Permanently, and deleted items can't be restored. Use diskhound_move_to_trash instead unless the user asked for a permanent delete (for example to free space right away, or for items too large for the ${bin}). The same folders are refused as for the ${bin}. Explain to the user what you are proposing and why before calling this.`,
+      inputSchema: {
+        paths: z.array(z.string().min(1).max(4096)).min(1).max(MAX_TRASH_PATHS).describe("Absolute paths to delete permanently."),
+        reason: z.string().max(500).optional().describe("One sentence shown in the dialog explaining why."),
+      },
+      annotations: deletes,
+    },
+    () => ["files.delete"],
+    async (input, auth) => {
+      const paths = [...new Set(input.paths.map((p) => agentPath(p, backend.platform)))];
+      const outcome = await backend.confirmAndDelete({
+        sessionId: auth.sessionId,
+        sessionName: auth.sessionName,
+        roleName: auth.roleName,
+        paths,
+        reason: input.reason,
+        recheck: async () => {
+          await authorizer.authorize(["files.delete"]);
+        },
+        signal: options.signal,
+      });
+      if (!outcome.confirmed) {
+        return {
+          value: { confirmed: false, results: [] },
+          summary: "The user declined. Nothing was deleted.",
+          activity: `Asked to delete ${plural(paths.length, "item")} permanently; declined`,
+        };
+      }
+      const deleted = outcome.results.filter((result) => result.ok);
+      const deletedBytes = deleted.reduce((sum, result) => sum + (result.sizeBytes ?? 0), 0);
+      return {
+        value: {
+          confirmed: true,
+          deletedCount: deleted.length,
+          deletedBytes,
+          deleted: bytesText(deletedBytes),
+          results: outcome.results,
+        },
+        summary:
+          `Deleted ${deleted.length} of ${plural(outcome.results.length, "item")} (${bytesText(deletedBytes)}) permanently.` +
+          (deleted.length < outcome.results.length
+            ? `\nNot deleted: ${outcome.results.filter((r) => !r.ok).map((r) => `${r.path} (${r.message})`).join("; ")}`
+            : "") +
+          (backend.platform === "darwin"
+            ? "\nOn APFS, cloned files and Time Machine local snapshots can keep some of this space in use."
+            : ""),
+        activity: `Deleted ${plural(deleted.length, "item")} (${bytesText(deletedBytes)}) permanently`,
       };
     },
   );

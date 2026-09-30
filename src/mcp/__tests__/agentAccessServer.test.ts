@@ -22,7 +22,7 @@ import { AgentAccessService } from "../agentAccessService";
 import type { TrashRequest } from "../backend";
 import { ConsentBroker, type ConsentSender, type ConsentWindow } from "../consentBroker";
 import { loadSkillCatalog } from "../skills";
-import { createFakeBackend, RecordingActivity, SKILLS_DIR, type FakeBackend } from "./fakeBackend";
+import { createFakeBackend, RecordingActivity, RecordingSecurity, SKILLS_DIR, type FakeBackend } from "./fakeBackend";
 
 const SKILLS = loadSkillCatalog(SKILLS_DIR);
 const ALL_SCOPES = MCP_AGENT_CAPABILITIES.join(" ");
@@ -59,6 +59,7 @@ let tempDir: string;
 let policy: McpPolicyStore;
 let backend: FakeBackend;
 let activity: RecordingActivity;
+let security: RecordingSecurity;
 let windows: FakeConsentWindow[];
 let broker: ConsentBroker;
 let onChanged: ReturnType<typeof vi.fn<() => void>>;
@@ -71,6 +72,7 @@ beforeEach(async () => {
   policy = new McpPolicyStore(Path.join(tempDir, "mcp-policy.json"));
   backend = createFakeBackend();
   activity = new RecordingActivity();
+  security = new RecordingSecurity();
   windows = [];
   broker = new ConsentBroker(
     () => {
@@ -85,6 +87,7 @@ beforeEach(async () => {
   server = new AgentAccessServer({
     backend,
     activity,
+    security,
     skills: SKILLS,
     policy,
     clientsFile: Path.join(tempDir, "mcp-oauth-clients.json"),
@@ -649,6 +652,58 @@ describe("OAuth flow", () => {
     expect(allowed.isError).not.toBe(true);
   });
 
+  it("hides removal tools the role doesn't grant, and refuses and logs a call to one", async () => {
+    const { token } = await login("builtin.guide");
+    const client = await mcpClient(token);
+    const { tools } = await client.listTools();
+    expect(tools.map((tool) => tool.name)).not.toContain("diskhound_move_to_trash");
+    expect(tools.map((tool) => tool.name)).not.toContain("diskhound_delete_permanently");
+
+    const refused = (await client.callTool({ name: "diskhound_delete_permanently", arguments: { paths: ["/tmp/a"] } })) as CallToolResult;
+    expect(refused.isError).toBe(true);
+    expect(text(refused)).toContain("diskhound_delete_permanently isn't available to this DiskHound session (Cleanup Guide doesn't grant files.delete)");
+    expect(text(refused)).toContain("DiskHound logged the attempt");
+    expect(backend.confirmAndDelete).not.toHaveBeenCalled();
+    expect(security.events).toEqual([
+      {
+        sessionId: policy.sessions()[0]!.id,
+        sessionName: "My Agent",
+        roleName: "Cleanup Guide",
+        kind: "tool_not_allowed",
+        tool: "diskhound_delete_permanently",
+        detail: "Tried to delete items permanently; Cleanup Guide doesn't allow it.",
+      },
+    ]);
+    expect(activity.entries.at(-1)).toMatchObject({
+      tool: "diskhound_delete_permanently",
+      ok: false,
+      summary: "Blocked: tried to delete items permanently (Cleanup Guide)",
+    });
+  });
+
+  it("gives Cleanup Admin both removal tools, each behind the user's confirmation", async () => {
+    const { token } = await login("builtin.admin");
+    const client = await mcpClient(token);
+    const { tools } = await client.listTools();
+    expect(tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(["diskhound_move_to_trash", "diskhound_delete_permanently"]));
+    const deleted = (await client.callTool({ name: "diskhound_delete_permanently", arguments: { paths: ["/tmp/a"] } })) as CallToolResult;
+    expect(deleted.isError).not.toBe(true);
+    expect(backend.confirmAndDelete).toHaveBeenCalledWith(expect.objectContaining({ sessionName: "My Agent", roleName: "Cleanup Admin", paths: ["/tmp/a"] }));
+    expect(security.events).toEqual([]);
+  });
+
+  it("reports the session's permissions in a response header", async () => {
+    const { token } = await login("builtin.operator");
+    const response = await rawRequest({
+      method: "POST",
+      path: "/mcp",
+      headers: { ...MCP_HEADERS, authorization: `Bearer ${token}` },
+      body: INITIALIZE,
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers["diskhound-capabilities"]).toBe("app.navigate,disk.read,files.trash,scan.run");
+  });
+
   it("accepts tools/call and prompts/get without `arguments` (rmcp clients omit it)", async () => {
     const { token } = await login("builtin.reader");
     const client = await mcpClient(token);
@@ -721,6 +776,25 @@ describe("OAuth flow", () => {
     expect(callback.searchParams.get("state")).toBe("state-123");
     expect(callback.searchParams.get("code")).toBeNull();
     expect(policy.sessions()).toEqual([]);
+  });
+
+  it("closes the approval when the stdio helper withdraws it, and answers every cancel the same", async () => {
+    const { client_id: clientId } = await register();
+    const id = await openApproval(authorizeUrl(clientId, pkce().challenge));
+    expect(broker.pending()).toHaveLength(1);
+    const cancel = (body: string) => rawRequest({
+      method: "POST",
+      path: "/authorize/cancel",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body,
+    });
+    expect((await cancel("id=not-a-real-id")).status).toBe(204);
+    expect(broker.pending()).toHaveLength(1);
+    expect((await cancel(`id=${id}`)).status).toBe(204);
+    await expect.poll(() => broker.pending().length).toBe(0);
+    expect(latestWindow().isDestroyed()).toBe(true);
+    const status = await fetch(`${base}/authorize/status?id=${id}`, { redirect: "manual" });
+    expect(status.status).toBe(404);
   });
 
   it("treats closing the approval window as a deny", async () => {

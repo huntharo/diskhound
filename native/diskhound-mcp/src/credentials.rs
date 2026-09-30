@@ -9,9 +9,23 @@ use std::{
 const UNAVAILABLE: &str = "Unlock your OS credential store (Keychain, Credential Manager, or Secret Service), or use --ephemeral to approve each connection without saving credentials.";
 const SERVICE: &str = "com.diskhound.mcp.stdio.v1";
 
+/// Clients the helper names (see `client_label`), whose approvals `--forget` removes.
+pub const KNOWN_CLIENTS: [&str; 5] = [
+    "Claude Desktop",
+    "Claude Code",
+    "Codex",
+    "Cursor",
+    "VS Code",
+];
+
+#[derive(Clone)]
 pub struct Credentials {
     entry: std::sync::Arc<keyring::Entry>,
     directory: PathBuf,
+    /// The OS store's accounts start with this. None for a test store, whose entry is fixed.
+    origin: Option<String>,
+    /// Names this client's lock file. None for the port's.
+    client: Option<String>,
 }
 impl Credentials {
     #[cfg(test)]
@@ -19,9 +33,13 @@ impl Credentials {
         Self {
             entry: std::sync::Arc::new(entry),
             directory,
+            origin: None,
+            client: None,
         }
     }
 
+    /// The port's store. Its own entry is the one connection saved before
+    /// approvals were per client; `--forget` removes it.
     pub fn new(origin: &str) -> Result<Self> {
         let directory = dirs::data_local_dir()
             .ok_or(UNAVAILABLE)?
@@ -32,8 +50,29 @@ impl Credentials {
                 keyring::Entry::new(SERVICE, origin).map_err(|_| UNAVAILABLE)?,
             ),
             directory,
+            origin: Some(origin.to_owned()),
+            client: None,
         })
     }
+
+    /// One client's saved approval and lock. Each agent gets its own
+    /// DiskHound session, so approving Claude Code never lets Claude
+    /// Desktop in, and one client's pending approval never blocks another's.
+    pub fn for_client(&self, client: &str) -> Result<Self> {
+        let entry = match &self.origin {
+            Some(origin) => std::sync::Arc::new(
+                keyring::Entry::new(SERVICE, &account(origin, client)).map_err(|_| UNAVAILABLE)?,
+            ),
+            None => self.entry.clone(),
+        };
+        Ok(Self {
+            entry,
+            directory: self.directory.clone(),
+            origin: self.origin.clone(),
+            client: Some(lock_key(client)),
+        })
+    }
+
     pub async fn lock(&self, port: u16) -> Result<File> {
         #[cfg(unix)]
         {
@@ -72,7 +111,10 @@ impl Credentials {
                 .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
         }
         let file = options
-            .open(self.directory.join(format!("{port}.lock")))
+            .open(self.directory.join(match &self.client {
+                Some(key) => format!("{port}-{key}.lock"),
+                None => format!("{port}.lock"),
+            }))
             .map_err(|_| UNAVAILABLE)?;
         #[cfg(unix)]
         {
@@ -125,6 +167,19 @@ impl Credentials {
         .await
         .map_err(|_| UNAVAILABLE)?
     }
+}
+/// The OS store account for one client's approval on one port.
+pub fn account(origin: &str, client: &str) -> String {
+    format!("{origin}#{client}")
+}
+/// A file-name-safe key for a client name (FNV-1a).
+fn lock_key(client: &str) -> String {
+    let hash = client
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+    format!("{hash:016x}")
 }
 pub fn valid_token(token: &str) -> bool {
     token.starts_with("dhmcp_")

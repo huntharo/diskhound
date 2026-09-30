@@ -44,7 +44,7 @@ function within(folder: string, candidate: string, platform: NodeJS.Platform): b
 }
 
 /**
- * Why an agent may not trash `target` (already canonical), or null.
+ * Why an agent may not trash or delete `target` (already canonical), or null.
  * Refuses drive roots, network and device paths, and anything that is
  * or contains one of `keep`: the home folder, its standard folders,
  * DiskHound's own data and install folder.
@@ -55,12 +55,12 @@ export function agentTrashRefusal(
   platform: NodeJS.Platform = process.platform,
 ): string | null {
   const api = platform === "win32" ? Path.win32 : Path.posix;
-  if (platform === "win32" && /^[\\/]{2}/.test(target)) return "network and device paths can't be moved by agents";
+  if (platform === "win32" && /^[\\/]{2}/.test(target)) return "agents can't remove network or device paths";
   if (api.dirname(target) === target) return "it is a drive root";
   const folder = keep.find((candidate) => within(target, candidate, platform));
   if (!folder) return null;
   return key(folder, platform) === key(target, platform)
-    ? "DiskHound never lets agents move this folder"
+    ? "DiskHound never lets agents remove this folder"
     : `it contains ${folder}`;
 }
 

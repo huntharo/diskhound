@@ -47,8 +47,11 @@ What this means for cleanup:
   (Dev Artifacts lists them all) **and** run `pnpm store prune`, which drops
   store packages no project references.
 - macOS has no standard command that shows how much of a file is shared.
-  When it matters, measure: note free space with `diskhound_status`, remove
-  the item, empty the Trash, and check again. Allow for local snapshots (next
+  `diskhound_measure_removal` reads each file's clone id and reference count
+  and tells you what a set of paths frees. A clone that was rewritten after
+  copying reports its own blocks only; the rest is `uncertainBytes`. To
+  confirm afterwards, note free space with `diskhound_status`, remove the
+  items, empty the Trash, and check again. Allow for local snapshots (next
   section), which also delay the change.
 
 ## Time Machine local snapshots

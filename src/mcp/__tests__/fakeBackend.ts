@@ -19,6 +19,8 @@ import type {
 import { BUILT_IN_MCP_ROLES, type AgentActivityEntry } from "../../shared/agentAccess";
 import type { McpAuthorization } from "../accessPolicy";
 import type { AgentActivitySink, DiskhoundAgentBackend, DuplicateState, FolderChildren } from "../backend";
+import type { RemovalMeasurement } from "../removalMeasure";
+import type { AgentSecuritySink, SecurityEventInput } from "../securityLog";
 
 export const SKILLS_DIR = fileURLToPath(new URL("../../../skills", import.meta.url));
 export const SERVER_SOURCE = fileURLToPath(new URL("../server.ts", import.meta.url));
@@ -192,6 +194,21 @@ const DEV: DevArtifactReport = {
   rootPath: ROOT,
 };
 
+/** Two worktrees sharing clones with each other and with a store outside. */
+export const MEASUREMENT: RemovalMeasurement = {
+  paths: [
+    { path: `${ROOT}/wt/one`, kind: "folder", files: 1_000, sizeBytes: 4 * GB, freesAloneBytes: 1 * GB, sharedBytes: 3 * GB, uncertainBytes: 0 },
+    { path: `${ROOT}/wt/two`, kind: "folder", files: 2_000, sizeBytes: 5 * GB, freesAloneBytes: 2 * GB, sharedBytes: 3 * GB, uncertainBytes: 0 },
+  ],
+  total: { files: 3_000, sizeBytes: 9 * GB, freesBytes: 4 * GB, heldElsewhereBytes: 2 * GB, uncertainBytes: 0 },
+  missing: [],
+  nested: [],
+  skippedEntries: 0,
+  cloneMetadata: true,
+  elapsedMs: 1_200,
+  measuredAt: NOW,
+};
+
 function diffFor(baselineId: string, currentId: string): ScanDiffResult | null {
   const baseline = HISTORY.find((entry) => entry.id === baselineId);
   const current = HISTORY.find((entry) => entry.id === currentId);
@@ -282,9 +299,14 @@ export function createFakeBackend() {
     startDuplicateScan: vi.fn<DiskhoundAgentBackend["startDuplicateScan"]>(() => undefined),
     navigate: vi.fn<DiskhoundAgentBackend["navigate"]>(async () => undefined),
     revealPath: vi.fn<DiskhoundAgentBackend["revealPath"]>(async () => ({ ok: true, message: "Revealed." })),
+    measureRemoval: vi.fn<NonNullable<DiskhoundAgentBackend["measureRemoval"]>>(async () => MEASUREMENT),
     confirmAndTrash: vi.fn<DiskhoundAgentBackend["confirmAndTrash"]>(async (request) => ({
       confirmed: true,
       results: request.paths.map((path) => ({ path, ok: true, message: "Moved to Trash.", sizeBytes: 100 * MB })),
+    })),
+    confirmAndDelete: vi.fn<DiskhoundAgentBackend["confirmAndDelete"]>(async (request) => ({
+      confirmed: true,
+      results: request.paths.map((path) => ({ path, ok: true, message: "Deleted.", sizeBytes: 100 * MB })),
     })),
   } satisfies DiskhoundAgentBackend;
   return backend;
@@ -310,5 +332,12 @@ export class RecordingActivity implements AgentActivitySink {
   readonly entries: Omit<AgentActivityEntry, "id" | "at">[] = [];
   record(entry: Omit<AgentActivityEntry, "id" | "at">): void {
     this.entries.push(entry);
+  }
+}
+
+export class RecordingSecurity implements AgentSecuritySink {
+  readonly events: SecurityEventInput[] = [];
+  record(event: SecurityEventInput): void {
+    this.events.push(event);
   }
 }

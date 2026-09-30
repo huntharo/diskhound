@@ -10,10 +10,13 @@ import {
   type PowerEfficiency,
 } from "./powerEfficiency";
 import type {
+  AddToClaudeResult,
   AgentAccessSnapshot,
   AgentActivityEntry,
   AgentConsentDecision,
   AgentConsentPrompt,
+  AgentConsentState,
+  AgentSecurityEvent,
 } from "./agentAccess";
 
 export type ScanStatus = "idle" | "running" | "done" | "cancelled" | "error";
@@ -1326,6 +1329,11 @@ export interface NavigateViewPayload {
    * follows an agent's drill-down.
    */
   folderPath?: string;
+  /**
+   * With `view: "settings"`, the section to scroll to. The app menu's
+   * Connect an AI Agent… and the tray use "ai-agents".
+   */
+  section?: "ai-agents";
 }
 
 /** What the main window is showing; reported to main for agents. */
@@ -1708,6 +1716,8 @@ export interface DiskhoundNativeApi {
   reportViewState: (state: WindowViewState) => void;
   /** Paths an agent moved to the Trash (after the user confirmed). */
   onPathsTrashed: (listener: (paths: string[]) => void) => () => void;
+  /** Paths an agent deleted permanently (after the user confirmed). */
+  onPathsDeleted: (listener: (paths: string[]) => void) => () => void;
 
   // Local AI agent access (MCP)
   getAgentAccess: () => Promise<AgentAccessSnapshot>;
@@ -1717,9 +1727,19 @@ export interface DiskhoundNativeApi {
   forgetRevokedAgentSessions: () => Promise<AgentAccessSnapshot>;
   onAgentAccessChanged: (listener: (snapshot: AgentAccessSnapshot) => void) => () => void;
   onAgentActivity: (listener: (entry: AgentActivityEntry) => void) => () => void;
+  /** Something an agent tried and wasn't allowed to do (new or repeated). */
+  onAgentSecurityEvent: (listener: (event: AgentSecurityEvent) => void) => () => void;
+  /** Bring the approval sheet that's waiting to the front. */
+  focusAgentApproval: () => Promise<boolean>;
+  /** Deny a waiting approval from Settings. */
+  dismissAgentApproval: (requestId: string) => Promise<AgentAccessSnapshot>;
+  /** Build DiskHound's Claude extension and open it in Claude, which asks to install it. */
+  addAgentToClaude: () => Promise<AddToClaudeResult>;
   /** Approval window only: the pending request this window was opened for. */
-  agentConsentRead: () => Promise<AgentConsentPrompt | null>;
+  agentConsentRead: () => Promise<(AgentConsentPrompt & Omit<AgentConsentState, "requestId">) | null>;
   agentConsentDecide: (decision: AgentConsentDecision) => Promise<{ ok: boolean; message?: string }>;
+  /** Approval window only: the waiting agent went quiet, or came back. */
+  onAgentConsentState: (listener: (state: AgentConsentState) => void) => () => void;
 }
 
 // ── Defaults ────────────────────────────────────────────────

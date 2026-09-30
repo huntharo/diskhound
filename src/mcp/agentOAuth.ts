@@ -19,7 +19,7 @@ import {
   type OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 
-import { MCP_AGENT_CAPABILITIES, type McpAgentCapability } from "../shared/agentAccess";
+import { MCP_AGENT_CAPABILITIES, type AgentClientVia, type McpAgentCapability } from "../shared/agentAccess";
 import { findRole, isCapability, type McpPolicyStore } from "./accessPolicy";
 
 /**
@@ -40,6 +40,14 @@ import { findRole, isCapability, type McpPolicyStore } from "./accessPolicy";
 
 const TTL_MS = 5 * 60_000;
 const PENDING_LIMIT = 64;
+/**
+ * The waiting client checks /authorize/status every 0.5–1 s (the stdio
+ * helper and the browser page). Silence this long means it gave up,
+ * usually a client's connect timeout, so an approval now reaches nobody.
+ */
+const STALE_AFTER_MS = 10_000;
+/** software_id the bundled stdio helper registers with. */
+export const STDIO_HELPER_SOFTWARE_ID = "diskhound-mcp";
 const CLIENT_LIMIT = 256;
 const opaque = () => randomBytes(32).toString("base64url");
 
@@ -54,8 +62,11 @@ const DEFAULT_SCOPES: McpAgentCapability[] = [...MCP_AGENT_CAPABILITIES];
 
 export interface ConsentRequest {
   clientName: string;
+  via: AgentClientVia;
   scopes: McpAgentCapability[];
   signal: AbortSignal;
+  /** False once the waiting client stops checking for the decision. */
+  clientWaiting: () => boolean;
 }
 export interface ConsentDecision {
   decision: "allow" | "deny";
@@ -125,6 +136,23 @@ interface BrowserApproval {
   controller: AbortController;
   expires: number;
   redirect?: string;
+  /** Last time the client asked for the decision (or started the request). */
+  lastPolledAt: number;
+  clientName: string;
+  /** Same client, PKCE challenge, state and redirect: the same login. */
+  key: string;
+}
+
+function clientVia(client: OAuthClientInformationFull): AgentClientVia {
+  return client.software_id === STDIO_HELPER_SOFTWARE_ID ? "stdio" : "http";
+}
+
+function clientLabel(client: OAuthClientInformationFull): string {
+  return client.client_name?.trim().slice(0, 200) || "Local MCP client";
+}
+
+function escapeHtml(text: string): string {
+  return text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 }
 
 export class AgentOAuth implements OAuthServerProvider {
@@ -150,11 +178,27 @@ export class AgentOAuth implements OAuthServerProvider {
     }
     const scopes = params.scopes?.length ? params.scopes : DEFAULT_SCOPES;
     if (!scopes.every(isCapability)) throw new InvalidScopeError("Unknown DiskHound permission");
+    // A reloaded tab, or a client that opens the URL itself and prints
+    // it too, is the same login: show its waiting page again rather
+    // than queue a second approval the user has to deny.
+    const key = [client.client_id, params.codeChallenge, params.state ?? "", params.redirectUri].join("\n");
+    for (const [existingId, existing] of this.approvals) {
+      if (existing.key !== key) continue;
+      existing.lastPolledAt = Date.now();
+      this.waitingPage(response, existingId, existing.clientName);
+      return;
+    }
     if (this.approvals.size >= PENDING_LIMIT || this.codes.size >= PENDING_LIMIT) {
       throw new InvalidRequestError("Too many pending approvals");
     }
     const id = opaque();
-    const record: BrowserApproval = { controller: new AbortController(), expires: Date.now() + TTL_MS };
+    const record: BrowserApproval = {
+      controller: new AbortController(),
+      expires: Date.now() + TTL_MS,
+      lastPolledAt: Date.now(),
+      clientName: clientLabel(client),
+      key,
+    };
     this.approvals.set(id, record);
     const timer = setTimeout(() => {
       record.controller.abort();
@@ -193,13 +237,15 @@ export class AgentOAuth implements OAuthServerProvider {
     };
 
     void this.options.requestConsent({
-      clientName: client.client_name?.trim() || "Local MCP client",
+      clientName: record.clientName,
+      via: clientVia(client),
       scopes: scopes as McpAgentCapability[],
       signal: record.controller.signal,
+      clientWaiting: () => Date.now() - record.lastPolledAt < STALE_AFTER_MS,
     })
       .then(finish)
       .catch(() => finish({ decision: "deny", sessionName: "", roleId: "" }));
-    this.waitingPage(response, id);
+    this.waitingPage(response, id, record.clientName);
   }
 
   status(id: string, response: Response): void {
@@ -209,8 +255,9 @@ export class AgentOAuth implements OAuthServerProvider {
       response.status(404).type("text").send("Approval expired. Start a new DiskHound login from your agent.");
       return;
     }
+    record.lastPolledAt = Date.now();
     if (!record.redirect) {
-      this.waitingPage(response, id);
+      this.waitingPage(response, id, record.clientName);
       return;
     }
     this.approvals.delete(id);
@@ -218,7 +265,20 @@ export class AgentOAuth implements OAuthServerProvider {
     response.redirect(302, record.redirect);
   }
 
-  private waitingPage(response: Response, id: string) {
+  /**
+   * The requester gave up before the user decided (the stdio helper's
+   * client hung up). Withdraw the request so its approval sheet closes
+   * rather than waiting to be denied. Knowing the opaque id is the
+   * permission; once decided, there is nothing left to withdraw.
+   */
+  cancel(id: string): void {
+    const record = this.approvals.get(id);
+    if (!record || record.redirect) return;
+    this.approvals.delete(id);
+    record.controller.abort();
+  }
+
+  private waitingPage(response: Response, id: string, clientName: string) {
     // No browser form or script can approve access. The opaque status
     // URL only retrieves a PKCE-bound redirect after the native window
     // has decided.
@@ -234,7 +294,7 @@ export class AgentOAuth implements OAuthServerProvider {
         `<title>Continue in DiskHound</title>` +
         `<style>body{font:15px/1.5 -apple-system,Segoe UI,sans-serif;background:#0a0a0f;color:#e2e8f0;display:grid;place-items:center;height:100vh;margin:0}main{max-width:420px;text-align:center}h1{font-size:20px;color:#f59e0b}</style>` +
         `</head><body><main><h1>Continue in DiskHound</h1>` +
-        `<p>Review the Session name and permissions in DiskHound’s approval window. This page updates on its own once you decide.</p>` +
+        `<p><strong>${escapeHtml(clientName)}</strong> is waiting for your approval. Choose what it may do in the DiskHound window. This page updates on its own once you decide.</p>` +
         `</main></body></html>`,
     );
   }
@@ -258,10 +318,12 @@ export class AgentOAuth implements OAuthServerProvider {
     if (!role || !role.permissions.every((permission) => record.scopes.includes(permission))) {
       throw new InvalidGrantError("Approved role changed; authorize again");
     }
-    const issued = this.options.policy.createSession(record.decision.sessionName, record.decision.roleId, {
-      clientId: client.client_id,
-      scopes: record.scopes,
-    });
+    const issued = this.options.policy.createSession(
+      record.decision.sessionName,
+      record.decision.roleId,
+      { clientId: client.client_id, scopes: record.scopes },
+      { name: clientLabel(client), via: clientVia(client) },
+    );
     this.options.onChanged();
     return { access_token: issued.token, token_type: "bearer", scope: record.scopes.join(" ") };
   }

@@ -1,5 +1,6 @@
 import * as FS from "node:fs/promises";
 import { createRequire } from "node:module";
+import * as OS from "node:os";
 import * as Path from "node:path";
 
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
@@ -25,25 +26,35 @@ import type {
 import {
   AGENT_ACCESS_PORT,
   BUILT_IN_MCP_ROLES,
+  MCP_SERVER_NAME,
   agentAccessMcpUrl,
+  type AddToClaudeResult,
   type AgentAccessSnapshot,
   type AgentAccessStatus,
   type AgentConsentDecision,
 } from "../shared/agentAccess";
 import { normPath } from "../shared/pathUtils";
+import { powerEfficiencyWorkers } from "../shared/powerEfficiency";
+import { formatSizeBytes, resolveSizeUnitBase } from "../shared/sizeUnits";
 import { McpPolicyStore } from "./accessPolicy";
 import type { AgentAccessService } from "./agentAccessService";
 import { AgentActivityLog } from "./activityLog";
 import type { DiskhoundAgentBackend, FolderChildren, NavigateRequest, TrashOutcome, TrashRequest } from "./backend";
+import { writeClaudeExtension } from "./claudeExtension";
 import { ConsentBroker, type ConsentWindow } from "./consentBroker";
+import { resolveNativeScannerBinary } from "../nativeScanner";
 import { isInside } from "./paths";
+import { nativeRemovalMeasurer, RemovalMeasurements } from "./removalMeasure";
+import { AgentSecurityLog } from "./securityLog";
 import type { SkillCatalog } from "./skills";
 import { agentTrashRefusal, canonicalPath, configuredTrashGuard, outermostPaths } from "./trashGuard";
 
 const NAVIGATE_VIEW_CHANNEL = "diskhound:navigate-view";
 const PATHS_TRASHED_CHANNEL = "diskhound:paths-trashed";
+const PATHS_DELETED_CHANNEL = "diskhound:paths-deleted";
 const AGENT_ACCESS_CHANGED_CHANNEL = "diskhound:agent-access-changed";
 const AGENT_ACTIVITY_CHANNEL = "diskhound:agent-activity";
+const AGENT_SECURITY_CHANNEL = "diskhound:agent-security";
 
 /**
  * The closures from main.ts that the agent host needs. main.ts owns
@@ -79,11 +90,15 @@ export interface AgentHostDeps {
   duplicates(rootPath: string): { running: boolean; progress: DuplicateScanProgress | null; analysis: DuplicateAnalysis | null };
   startDuplicateScan(rootPath: string, minSizeBytes?: number): void;
   trashPath(targetPath: string): Promise<PathActionResult>;
+  /** DiskHound's own permanent delete (worker for folders), as the UI uses it. */
+  permanentDeletePath(targetPath: string): Promise<PathActionResult>;
 }
 
 export interface AgentHost {
   /** Start the MCP server if Settings has AI Agents on. */
   start(): Promise<void>;
+  /** Open Settings → AI Agents in the main window (menus, tray). */
+  showSettings(): Promise<void>;
   dispose(): Promise<void>;
 }
 
@@ -132,7 +147,7 @@ async function keepFolders(): Promise<string[]> {
 }
 
 /**
- * DISKHOUND_AGENT_PORT moves the MCP server off 51733. The E2E suite
+ * DISKHOUND_AGENT_PORT moves the MCP server off 51735. The E2E suite
  * gives each launch its own port, so it never collides with a DiskHound
  * the developer runs with agents turned on.
  */
@@ -184,6 +199,26 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
 
   const activity = new AgentActivityLog((entry) => mainWindowSend(AGENT_ACTIVITY_CHANNEL, entry));
 
+  // What agents tried and weren't allowed to do. Read from disk only once
+  // agents have been turned on (never while the feature is unused).
+  const security = new AgentSecurityLog({
+    file: Path.join(userData, "agent-security.log"),
+    onEvent: (event, { repeated, logged }) => {
+      mainWindowSend(AGENT_SECURITY_CHANNEL, event);
+      if (repeated) return;
+      if (logged) deps.log("agent-security", `${event.kind} session="${event.sessionName}" tool=${event.tool} ${event.detail}`);
+      if (event.tool === "diskhound_move_to_trash" || event.tool === "diskhound_delete_permanently") {
+        deps.toast("warning", `Blocked a request from ${event.sessionName}`, event.detail);
+      }
+    },
+  });
+  let securityLoaded = false;
+  const loadSecurityEvents = async () => {
+    if (securityLoaded) return;
+    securityLoaded = true;
+    await security.list();
+  };
+
   // ── Backend ───────────────────────────────────────────────
 
   /** Latest scan (newest first) per distinct root. */
@@ -213,6 +248,7 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
       view: request.view,
       ...(request.rootPath ? { scanRoot: request.rootPath } : {}),
       ...(request.folderPath ? { folderPath: request.folderPath } : {}),
+      ...(request.section ? { section: request.section } : {}),
     };
     if (readyRendererId === main.webContents.id && !main.webContents.isLoading()) {
       mainWindowSend(NAVIGATE_VIEW_CHANNEL, payload);
@@ -248,20 +284,22 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
     return null;
   };
 
+  /** The units the window shows, so the dialog's sizes match it. */
+  const sizeUnitBase = () => resolveSizeUnitBase(deps.getSettings().general.sizeUnits, process.platform);
   const formatSize = (bytes: number | null) => {
     if (bytes === null) return "size unknown";
     if (bytes <= 0) return "0 B";
-    const units = ["B", "KB", "MB", "GB", "TB"];
-    const exp = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-    const value = bytes / 1024 ** exp;
-    return `${value.toFixed(value >= 100 || exp === 0 ? 0 : 1)} ${units[exp]}`;
+    return formatSizeBytes(bytes, sizeUnitBase());
   };
 
+  const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`;
+
   // One confirmation dialog at a time; later requests queue behind it.
-  let trashTail: Promise<unknown> = Promise.resolve();
-  const confirmAndTrash = (request: TrashRequest): Promise<TrashOutcome> => {
+  let removalTail: Promise<unknown> = Promise.resolve();
+  const confirmAndRemove = (request: TrashRequest, mode: "trash" | "delete"): Promise<TrashOutcome> => {
+    const verb = mode === "trash" ? "moved" : "deleted";
     const hungUp = () =>
-      new Error("The agent's request closed before DiskHound asked the user. Nothing was moved.");
+      new Error(`The agent's request closed before DiskHound asked the user. Nothing was ${verb}.`);
     const run = async (): Promise<TrashOutcome> => {
       // This request may have waited behind other dialogs. If the agent
       // hung up, the server stopped, or the user revoked the session or
@@ -284,8 +322,19 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
           continue;
         }
         const why = protectedFolder(requested, target) ?? agentTrashRefusal(target, keep);
-        if (why) refused.push({ path: target, ok: false, message: `Refused: ${why}.`, sizeBytes: null });
-        else offered.push(target);
+        if (why) {
+          refused.push({ path: target, ok: false, message: `Refused: ${why}.`, sizeBytes: null });
+          security.record({
+            sessionId: request.sessionId,
+            sessionName: request.sessionName,
+            roleName: request.roleName,
+            kind: "protected_path",
+            tool: mode === "trash" ? "diskhound_move_to_trash" : "diskhound_delete_permanently",
+            detail: `Asked to ${mode === "trash" ? `move ${target} to the ${trashName()}` : `delete ${target} permanently`}; refused: ${why.replace(/\.$/, "")}.`,
+          });
+        } else {
+          offered.push(target);
+        }
       }
       const targets = outermostPaths(offered);
       if (targets.length === 0) {
@@ -307,24 +356,42 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
       const totalText = known.length === 0 ? "" : ` (${known.length < sizes.length ? "at least " : ""}${formatSize(total)})`;
       // Every item, never "…and N more": the server caps a request at 20.
       const listed = targets.map((p, i) => `• ${p}  (${formatSize(sizes[i] ?? null)})`);
+      // The user should know what else the agent asked for, and why it isn't here.
+      const skipped = refused.length === 0
+        ? ""
+        : `\n\nNot included:\n${refused.map((r) => `• ${r.path}: ${r.message.replace(/^Refused: /, "")}`).join("\n")}`;
       const bin = trashName();
-      const { response } = await dialog.showMessageBox(main, {
-        type: "warning",
-        title: "DiskHound — agent request",
-        message: `“${request.sessionName}” wants to move ${targets.length} item${targets.length === 1 ? "" : "s"}${totalText} to the ${bin}.`,
-        detail:
-          (request.reason ? `Reason: ${request.reason}\n\n` : "") +
-          `${listed.join("\n")}\n\nYou can restore items from the ${bin} until it is emptied. Protected folders are always skipped.`,
-        buttons: [`Move to ${bin}`, "Cancel"],
-        defaultId: 1,
-        cancelId: 1,
-        noLink: true,
-        // Closes the dialog (as Cancel) if the agent hangs up or agents are turned off.
-        signal: request.signal,
-      });
+      const { response } = await dialog.showMessageBox(main, mode === "trash"
+        ? {
+            type: "warning",
+            title: "DiskHound — agent request",
+            message: `“${request.sessionName}” wants to move ${plural(targets.length, "item")}${totalText} to the ${bin}.`,
+            detail:
+              (request.reason ? `Reason: ${request.reason}\n\n` : "") +
+              `${listed.join("\n")}${skipped}\n\nYou can restore items from the ${bin} until it is emptied.`,
+            buttons: [`Move to ${bin}`, "Cancel"],
+            defaultId: 1,
+            cancelId: 1,
+            noLink: true,
+            // Closes the dialog (as Cancel) if the agent hangs up or agents are turned off.
+            signal: request.signal,
+          }
+        : {
+            type: "warning",
+            title: "DiskHound — agent request",
+            message: `“${request.sessionName}” wants to permanently delete ${plural(targets.length, "item")}${totalText}.`,
+            detail:
+              (request.reason ? `Reason: ${request.reason}\n\n` : "") +
+              `${listed.join("\n")}${skipped}\n\nThese won't go to the ${bin}. Deleted items can't be restored.`,
+            buttons: ["Delete Permanently", "Cancel"],
+            defaultId: 1,
+            cancelId: 1,
+            noLink: true,
+            signal: request.signal,
+          });
       if (request.signal?.aborted) throw hungUp();
       if (response !== 0) {
-        deps.log("agent-trash", `declined session="${request.sessionName}" paths=${targets.length}`);
+        deps.log(`agent-${mode}`, `declined session="${request.sessionName}" paths=${targets.length}`);
         return { confirmed: false, results: [] };
       }
       const results: TrashOutcome["results"] = [...refused];
@@ -332,29 +399,59 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
       const currentProtection = await configuredTrashGuard(deps.getSettings().scanning.excludedFolderPaths);
       for (const [index, target] of targets.entries()) {
         const blocked = currentProtection(target, target);
-        const result = blocked ? { ok: false, message: blocked } : await deps.trashPath(target);
+        const result = blocked
+          ? { ok: false, message: blocked }
+          : mode === "trash"
+            ? await deps.trashPath(target)
+            : await deps.permanentDeletePath(target);
         results.push({ path: target, ok: result.ok, message: result.message, sizeBytes: sizes[index] ?? null });
       }
-      const moved = results.filter((r) => r.ok);
-      deps.log("agent-trash", `session="${request.sessionName}" moved=${moved.length}/${results.length}`);
-      if (moved.length > 0) {
-        mainWindowSend(PATHS_TRASHED_CHANNEL, moved.map((r) => r.path));
+      const done = results.filter((r) => r.ok);
+      if (done.length > 0) measurements?.invalidate();
+      deps.log(`agent-${mode}`, `session="${request.sessionName}" ${verb}=${done.length}/${results.length}`);
+      if (done.length > 0) {
+        mainWindowSend(mode === "trash" ? PATHS_TRASHED_CHANNEL : PATHS_DELETED_CHANNEL, done.map((r) => r.path));
+        const freed = formatSize(done.reduce((s, r) => s + (r.sizeBytes ?? 0), 0));
         deps.toast(
           "success",
-          `Moved ${moved.length} item${moved.length === 1 ? "" : "s"} to the ${bin}`,
-          `Requested by ${request.sessionName}. Empty the ${bin} to free ${formatSize(moved.reduce((s, r) => s + (r.sizeBytes ?? 0), 0))}.`,
+          mode === "trash"
+            ? `Moved ${plural(done.length, "item")} to the ${bin}`
+            : `Deleted ${plural(done.length, "item")} permanently`,
+          mode === "trash"
+            ? `Requested by ${request.sessionName}. Empty the ${bin} to free ${freed}.`
+            : `Requested by ${request.sessionName}. Freed ${freed}.`,
         );
       }
       return { confirmed: true, results };
     };
-    const operation = trashTail.then(run, run);
-    trashTail = operation.catch(() => undefined);
+    const operation = removalTail.then(run, run);
+    removalTail = operation.catch(() => undefined);
     return operation;
+  };
+
+  // What removing paths frees, measured by the native scanner (APFS
+  // clones and hardlinks). Windows scans already count each file once.
+  let measurements: RemovalMeasurements | null = null;
+  const measureRemoval = async (paths: readonly string[], signal?: AbortSignal) => {
+    if (!measurements) {
+      const binary = resolveNativeScannerBinary(deps.projectRoot);
+      if (!binary) {
+        throw new Error("DiskHound's scanner is missing, so it can't measure. Reinstall DiskHound, or in a source checkout build native/diskhound-native-scanner.");
+      }
+      measurements = new RemovalMeasurements(
+        nativeRemovalMeasurer(binary, () => {
+          const preset = deps.getSettings().scanning.powerEfficiency;
+          return preset ? powerEfficiencyWorkers(preset, OS.availableParallelism()) : undefined;
+        }),
+      );
+    }
+    return measurements.measure(paths, signal);
   };
 
   const backend: DiskhoundAgentBackend = {
     platform: process.platform,
     appVersion: app.getVersion(),
+    sizeUnitBase,
     listDrives: () => deps.listDrives(),
     activeScans: async () => deps.activeScans(),
     scannedRoots,
@@ -385,21 +482,50 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
       shell.showItemInFolder(targetPath);
       return { ok: true, message: "Revealed." };
     },
-    confirmAndTrash,
+    ...(process.platform === "win32" ? {} : { measureRemoval }),
+    confirmAndTrash: (request) => confirmAndRemove(request, "trash"),
+    confirmAndDelete: (request) => confirmAndRemove(request, "delete"),
   };
 
-  // ── Approval window ──────────────────────────────────────
+  // ── Approval sheet ───────────────────────────────────────
 
-  const createConsentWindow = (): ConsentWindow => {
+  /**
+   * The approval UI is a sheet on the main window (a modal child window
+   * elsewhere), so it reads as DiskHound asking and blocks the window
+   * until the user answers. Its own webContents is what the broker
+   * trusts; the main window's renderer can't approve anything.
+   */
+  const createConsentWindow = async (): Promise<ConsentWindow> => {
+    await deps.ensureMainWindow();
+    const main = deps.getMainWindow();
+    if (!main || main.isDestroyed()) throw new Error("DiskHound's window is not available");
+    if (!main.isVisible()) main.show();
+    if (main.isMinimized()) main.restore();
+    // The agent's login starts in a terminal or browser; pull DiskHound
+    // forward so the user sees the request.
+    if (process.platform === "darwin") app.focus({ steal: true });
+    main.focus();
+
+    const width = 560;
+    const height = 640;
+    const parentBounds = main.getBounds();
     const window = new BrowserWindow({
-      width: 560,
-      height: 680,
-      minWidth: 480,
-      minHeight: 560,
+      width,
+      height,
+      // macOS attaches a modal child as a sheet; elsewhere center it on
+      // the main window rather than on the screen.
+      ...(process.platform === "darwin"
+        ? {}
+        : {
+            x: Math.round(parentBounds.x + (parentBounds.width - width) / 2),
+            y: Math.round(parentBounds.y + Math.max(40, (parentBounds.height - height) / 3)),
+          }),
+      parent: main,
+      modal: true,
       show: false,
+      resizable: false,
       title: "DiskHound — Approve agent access",
       backgroundColor: "#0a0a0f",
-      alwaysOnTop: true,
       minimizable: false,
       maximizable: false,
       fullscreenable: false,
@@ -417,9 +543,6 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
     window.once("ready-to-show", () => {
       if (window.isDestroyed()) return;
       window.show();
-      // The agent's login flow starts in a terminal or browser; pull
-      // DiskHound forward so the user sees the request.
-      if (process.platform === "darwin") app.focus({ steal: true });
       window.focus();
     });
     void deps.loadRenderer(window, "consent").catch((err) => {
@@ -433,11 +556,26 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
       onClosed: (listener) => window.once("closed", listener),
       close: () => window.close(),
       isDestroyed: () => window.isDestroyed(),
+      focus: () => {
+        if (window.isDestroyed()) return;
+        const parent = deps.getMainWindow();
+        if (parent && !parent.isDestroyed()) {
+          if (!parent.isVisible()) parent.show();
+          if (parent.isMinimized()) parent.restore();
+        }
+        if (process.platform === "darwin") app.focus({ steal: true });
+        window.focus();
+      },
+      send: (channel, payload) => {
+        if (!window.isDestroyed()) window.webContents.send(channel, payload);
+      },
     };
   };
 
-  const broker = new ConsentBroker(createConsentWindow, () =>
-    policy.sessions().filter((session) => session.revokedAt === null).map((session) => session.name),
+  const broker = new ConsentBroker(
+    createConsentWindow,
+    () => policy.sessions().filter((session) => session.revokedAt === null).map((session) => session.name),
+    () => broadcast(),
   );
 
   const senderOf = (event: Electron.IpcMainInvokeEvent) => ({
@@ -455,6 +593,8 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
   // Requiring them costs ~150 ms, and most users never turn this on.
   let service: AgentAccessService | null = null;
   let servicePromise: Promise<AgentAccessService> | null = null;
+  /** Why the runtime didn't load; Settings shows it with Try again. */
+  let loadError: string | null = null;
   const ensureService = (): Promise<AgentAccessService> => {
     servicePromise ??= (async () => {
       const { AgentAccessService, loadSkillCatalog } = loadAgentRuntime();
@@ -468,6 +608,7 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
       service = new AgentAccessService({
         backend,
         activity,
+        security,
         skills,
         policy,
         clientsFile,
@@ -476,17 +617,29 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
         port,
         saveEnabled: (enabled) => deps.setAgentsEnabled(enabled),
       });
+      loadError = null;
       return service;
-    })();
+    })().catch((err: unknown) => {
+      servicePromise = null;
+      loadError = `DiskHound couldn't load agent access: ${err instanceof Error ? err.message : String(err)}`;
+      broadcast();
+      throw err;
+    });
     return servicePromise;
   };
   const status = (): AgentAccessStatus =>
     service?.status() ?? {
-      enabled: false,
+      enabled: deps.getSettings().agents.enabled,
       listening: false,
       mcpUrl: agentAccessMcpUrl(port),
       port,
+      ...(loadError ? { error: loadError } : {}),
     };
+  // DISKHOUND_MCP_PATH swaps in another helper, as DISKHOUND_NATIVE_SCANNER_PATH does for the scanner.
+  const stdioPath = () => process.env.DISKHOUND_MCP_PATH?.trim() || Path.join(
+    app.isPackaged ? Path.join(process.resourcesPath, "native") : Path.join(deps.projectRoot, "native", "diskhound-mcp", "target", "debug"),
+    process.platform === "win32" ? "diskhound-mcp.exe" : "diskhound-mcp",
+  );
   const snapshot = (): AgentAccessSnapshot => ({
     status: status(),
     roles: BUILT_IN_MCP_ROLES.map((role) => ({ ...role, permissions: [...role.permissions] })),
@@ -498,11 +651,11 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
       }
     })(),
     activity: activity.list(),
+    pending: broker.pending(),
+    security: security.recent(),
     policyFile: policy.filePath,
-    stdioPath: Path.join(
-      app.isPackaged ? Path.join(process.resourcesPath, "native") : Path.join(deps.projectRoot, "native", "diskhound-mcp", "target", "debug"),
-      process.platform === "win32" ? "diskhound-mcp.exe" : "diskhound-mcp",
-    ),
+    securityLogFile: security.filePath,
+    stdioPath: stdioPath(),
     platform: process.platform,
   });
   const broadcast = () => mainWindowSend(AGENT_ACCESS_CHANGED_CHANNEL, snapshot());
@@ -516,8 +669,10 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
     }
   };
 
-  ipcMain.handle("diskhound:agent-access-get", (event) => {
+  ipcMain.handle("diskhound:agent-access-get", async (event) => {
     requireMainWindow(event);
+    // The log on disk is only worth reading once agents are in use.
+    if (deps.getSettings().agents.enabled || policy.exists()) await loadSecurityEvents();
     return snapshot();
   });
   ipcMain.handle("diskhound:agent-access-set-enabled", async (event, enabled: boolean) => {
@@ -528,6 +683,7 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
       return snapshot();
     }
     await (await ensureService()).setEnabled(Boolean(enabled));
+    if (enabled) await loadSecurityEvents();
     return snapshot();
   });
   ipcMain.handle("diskhound:agent-access-revoke", (event, sessionId: string) => {
@@ -548,6 +704,50 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
     broadcast();
     return snapshot();
   });
+  ipcMain.handle("diskhound:agent-access-focus-approval", (event) => {
+    requireMainWindow(event);
+    return broker.focus();
+  });
+  ipcMain.handle("diskhound:agent-access-dismiss-approval", (event, requestId: string) => {
+    requireMainWindow(event);
+    broker.dismiss(String(requestId));
+    return snapshot();
+  });
+  // Claude Desktop's extension, built from this app's helper and opened
+  // in Claude, which asks the user to install it. Claude copies it on
+  // install, so the file in temp only has to last until then.
+  ipcMain.handle("diskhound:agent-access-add-to-claude", async (event): Promise<AddToClaudeResult> => {
+    requireMainWindow(event);
+    const file = Path.join(app.getPath("temp"), "DiskHound", "DiskHound.mcpb");
+    try {
+      await writeClaudeExtension(file, {
+        helperPath: stdioPath(),
+        iconPath: app.isPackaged ? Path.join(process.resourcesPath, "icon.png") : Path.join(deps.projectRoot, "build", "icon.png"),
+        // Unpackaged, Electron reports its own version.
+        version: app.isPackaged
+          ? app.getVersion()
+          : JSON.parse(await FS.readFile(Path.join(deps.projectRoot, "package.json"), "utf8")).version,
+        port,
+        platform: process.platform,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      deps.log("agent-access", `couldn't build the Claude extension: ${message}`);
+      return {
+        ok: false,
+        error: (error as NodeJS.ErrnoException).code === "ENOENT"
+          ? "DiskHound's helper is missing. Reinstall DiskHound, or in a source checkout run bun run build:mcp:debug."
+          : `Couldn't build the extension: ${message}`,
+      };
+    }
+    const failed = await shell.openPath(file);
+    if (failed) deps.log("agent-access", `couldn't open the Claude extension: ${failed}`);
+    return failed ? { ok: false, error: `Couldn't open it in Claude: ${failed}`, file } : { ok: true, file };
+  });
+
+  const showSettings = async () => {
+    await navigate({ view: "settings", section: "ai-agents", focus: true });
+  };
 
   return {
     start: async () => {
@@ -555,9 +755,12 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
       const started = await (await ensureService()).setEnabled(true, false);
       deps.log("agent-access", started.listening ? `listening on ${started.mcpUrl}` : `failed to start: ${started.error ?? "unknown"}`);
     },
+    showSettings,
     dispose: async () => {
       broker.close();
+      measurements?.dispose();
       await service?.dispose();
+      await security.flush();
     },
   };
 }

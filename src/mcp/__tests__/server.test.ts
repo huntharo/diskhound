@@ -8,15 +8,23 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { ErrorCode, McpError, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
-import { MCP_AGENT_CAPABILITIES, MCP_SERVER_NAME, SKILLS_EXTENSION_ID } from "../../shared/agentAccess";
+import {
+  BUILT_IN_MCP_ROLES,
+  MCP_AGENT_CAPABILITIES,
+  MCP_SERVER_NAME,
+  SKILLS_EXTENSION_ID,
+  type McpAgentCapability,
+} from "../../shared/agentAccess";
 import { FixedMcpAuthorizer, McpPolicyStore, PolicyFileAuthorizer, type McpAuthorizer } from "../accessPolicy";
 import { AgentActivityLog } from "../activityLog";
-import { createDiskhoundMcpServer, FREE_UP_SPACE_SKILL, INVESTIGATE_GROWTH_SKILL } from "../server";
+import { createDiskhoundMcpServer, FREE_UP_SPACE_SKILL, INVESTIGATE_GROWTH_SKILL, TOOL_CAPABILITIES } from "../server";
 import { loadSkillCatalog, type SkillCatalog } from "../skills";
 import {
   createFakeBackend,
+  MEASUREMENT,
   NOW,
   RecordingActivity,
+  RecordingSecurity,
   roleAuthorization,
   ROOT,
   SKILLS_DIR,
@@ -28,11 +36,13 @@ const Loose = z.object({}).passthrough();
 
 const EXPECTED_TOOLS = [
   "diskhound_status",
+  "diskhound_read_skill",
   "diskhound_scan_summary",
   "diskhound_list_folder",
   "diskhound_search_files",
   "diskhound_cleanup_suggestions",
   "diskhound_dev_artifacts",
+  "diskhound_measure_removal",
   "diskhound_scan_history",
   "diskhound_changes",
   "diskhound_duplicates",
@@ -42,14 +52,17 @@ const EXPECTED_TOOLS = [
   "diskhound_show",
   "diskhound_reveal_path",
   "diskhound_move_to_trash",
+  "diskhound_delete_permanently",
 ];
 const READ_TOOLS = [
   "diskhound_status",
+  "diskhound_read_skill",
   "diskhound_scan_summary",
   "diskhound_list_folder",
   "diskhound_search_files",
   "diskhound_cleanup_suggestions",
   "diskhound_dev_artifacts",
+  "diskhound_measure_removal",
   "diskhound_scan_history",
   "diskhound_changes",
   "diskhound_duplicates",
@@ -69,6 +82,8 @@ async function connect(options: {
   authorizer?: McpAuthorizer;
   skills?: SkillCatalog;
   backend?: FakeBackend;
+  granted?: readonly McpAgentCapability[];
+  security?: RecordingSecurity;
 } = {}): Promise<Harness> {
   const backend = options.backend ?? createFakeBackend();
   const activity = new RecordingActivity();
@@ -77,6 +92,8 @@ async function connect(options: {
     activity,
     skills: options.skills ?? SKILLS,
     authorizer: options.authorizer ?? new FixedMcpAuthorizer(roleAuthorization(options.roleId ?? "builtin.operator")),
+    granted: options.granted,
+    security: options.security,
     now: () => NOW,
   });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -166,7 +183,7 @@ describe("tools/list", () => {
     }
   });
 
-  it("marks read tools read-only and only the trash tool destructive", async () => {
+  it("marks read tools read-only and only the trash and delete tools destructive", async () => {
     const { client } = await connect();
     const { tools } = await client.listTools();
     const byName = new Map(tools.map((tool) => [tool.name, tool]));
@@ -178,15 +195,16 @@ describe("tools/list", () => {
       expect(byName.get(name)?.annotations?.readOnlyHint, name).toBe(false);
     }
     const destructive = tools.filter((tool) => tool.annotations?.destructiveHint).map((tool) => tool.name);
-    expect(destructive).toEqual(["diskhound_move_to_trash"]);
+    expect(destructive).toEqual(["diskhound_move_to_trash", "diskhound_delete_permanently"]);
   });
 
-  it("requires paths for list_folder and move_to_trash", async () => {
+  it("requires paths for list_folder, move_to_trash and delete_permanently", async () => {
     const { client } = await connect();
     const { tools } = await client.listTools();
     const byName = new Map(tools.map((tool) => [tool.name, tool]));
     expect(byName.get("diskhound_list_folder")?.inputSchema.required).toEqual(["path"]);
     expect(byName.get("diskhound_move_to_trash")?.inputSchema.required).toEqual(["paths"]);
+    expect(byName.get("diskhound_delete_permanently")?.inputSchema.required).toEqual(["paths"]);
   });
 });
 
@@ -214,6 +232,7 @@ describe("read tools", () => {
     expect(result.content).toHaveLength(2);
     expect(text(result)).toContain("Drives: / 120 GB free of 500 GB.");
     expect(text(result)).toContain(`Scanned roots: ${ROOT} (1 h ago).`);
+    expect(text(result)).toContain(`read ${FREE_UP_SPACE_SKILL} with diskhound_read_skill`);
     expect(JSON.parse(text(result, 1))).toEqual(value);
     expect(backend.navigate).not.toHaveBeenCalled();
   });
@@ -480,8 +499,17 @@ describe("diskhound_move_to_trash", () => {
     await expect(request.recheck?.()).resolves.toBeUndefined();
     const value = structured(result);
     expect(value).toMatchObject({ confirmed: true, movedCount: 2, movedBytes: 200 * 1024 ** 2, moved: "200 MB" });
-    expect(text(result)).toContain("Moved 2 of 2 item(s)");
+    expect(text(result)).toContain("Moved 2 of 2 items (200 MB)");
     expect(text(result)).toContain("Trash");
+  });
+
+  it("reports sizes in the units the user picked, so they match the window", async () => {
+    const backend = createFakeBackend();
+    Object.assign(backend, { sizeUnitBase: () => 1000 as const });
+    const { client } = await connect({ roleId: "builtin.operator", backend });
+    const result = await call(client, "diskhound_move_to_trash", { paths: [`${ROOT}/Downloads/ubuntu.iso`, `${ROOT}/Downloads/installer.dmg`] });
+    // 200 MiB is 210 MB in decimal units (macOS Finder's default).
+    expect(text(result)).toContain("Moved 2 of 2 items (210 MB)");
   });
 
   it("reports a declined confirmation without claiming anything moved", async () => {
@@ -513,6 +541,108 @@ describe("diskhound_move_to_trash", () => {
     const result = await call(client, "diskhound_move_to_trash", { paths: [] });
     expect(result.isError).toBe(true);
     expect(backend.confirmAndTrash).not.toHaveBeenCalled();
+  });
+});
+
+describe("diskhound_delete_permanently", () => {
+  it("passes the Session, de-duplicated paths and reason to confirmAndDelete, and rechecks files.delete", async () => {
+    const { client, backend } = await connect({ roleId: "builtin.admin" });
+    const result = await call(client, "diskhound_delete_permanently", {
+      paths: [`${ROOT}/Downloads/ubuntu.iso`, `${ROOT}/Downloads/./ubuntu.iso`],
+      reason: "Too big for the Trash",
+    });
+    expect(backend.confirmAndDelete).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionName: "Test Agent", roleName: "Cleanup Admin", paths: [`${ROOT}/Downloads/ubuntu.iso`], reason: "Too big for the Trash" }),
+    );
+    const [request] = backend.confirmAndDelete.mock.calls[0]!;
+    await expect(request.recheck?.()).resolves.toBeUndefined();
+    expect(backend.confirmAndTrash).not.toHaveBeenCalled();
+    expect(structured(result)).toMatchObject({ confirmed: true, deletedCount: 1 });
+    expect(text(result)).toMatch(/^Deleted 1 of 1 item \(.+\) permanently\./);
+  });
+
+  it("reports a declined confirmation without claiming anything was deleted", async () => {
+    const { client, backend, activity } = await connect({ roleId: "builtin.admin" });
+    backend.confirmAndDelete.mockResolvedValueOnce({ confirmed: false, results: [] });
+    const result = await call(client, "diskhound_delete_permanently", { paths: [`${ROOT}/Movies/trip.mov`] });
+    expect(text(result)).toBe("The user declined. Nothing was deleted.");
+    expect(activity.entries.at(-1)).toMatchObject({ tool: "diskhound_delete_permanently", ok: true, summary: expect.stringContaining("declined") });
+  });
+
+  it("refuses an operator session before any dialog, and logs it", async () => {
+    const security = new RecordingSecurity();
+    const { client, backend } = await connect({ roleId: "builtin.operator", security });
+    const result = await call(client, "diskhound_delete_permanently", { paths: ["/a"] });
+    expect(result.isError).toBe(true);
+    expect(backend.confirmAndDelete).not.toHaveBeenCalled();
+    expect(security.events).toEqual([
+      expect.objectContaining({
+        kind: "tool_not_allowed",
+        tool: "diskhound_delete_permanently",
+        roleName: "Cleanup Operator",
+        detail: "Tried to delete items permanently; Cleanup Operator doesn't allow it.",
+      }),
+    ]);
+  });
+});
+
+describe("role filtering", () => {
+  const listed = async (roleId: string) => {
+    const role = BUILT_IN_MCP_ROLES.find((candidate) => candidate.id === roleId)!;
+    const { client } = await connect({ roleId, granted: role.permissions });
+    const { tools } = await client.listTools();
+    return { client, role, names: tools.map((tool) => tool.name), tools };
+  };
+
+  it.each(BUILT_IN_MCP_ROLES.map((role) => role.id))("lists only the tools %s grants", async (roleId) => {
+    const { role, names } = await listed(roleId);
+    const expected = Object.entries(TOOL_CAPABILITIES)
+      .filter(([, needs]) => needs.every((capability) => role.permissions.includes(capability)))
+      .map(([name]) => name);
+    expect(names.sort()).toEqual(expected.sort());
+  });
+
+  it("hides both removal tools from the default Cleanup Guide and says so in its instructions", async () => {
+    const { client, names } = await listed("builtin.guide");
+    expect(names).not.toContain("diskhound_move_to_trash");
+    expect(names).not.toContain("diskhound_delete_permanently");
+    expect(client.getInstructions()).toContain("This session can't move or delete files.");
+  });
+
+  it("shows the Trash but not permanent delete to Cleanup Operator", async () => {
+    const { client, names } = await listed("builtin.operator");
+    expect(names).toContain("diskhound_move_to_trash");
+    expect(names).not.toContain("diskhound_delete_permanently");
+    expect(client.getInstructions()).toContain("this session can't delete permanently");
+  });
+
+  it("drops showInApp from a Disk Explorer's tools, since it can't steer the window", async () => {
+    const { tools } = await listed("builtin.reader");
+    const list = tools.find((tool) => tool.name === "diskhound_list_folder")!;
+    expect(Object.keys(list.inputSchema.properties ?? {})).not.toContain("showInApp");
+  });
+
+  it("logs a call that its role lost after the tool list was built", async () => {
+    // The server was built for an Operator; the policy now says Reader.
+    const security = new RecordingSecurity();
+    const { client, backend, activity } = await connect({
+      granted: roleAuthorization("builtin.operator").capabilities,
+      authorizer: new FixedMcpAuthorizer(roleAuthorization("builtin.reader")),
+      security,
+    });
+    const result = await call(client, "diskhound_move_to_trash", { paths: ["/a"] });
+    expect(result.isError).toBe(true);
+    expect(backend.confirmAndTrash).not.toHaveBeenCalled();
+    expect(security.events).toEqual([
+      expect.objectContaining({ kind: "tool_not_allowed", tool: "diskhound_move_to_trash", roleName: "Disk Explorer" }),
+    ]);
+    expect(activity.entries.at(-1)).toMatchObject({ tool: "diskhound_move_to_trash", ok: false });
+  });
+
+  it("maps every registered tool to the capabilities it needs", async () => {
+    const { client } = await connect();
+    const { tools } = await client.listTools();
+    expect(tools.map((tool) => tool.name).sort()).toEqual(Object.keys(TOOL_CAPABILITIES).sort());
   });
 });
 
@@ -680,6 +810,51 @@ describe("skills extension (SEP-2640)", () => {
   });
 });
 
+describe("diskhound_read_skill", () => {
+  // Claude Desktop hands an extension's tools to its chats and Code
+  // sessions, but not its resources.
+  it("lists the skills and their files when called without a uri", async () => {
+    const { client } = await connect({ roleId: "builtin.reader" });
+    const value = structured(await call(client, "diskhound_read_skill"));
+    expect(value.skills.map((skill: { uri: string }) => skill.uri)).toEqual([FREE_UP_SPACE_SKILL, INVESTIGATE_GROWTH_SKILL]);
+    expect(value.skills[0].files).toContain("skill://diskhound-free-up-space/references/macos.md");
+  });
+
+  it("returns a skill file's text first, the same text resources/read serves", async () => {
+    const { client, activity } = await connect();
+    const result = await call(client, "diskhound_read_skill", { uri: FREE_UP_SPACE_SKILL });
+    const value = structured(result);
+    const read = await client.readResource({ uri: FREE_UP_SPACE_SKILL });
+    expect(text(result)).toBe((read.contents[0] as { text: string }).text);
+    expect(value).toMatchObject({ uri: FREE_UP_SPACE_SKILL, mimeType: "text/markdown" });
+    expect(value.otherFiles).toContain("skill://diskhound-free-up-space/references/developer-caches.md");
+    expect(value).not.toHaveProperty("text");
+    expect(activity.entries.at(-1)).toMatchObject({ tool: "diskhound_read_skill", summary: "Read the diskhound-free-up-space skill", ok: true });
+
+    const reference = await call(client, "diskhound_read_skill", { uri: "skill://diskhound-free-up-space/references/macos.md/" });
+    expect(text(reference)).toContain("## APFS clones");
+  });
+
+  it("lists a skill folder's children", async () => {
+    const { client } = await connect();
+    const result = await call(client, "diskhound_read_skill", { uri: "skill://diskhound-free-up-space/references" });
+    expect(text(result).split("\n")).toContain("skill://diskhound-free-up-space/references/linux.md");
+  });
+
+  it("reports an unknown uri as a tool error that says how to list them", async () => {
+    const { client } = await connect();
+    const result = await call(client, "diskhound_read_skill", { uri: "skill://diskhound-free-up-space/references/solaris.md" });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain("Call diskhound_read_skill without a uri");
+  });
+
+  it("says so when the build has no skills", async () => {
+    const { client } = await connect({ skills: { skills: [] } });
+    expect(text(await call(client, "diskhound_read_skill"))).toBe("This DiskHound build has no skills.");
+    expect(text(await call(client, "diskhound_status"))).not.toContain("diskhound_read_skill");
+  });
+});
+
 describe("prompts", () => {
   it("lists both prompt fallbacks with their optional arguments", async () => {
     const { client } = await connect();
@@ -781,5 +956,121 @@ describe("scan completeness and shared storage", () => {
     expect(result.groups[1].files[0]).toMatchObject({ reclaimableBytes: 20, sharing: "clone" });
     expect(result.groups[2].files[0]).toMatchObject({ reclaimableBytes: 0, sharing: "clone" });
     expect(result.groups[3].files[0]).toMatchObject({ reclaimableBytes: 0, sharing: "hardlink" });
+  });
+
+  it("diskhound_dev_artifacts says what each tree frees alone and bounds the listed set together", async () => {
+    const G = 1024 ** 3;
+    const { client, backend } = await connect();
+    const report = (await backend.devArtifacts(ROOT))!;
+    const tree = (path: string, kind: "node-modules" | "rust-target" | "package-cache", size: number) => ({
+      path, kind, projectPath: null, projectName: Path.basename(path), size, fileCount: 1, previousSize: null, deltaBytes: null,
+    });
+    backend.devArtifacts.mockResolvedValue({
+      ...report,
+      artifacts: [
+        {
+          ...tree(`${ROOT}/Developer/app/node_modules`, "node-modules", 2 * G),
+          // 0.5 GB ordinary + 0.1 GB rewritten clone + 0.2 GB of groups it owns.
+          clone: {
+            cloneSize: 1.5 * G, clonePrivateSize: 0.1 * G, cloneInternalSize: 0.2 * G,
+            cloneSharedSize: 1.2 * G, cloneSharedBlocks: 0.6 * G,
+            sharedRoots: 1, sharedWith: [`${ROOT}/Library/pnpm/store`],
+          },
+        },
+        {
+          ...tree(`${ROOT}/Developer/app/target`, "rust-target", 6 * G),
+          clone: { cloneSize: 0, clonePrivateSize: 0, cloneInternalSize: 0, cloneSharedSize: 0, cloneSharedBlocks: 0, sharedRoots: 0, sharedWith: [] },
+        },
+        // No clone data: counted at its size, with the path's hint.
+        tree(`${ROOT}/Library/pnpm/store`, "package-cache", 1 * G),
+      ],
+    });
+    const result = await call(client, "diskhound_dev_artifacts", {});
+    const value = structured(result);
+    const byPath = new Map(value.artifacts.map((artifact: { path: string }) => [artifact.path, artifact]));
+    expect(byPath.get(`${ROOT}/Developer/app/node_modules`)).toMatchObject({
+      sizeBytes: 2 * G, freesAloneBytes: 0.8 * G, sharedBytes: 1.2 * G, sharedWith: [`${ROOT}/Library/pnpm/store`],
+    });
+    expect(byPath.get(`${ROOT}/Developer/app/target`)).toMatchObject({ freesAloneBytes: 6 * G, sharedBytes: 0 });
+    expect(byPath.get(`${ROOT}/Library/pnpm/store`)).not.toHaveProperty("freesAloneBytes");
+    expect(byPath.get(`${ROOT}/Library/pnpm/store`)).toHaveProperty("sharingHint", expect.stringContaining("pnpm store"));
+    expect(value.listed).toEqual({
+      count: 3,
+      sizeBytes: 9 * G,
+      size: "9.0 GB",
+      freesTogether: { atLeastBytes: 7.8 * G, atMostBytes: 8.4 * G, atLeast: "7.8 GB", atMost: "8.4 GB" },
+    });
+    expect(text(result)).toContain(
+      "Removing the 3 listed (9.0 GB) frees 7.8 GB–8.4 GB, after APFS clones.\nFor the exact figure for the trees you pick, call diskhound_measure_removal with their paths.",
+    );
+    expect(value.notes[0]).toContain("freesAlone is what removing only that tree frees");
+  });
+
+  it("diskhound_dev_artifacts leaves out the freed-space fields when no tree was measured", async () => {
+    const { client } = await connect();
+    const value = structured(await call(client, "diskhound_dev_artifacts", {}));
+    expect(value).not.toHaveProperty("listed");
+    expect(value.artifacts[0]).not.toHaveProperty("freesAloneBytes");
+  });
+});
+
+describe("diskhound_measure_removal", () => {
+  const G = 1024 ** 3;
+
+  it("passes de-duplicated absolute paths and reports the set, then each path, most freed first", async () => {
+    const { client, backend, activity } = await connect({ roleId: "builtin.reader" });
+    const result = await call(client, "diskhound_measure_removal", {
+      paths: [`${ROOT}/wt/one`, `${ROOT}/wt/two`, `${ROOT}/wt/one`],
+    });
+    const value = structured(result);
+    expect(backend.measureRemoval).toHaveBeenCalledWith([`${ROOT}/wt/one`, `${ROOT}/wt/two`], undefined);
+    expect(value.total).toMatchObject({
+      sizeBytes: 9 * G, size: "9.0 GB", freesBytes: 4 * G, frees: "4.0 GB",
+      freesOneAtATimeBytes: 3 * G, heldElsewhereBytes: 2 * G, heldElsewhere: "2.0 GB",
+    });
+    expect(value.paths.map((path: { path: string }) => path.path)).toEqual([`${ROOT}/wt/two`, `${ROOT}/wt/one`]);
+    expect(value.paths[0]).toMatchObject({ freesAloneBytes: 2 * G, freesAlone: "2.0 GB", sharedBytes: 3 * G });
+    expect(value.measuredAt).toBe(new Date(NOW).toISOString());
+    const summary = text(result);
+    expect(summary).toContain("Removing these 2 items together frees 4.0 GB of the 9.0 GB they take up (3,000 files).");
+    expect(summary).toContain("2.0 GB stays in use because files outside them share it");
+    expect(summary).toContain("One at a time they'd free 3.0 GB; together frees 1.0 GB more");
+    expect(value.notes.join(" ")).toContain("Time Machine local snapshot");
+    expect(activity.entries.at(-1)).toMatchObject({ tool: "diskhound_measure_removal", summary: "Measured what removing 2 items frees", ok: true });
+  });
+
+  it("says when clones weren't checked and when some bytes are uncertain", async () => {
+    const { client, backend } = await connect();
+    backend.measureRemoval.mockResolvedValue({
+      ...MEASUREMENT,
+      cloneMetadata: false,
+      total: { ...MEASUREMENT.total, uncertainBytes: G },
+      missing: [`${ROOT}/gone`],
+    });
+    const result = await call(client, "diskhound_measure_removal", { paths: [`${ROOT}/wt/one`, `${ROOT}/gone`], limit: 1 });
+    const value = structured(result);
+    expect(value.paths).toHaveLength(1);
+    expect(value.truncated).toBe(true);
+    expect(value.notes.join(" ")).toContain("clones weren't checked");
+    expect(value.notes.join(" ")).toContain("uncertainBytes");
+    expect(text(result)).toContain("Up to 1.0 GB more might come back");
+    expect(text(result)).toContain(`Not found: ${ROOT}/gone.`);
+  });
+
+  it("refuses a whole drive and relative paths before measuring", async () => {
+    const { client, backend } = await connect();
+    const drive = await call(client, "diskhound_measure_removal", { paths: ["/"] });
+    expect(drive.isError).toBe(true);
+    expect(text(drive)).toContain("is a whole drive");
+    const relative = await call(client, "diskhound_measure_removal", { paths: ["wt/one"] });
+    expect(relative.isError).toBe(true);
+    expect(backend.measureRemoval).not.toHaveBeenCalled();
+  });
+
+  it("isn't offered where the backend can't measure (Windows)", async () => {
+    const backend = createFakeBackend();
+    const { measureRemoval: _unused, ...windows } = backend;
+    const { client } = await connect({ backend: { ...windows, platform: "win32" } as unknown as FakeBackend });
+    expect((await client.listTools()).tools.map((tool) => tool.name)).not.toContain("diskhound_measure_removal");
   });
 });

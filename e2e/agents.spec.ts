@@ -1,4 +1,4 @@
-import { existsSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -47,11 +47,30 @@ test("an approved agent reads the scan and the window follows it", async ({ laun
   await expect(page.locator(".agent-pill")).toHaveClass(/\bactive\b/);
   await expect(page.locator(".agent-pill-name")).toHaveText("Follow-along");
 
-  // The pill opens Settings, which lists the session and what it did.
+  // A narrow window keeps the dot and drops the name, which stays in the
+  // pill's label.
+  const win = await handle.app.browserWindow(page);
+  const [width, height] = await win.evaluate((w) => w.getSize());
+  await win.evaluate((w) => w.setSize(1000, 720));
+  await expect.poll(() => page.evaluate(() => innerWidth)).toBeLessThanOrEqual(1000);
+  await expect(page.locator(".agent-pill-name")).toBeHidden();
+  await expect(page.locator(".agent-pill")).toHaveAccessibleName(/Follow-along/);
+  await win.evaluate((w, [wide, tall]) => w.setSize(wide!, tall!), [width, height]);
+  await expect(page.locator(".agent-pill-name")).toBeVisible();
+
+  // The pill opens a popover with the session and what it did last.
   await page.locator(".agent-pill").click();
+  const popover = page.locator(".agent-pop");
+  await expect(popover.locator(".agent-pop-row")).toHaveCount(1);
+  await expect(popover.locator(".agent-pop-name")).toHaveText("Follow-along");
+  await expect(popover.locator(".agent-pop-what")).toContainText("videos");
+
+  // Its link opens Settings → AI Agents, which lists the session too.
+  await popover.getByRole("button", { name: "AI Agents settings…" }).click();
+  await expect(popover).toHaveCount(0);
   const section = page.locator("#settings-ai-agents");
   await expect(section.locator(".agent-session-row")).toHaveCount(1);
-  await expect(section.locator(".agent-session-row .protected-folder-name")).toHaveText("Follow-along");
+  await expect(section.locator(".agent-session-row .agent-session-title")).toHaveText("Follow-along");
   await expect(section.locator(".agent-session-row select")).toHaveValue("builtin.guide");
   await expect(section.locator(".agent-activity-row").first()).toContainText("Listed");
   await expect(section.locator(".agent-activity-row").first()).toContainText("videos");
@@ -69,14 +88,19 @@ test("only a Cleanup Operator can ask for the Trash, and the user decides", asyn
   const docs = join(scanTree.root, "docs");
   const request = { paths: [docs], reason: "Old reports" };
 
-  // The approval window preselects Cleanup Guide, which can't ask.
+  // The approval window preselects Cleanup Guide, which doesn't list
+  // the Trash tool. Calling it anyway is refused and logged.
+  expect((await agent.listTools()).tools.map((tool) => tool.name)).not.toContain("diskhound_move_to_trash");
   const denied = await callTool(agent, "diskhound_move_to_trash", request);
   expect(denied.isError).toBe(true);
-  expect(resultText(denied)).toContain("does not grant: files.trash");
+  expect(resultText(denied)).toContain("Cleanup Guide doesn't grant files.trash");
+  expect(resultText(denied)).toContain("DiskHound logged the attempt");
   await expect(page.locator(".agent-pill")).toHaveClass(/\bfailed\b/);
+  await expect(page.locator(".toast-title", { hasText: "Blocked a request from Tidy-up" })).toBeVisible();
 
   // The user raises the role in Settings. The next call uses it.
   await openTab(page, "Settings");
+  await expect(page.locator("#settings-ai-agents .agent-blocked-row").first()).toContainText("Tried to move items to the Trash");
   const role = page.locator("#settings-ai-agents .agent-session-row select");
   await role.selectOption("builtin.operator");
   await expect(role).toHaveValue("builtin.operator");
@@ -85,7 +109,7 @@ test("only a Cleanup Operator can ask for the Trash, and the user decides", asyn
   const home = await handle.app.evaluate(({ app }) => app.getPath("home"));
   const refused = await callTool(agent, "diskhound_move_to_trash", { paths: [home] });
   expect(refused.isError).toBe(true);
-  expect(resultText(refused)).toContain("never lets agents move this folder");
+  expect(resultText(refused)).toContain("never lets agents remove this folder");
   expect(await trash.prompts()).toHaveLength(0);
 
   // Cancel, the default button, moves nothing.
@@ -109,6 +133,52 @@ test("only a Cleanup Operator can ask for the Trash, and the user decides", asyn
   await expect(page.locator(".folder-row.deleted", { hasText: "docs" }).locator(".deleted-path-badge")).toBeVisible();
 
   await agent.close();
+});
+
+test("only a Cleanup Admin can delete permanently, and every other attempt is logged", async ({ launch, scanTree }, testInfo) => {
+  const handle = await launch({ settings: { agents: { enabled: true } } });
+  const { page } = handle;
+  await scanFolderFromPicker(handle, scanTree.root);
+  const trash = await stubTrash(handle, testInfo.outputPath("trash"));
+  const docs = join(scanTree.root, "docs");
+  const request = { paths: [docs], reason: "Too big for the Trash" };
+
+  // A Cleanup Operator can ask for the Trash, but not for a permanent delete.
+  const operator = await connectAgent(handle, await signIn(handle, { sessionName: "Operator", roleId: "builtin.operator" }));
+  const operatorTools = (await operator.listTools()).tools.map((tool) => tool.name);
+  expect(operatorTools).toContain("diskhound_move_to_trash");
+  expect(operatorTools).not.toContain("diskhound_delete_permanently");
+  const refused = await callTool(operator, "diskhound_delete_permanently", request);
+  expect(refused.isError).toBe(true);
+  expect(resultText(refused)).toContain("Cleanup Operator doesn't grant files.delete");
+  expect(await trash.prompts()).toHaveLength(0);
+  await openTab(page, "Settings");
+  const section = page.locator("#settings-ai-agents");
+  await expect(section.locator(".agent-blocked-row").first()).toContainText("Tried to delete items permanently");
+  await expect(section.locator(".agent-session-row", { hasText: "Operator" }).locator(".agent-blocked-link")).toHaveText("1 blocked");
+  // agent-security.log keeps it across restarts.
+  const log = join(handle.userDataDir, "agent-security.log");
+  await expect.poll(() => (existsSync(log) ? readFileSync(log, "utf8") : "")).toContain("diskhound_delete_permanently");
+  await operator.close();
+
+  // Cleanup Admin: the approval sheet warns what it adds, and the user
+  // still confirms the delete itself.
+  const admin = await connectAgent(handle, await signIn(handle, { sessionName: "Admin", roleId: "builtin.admin" }));
+  expect((await admin.listTools()).tools.map((tool) => tool.name)).toContain("diskhound_delete_permanently");
+  const declined = await callTool(admin, "diskhound_delete_permanently", request);
+  expect(resultText(declined)).toBe("The user declined. Nothing was deleted.");
+  expect(existsSync(docs)).toBe(true);
+  const [prompt] = await trash.prompts();
+  expect(prompt.message).toMatch(/^“Admin” wants to permanently delete 1 item \(\d[\d.]* [KM]B\)\.$/);
+  expect(prompt.detail).toContain("Deleted items can't be restored.");
+
+  await trash.answer("move");
+  const deleted = await callTool(admin, "diskhound_delete_permanently", request);
+  expect(deleted.isError, resultText(deleted)).not.toBe(true);
+  expect(deleted.structuredContent).toMatchObject({ confirmed: true, deletedCount: 1 });
+  expect(existsSync(docs)).toBe(false);
+  expect(existsSync(join(testInfo.outputPath("trash"), "docs"))).toBe(false);
+  await admin.close();
 });
 
 test("an approval survives a restart, and Revoke locks the agent out", async ({ launch }) => {

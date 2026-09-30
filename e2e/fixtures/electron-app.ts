@@ -173,7 +173,7 @@ export async function launchApp(
   if (!existsSync(join(userDataDir, "settings.json"))) {
     writeSeedSettings(userDataDir, opts.settings);
   }
-  // Never 51733, which a DiskHound the developer runs may hold.
+  // Never 51735, which a DiskHound the developer runs may hold.
   const agentPort = opts.agentPort ?? (await freePort());
 
   const diagnostics: LaunchDiagnostics = { page: null, userDataDir, mainOutput: [], rendererConsole: [] };

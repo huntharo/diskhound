@@ -21,8 +21,9 @@ filesystem. `diskhound_status` lists the mounts it sees.
   Linux, so trees of hardlinks look bigger than the space they use. pnpm
   hardlinks `node_modules` to its store by default. Find multi-link files
   with `find <dir> -xdev -type f -links +1`. Space returns only when the
-  last link is removed. For pnpm: remove the unneeded `node_modules`, then
-  run `pnpm store prune`.
+  last link is removed. `diskhound_measure_removal` counts each file once
+  and tells you what a set of paths frees. For pnpm: remove the unneeded
+  `node_modules`, then run `pnpm store prune`.
 - **Reflinks.** `cp --reflink` copies on btrfs or XFS, and some package
   managers, share extents like APFS clones. Every copy must go before the
   extents are freed. On btrfs, `compsize <dir>` (package `btrfs-compsize`)

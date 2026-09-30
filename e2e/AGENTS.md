@@ -50,7 +50,7 @@ wrap the command in `xvfb-run --auto-servernum`.
   `handle.setPickDirectory(dir)` sets what "Browse for folder..."
   returns.
 - **Agent port.** Each launch sets `DISKHOUND_AGENT_PORT` to a free
-  port, so the MCP server never takes 51733 from a DiskHound the
+  port, so the MCP server never takes 51735 from a DiskHound the
   developer runs with AI agents on. `handle.agentPort` is the port;
   pass `launch({ agentPort })` to keep it across a restart.
 - **Agent Trash.** `stubTrash(handle, dir)` answers the agent's Trash
