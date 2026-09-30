@@ -3,6 +3,7 @@ dist-electron/
 dist-renderer/
 /release/
 native/diskhound-native-scanner/target/
+native/diskhound-mcp/target/
 /test-results/
 /playwright-report/
 .turbo/

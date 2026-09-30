@@ -17,32 +17,73 @@ configuration keeps working after restarts.
 
 ## Connect an agent
 
-Settings shows these commands with a Copy button.
+Settings shows connection commands with a Copy button, including the full path
+to the bundled `diskhound-mcp` executable.
 
-**Claude Code**
+### Claude Code (recommended: stdio)
+
+Use the command from Settings. On a Mac with DiskHound in Applications:
 
 ```bash
-claude mcp add --scope user --transport http diskhound http://127.0.0.1:51733/mcp
-claude mcp login diskhound
+claude mcp add --scope user --transport stdio diskhound -- '/Applications/DiskHound.app/Contents/Resources/native/diskhound-mcp'
 ```
 
-`--scope user` makes DiskHound available in every directory. Without it,
-Claude Code only registers the server for the directory you ran it in.
+`--scope user` makes DiskHound available in every directory. If you already
+registered DiskHound as HTTP, first run `claude mcp remove --scope user diskhound`,
+then add it again as stdio. Open Claude's `/mcp` menu to connect or reconnect.
 
-**Codex CLI**
+The small Rust helper translates stdio to DiskHound's loopback HTTP server and
+handles OAuth itself. This avoids client restrictions on OAuth over local HTTP;
+you do not need a TLS certificate or a public endpoint. Keep DiskHound running
+with AI Agents enabled. Approve the first connection in DiskHound's window.
+
+On Windows use the PowerShell command in Settings. The helper is in
+`resources/native/diskhound-mcp.exe` beside the installed app. Linux tarball
+installs also include `resources/native/diskhound-mcp`. For an **AppImage**, copy
+that executable from the running image to a stable location such as
+`~/.local/bin/diskhound-mcp`, then use the copied path; temporary AppImage mount
+paths change between launches. Replace the copy after an app update.
+
+For Claude Desktop or another stdio client, use the same executable as its
+`command`, with optional `args: ["--port", "51733"]`. No bearer token belongs in
+client configuration. For example, Claude Desktop on macOS:
+
+```json
+{
+  "mcpServers": {
+    "diskhound": {
+      "command": "/Applications/DiskHound.app/Contents/Resources/native/diskhound-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+The helper saves its approval in macOS Keychain, Windows Credential Manager,
+or Linux Secret Service. Connections from the same OS account to the same
+port reuse that session. Session roles and revocation remain in DiskHound.
+If a credential store is unavailable, unlock it or explicitly add `--ephemeral`
+to approve every connection without saving credentials. There is no plaintext
+fallback. `diskhound-mcp --forget` removes the saved connection locally; revoke
+its session in Settings as well if you want to invalidate it.
+
+### HTTP with OAuth
+
+The HTTP endpoint and OAuth flow remain available for compatible clients:
 
 ```bash
 codex mcp add diskhound --url http://127.0.0.1:51733/mcp --oauth-client-registration dcr
 ```
 
-Any MCP client that supports Streamable HTTP and OAuth works the same way.
+Clients must accept loopback HTTP for OAuth. If yours requires HTTPS, use the
+stdio helper. Do not disable OAuth or expose DiskHound on a public interface.
 
 ### Approving an agent
 
-The agent's login opens a browser tab that says **Continue in DiskHound**.
-DiskHound then opens an approval window where you name the session and
-pick a role. The tab can't approve anything; only the DiskHound window can.
-Closing that window counts as Deny.
+DiskHound opens an approval window where you name the session and pick a role.
+The stdio helper opens it directly; HTTP clients may also open a browser tab
+that says **Continue in DiskHound**. Only the DiskHound window can approve the
+request. Closing that window counts as Deny.
 
 ![Approval window](screenshots/agent-consent.png)
 
@@ -87,6 +128,19 @@ checks the real location on disk, so a different spelling or a symlink
 doesn't get around this.
 
 ![Trash confirmation](screenshots/agent-trash-confirm.png)
+
+## Deferred tool discovery
+
+DiskHound publishes its tools through standard `tools/list`; they can be called
+without a preceding list request. Its initialization instructions describe when
+to discover them: disk usage, large files, duplicates, caches, cleanup, and growth.
+Hosts can keep those definitions out of the model's initial context and load
+them through their own tool search. [Claude Code does this automatically](https://code.claude.com/docs/en/mcp#scale-with-mcp-tool-search).
+
+Tool search is a client/host feature, not a required MCP server method. PwrAgent's
+native tool catalog likewise adds its own `tool_search` and deferred-loading
+flags; those are not advertised by its MCP adapter. DiskHound keeps its full
+standard catalog available to clients without tool search, over either transport.
 
 ## Cleanup procedures (skills)
 
@@ -148,5 +202,21 @@ The source lives in [`skills/`](../skills).
   DiskHound, holds the port. Quit it, then toggle AI Agents off and on.
 - **The agent says a permission is missing**: open Settings → AI Agents and
   give that session a bigger role. The agent's next call picks it up.
-- **The agent can't connect after you revoked it**: run its login again
-  (`claude mcp login diskhound`, or reconnect in Codex).
+- **The agent can't connect after you revoked it**: the stdio helper fails the
+  current connection and forgets that credential. Reconnect once more to request
+  approval, or repeat the HTTP client's OAuth login. Tool calls are never retried
+  automatically because their outcome may be unknown.
+- **The stdio command cannot be found**: copy the command from Settings again
+  after moving the app. In a source checkout, run `bun run build:mcp:debug` first.
+- **Secret Service unavailable on Linux**: run in a desktop session with an
+  unlocked credential store, or add `--ephemeral`. Headless sessions usually do
+  not have Secret Service.
+
+## Building the bridge
+
+`bun run build:mcp:debug` builds the development helper; `bun run build:mcp`
+builds the release binary. `bun run dist` includes it automatically. Release CI
+builds both macOS architectures and combines them into the universal app.
+`cargo test --locked --manifest-path native/diskhound-mcp/Cargo.toml` tests the
+transport and credential lifecycle; `e2e/stdio-agent.spec.ts` tests real native
+approval and MCP calls using ephemeral credentials in an isolated profile.

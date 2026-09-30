@@ -121,3 +121,27 @@ it("keeps token verification, pending-approval polling and activity reads write-
     budget("mcp-read-poll-activity", io, "60 token/read/poll/activity cycles with 32 sessions; 0 writes/day and 0 MB/day even at one cycle/second (86,400/day).");
   } finally { pending.close(); }
 });
+
+it("budgets a stdio approval followed by reused connections", async () => {
+  const { io } = await measureFsIo(async () => {
+    const bridge = await register("DiskHound stdio");
+    const response = new Reply();
+    await oauth.authorize(bridge, { codeChallenge: "x".repeat(43), redirectUri: redirect, resource, scopes }, response.response);
+    const id = /status\?id=([A-Za-z0-9_-]+)/.exec(response.body)![1]!;
+    await Promise.resolve();
+    const approved = new Reply();
+    oauth.status(id, approved.response);
+    const code = new URL(approved.location).searchParams.get("code")!;
+    const tokens = await oauth.exchangeAuthorizationCode(bridge, code, undefined, redirect, resource);
+    // The native helper loads its saved token on reconnect and keeps it in
+    // memory for ordinary calls; it does not register/sign in every time.
+    for (let connection = 0; connection < 24; connection++) {
+      for (let request = 0; request < 60; request++) {
+        await oauth.verifyAccessToken(tokens.access_token);
+      }
+    }
+  });
+  budget("mcp-stdio-approval-and-reuse", io,
+    "One stdio registration and approval with 32 saved clients/sessions, then 24 reconnects and 1,440 requests. "
+    + "The helper's separate OS-store budget is in native/diskhound-mcp/io-budgets.json; no token is written to a file.");
+});

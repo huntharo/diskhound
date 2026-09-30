@@ -44,6 +44,7 @@ const AGENT_ACTIVITY_CHANNEL = "diskhound:agent-activity";
 
 const api: DiskhoundNativeApi = {
   platform,
+  // The sandboxed agent approval window cannot require node:os.
   cpuCount: process.sandboxed
     ? navigator.hardwareConcurrency || 1
     : (require("node:os") as typeof import("node:os")).availableParallelism(),

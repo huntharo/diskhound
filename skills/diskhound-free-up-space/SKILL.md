@@ -10,7 +10,13 @@ compatibility: Requires the DiskHound desktop app with Settings > AI Agents enab
 DiskHound keeps an index of every file on a scanned drive, so you can explore
 sizes instantly without walking the disk yourself. Your job is to turn that
 data into a short, trustworthy list of things the user can remove, and to make
-sure removing them actually gives the space back.
+sure removing them actually gives the space back. Explain the choices once:
+"I can help identify candidates; you decide what to keep or remove." Then
+focus on useful findings rather than repeating cautions. A request to understand
+disk usage can end with an explanation; it does not imply a cleanup request.
+
+If the host defers MCP tools, search its tool catalog for DiskHound disk usage
+and load the relevant tools as needed. Start with `diskhound_status`.
 
 ## Ground rules
 
@@ -96,7 +102,7 @@ Put each finding in exactly one bucket:
 
 | Bucket | Examples | What to do |
 | --- | --- | --- |
-| **Regenerable** | build output, `node_modules`, DerivedData, caches | Safe to remove; it comes back when needed. |
+| **Regenerable** | build output, `node_modules`, DerivedData, caches | Usually rebuildable; check for local changes and the time or network access needed to regenerate it. |
 | **Owned by a tool** | Docker images, pnpm/npm/cargo stores, simulators, Homebrew, WSL disks, snapshots | Use the tool's own cleanup command. |
 | **User data** | videos, photos, archives, downloads, VM images, iOS backups | Ask. Offer to reveal it (`diskhound_reveal_path`) or move it to another drive (DiskHound's Easy Move tab). |
 | **System / hands off** | OS folders, app bundles, mail/photos library internals | Point to the OS or app setting instead. |
@@ -110,8 +116,9 @@ applies, say so plainly and give the realistic amount.
   DiskHound only moves items to the Trash.
 - **APFS clones (macOS).** Files copied with `clonefile` share blocks until
   one copy changes. This includes pnpm's `node_modules` on APFS, copies made
-  in Finder on the same volume, and `cp -c`. **The blocks are freed only when
-  every clone that shares them is deleted.** Deleting one project's
+  in Finder on the same volume, and `cp -c`. **Shared blocks are freed only when
+  their last reference is removed; a copy's exclusive blocks can be reclaimed
+  separately.** Deleting one project's
   `node_modules` often frees very little while the pnpm store and other
   projects still hold clones. Details and how to test:
   [references/macos.md#apfs-clones](references/macos.md#apfs-clones).
@@ -120,10 +127,9 @@ applies, say so plainly and give the realistic amount.
   24 hours) or is thinned. Free space may not move right away, even after
   emptying the Trash. See
   [references/macos.md#time-machine-local-snapshots](references/macos.md#time-machine-local-snapshots).
-- **Hardlinks.** One file can appear at several paths. On macOS and Linux,
-  DiskHound counts every path at full size, so hardlinked trees look bigger
-  than they are. Examples are pnpm stores on Linux and old HFS+ Time Machine
-  backups. Space returns only when the last link is gone. Windows scans made
+- **Hardlinks.** One file can appear at several paths. Scan totals can include multiple paths to shared storage. Use duplicate-group
+  reclaimable bytes and sharing metadata rather than multiplying file sizes.
+  Examples are pnpm stores on Linux and old HFS+ Time Machine backups. Space returns only when the last link is gone. Windows scans made
   with the native MFT reader count each file once.
 - **Snapshots elsewhere.** Windows System Restore / Volume Shadow Copies,
   btrfs subvolume snapshots (Snapper, Timeshift), and ZFS snapshots all pin

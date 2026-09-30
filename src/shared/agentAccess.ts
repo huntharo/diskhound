@@ -30,15 +30,24 @@ export function agentAccessMcpUrl(port: number = AGENT_ACCESS_PORT): string {
  * Claude Code: the default `local` scope only registers the server for
  * the directory the terminal happens to be in.
  */
-export function agentConnectRecipes(port: number = AGENT_ACCESS_PORT): { name: string; command: string }[] {
+export function agentConnectRecipes(
+  port: number = AGENT_ACCESS_PORT,
+  stdioPath = "diskhound-mcp",
+  platform = "linux",
+): { name: string; command: string }[] {
   const url = agentAccessMcpUrl(port);
+  // PowerShell and POSIX shells both support single-quoted arguments, with
+  // different escapes for an embedded quote. Never interpolate a raw app path.
+  const executable = platform === "win32"
+    ? "'" + stdioPath.replaceAll("'", "''") + "'"
+    : "'" + stdioPath.replaceAll("'", "'\\''") + "'";
   return [
     {
-      name: "Claude Code",
-      command: `claude mcp add --scope user --transport http ${MCP_SERVER_NAME} ${url}\nclaude mcp login ${MCP_SERVER_NAME}`,
+      name: "Claude Code (stdio)",
+      command: `claude mcp add --scope user --transport stdio ${MCP_SERVER_NAME} -- ${executable} --port ${port}`,
     },
     {
-      name: "Codex CLI",
+      name: "Codex CLI (HTTP + OAuth)",
       command: `codex mcp add ${MCP_SERVER_NAME} --url ${url} --oauth-client-registration dcr`,
     },
   ];
@@ -146,6 +155,8 @@ export interface AgentAccessSnapshot {
   sessions: McpAgentSession[];
   activity: AgentActivityEntry[];
   policyFile: string;
+  stdioPath: string;
+  platform: string;
 }
 
 /**

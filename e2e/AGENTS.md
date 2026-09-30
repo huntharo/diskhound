@@ -17,7 +17,7 @@ bun run test:e2e -- --grep restart    # extra args go to playwright test
    too, because `electron` is in `trustedDependencies`. This step
    still runs `install.js` so a checkout that installed before that
    trust gets a binary.
-2. It builds the debug scanner.
+2. It builds the debug scanner and MCP stdio helper.
 3. It builds the renderer.
 4. It builds main.
 

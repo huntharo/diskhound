@@ -17,6 +17,11 @@ extraResources:
     filter:
       - "diskhound-native-scanner"
       - "diskhound-native-scanner.exe"
+  - from: native/diskhound-mcp/target/release/
+    to: native/
+    filter:
+      - "diskhound-mcp"
+      - "diskhound-mcp.exe"
   - from: build/icon.png
     to: icon.png
   # Multi-size PNGs used at runtime to (a) build a multi-rep NativeImage
