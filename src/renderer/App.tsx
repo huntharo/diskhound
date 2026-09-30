@@ -20,6 +20,7 @@ import { formatScanRoot } from "../shared/pathUtils";
 import { formatDriveSpace, driveSpaceLabel, driveUsedPercent } from "./lib/driveSpace";
 import { formatBytes } from "./lib/format";
 import { useSizeUnitBase } from "./lib/sizeUnitSettings";
+import { focusAgentSettings, type AgentSettingsTarget } from "./lib/agentAccessStore";
 import { clearDeletedPaths, markDeletedPaths } from "./lib/deletedPaths";
 import { appendDuplicateProgress } from "./lib/duplicateStream";
 import { useLiveDiskSpace } from "./lib/hooks";
@@ -29,7 +30,7 @@ import { dispatchSettingsUpdated, SETTINGS_UPDATED_EVENT } from "./lib/uiEvents"
 import { nativeApi } from "./nativeApi";
 
 import { ChangesView } from "./components/ChangesView";
-import { AgentActivityPill } from "./components/AgentActivityPill";
+import { AgentButton } from "./components/AgentButton";
 import { DiskPicker } from "./components/DiskPicker";
 import { DevBranchChip } from "./components/DevBranchChip";
 import { DevView } from "./components/DevView";
@@ -565,7 +566,7 @@ export function App() {
     // the widget's "C:" drive row drops the user into Overview pre-pointed
     // at C:; then switch the tab. Skip the picker — user's intent was to
     // see this view immediately, not pick a drive.
-    const unsubNavigate = nativeApi.onNavigateView(({ view, scanRoot, folderPath }) => {
+    const unsubNavigate = nativeApi.onNavigateView(({ view, scanRoot, folderPath, section }) => {
       if (scanRoot) {
         setCurrentRoot(scanRoot);
         // A root this window hasn't shown yet (an agent asking for an
@@ -583,12 +584,17 @@ export function App() {
       }
       setShowPicker(false);
       setView(view);
+      // App menu "Connect an AI Agent…" and the tray's "AI Agents…".
+      if (section === "ai-agents") focusAgentSettings("section");
     });
 
-    // Paths an agent moved to the Trash (the user confirmed each batch
-    // in a native dialog): strike them through like in-app trashes.
+    // Paths an agent moved to the Trash or deleted (the user confirmed
+    // each batch in a native dialog): strike them through like in-app ones.
     const unsubPathsTrashed = nativeApi.onPathsTrashed((paths) => {
       markDeletedPaths(paths, "trash");
+    });
+    const unsubPathsDeleted = nativeApi.onPathsDeleted((paths) => {
+      markDeletedPaths(paths, "delete");
     });
 
     // ── Duplicate scan IPC wiring ──
@@ -686,6 +692,7 @@ export function App() {
       unsubUpdate();
       unsubNavigate();
       unsubPathsTrashed();
+      unsubPathsDeleted();
       unsubDupProgress();
       unsubDupResult();
       unsubEasyMoveProgress();
@@ -814,6 +821,16 @@ export function App() {
    * drive click, which wiped running state and triggered duplicate
    * scan-complete toasts when users switched around.
    */
+  /**
+   * Settings → AI Agents, from the header agent button, the drive picker
+   * and the menus. The picker stays wanted: leaving Settings without a
+   * scan goes back to it.
+   */
+  const openAgentSettings = (target: AgentSettingsTarget) => {
+    setView("settings");
+    focusAgentSettings(target);
+  };
+
   const handleScanDrive = async (drivePath: string) => {
     // Normalize "C:" → "C:\\" so Path.resolve doesn't use CWD
     const normalized = /^[A-Za-z]:$/.test(drivePath) ? drivePath + "\\" : drivePath;
@@ -1190,22 +1207,8 @@ export function App() {
            *  weight without stealing horizontal real estate from
            *  the pills next to them. */}
           <div className="header-utilities">
-            {/* Which AI agent is driving (MCP); hidden until one acts. */}
-            <AgentActivityPill
-              onOpen={() => {
-                setShowPicker(false);
-                setView("settings");
-                // Settings and the AI Agents section both load async;
-                // wait (up to ~1 s) for the section before scrolling.
-                let frames = 0;
-                const scrollWhenReady = () => {
-                  const section = document.getElementById("settings-ai-agents");
-                  if (section) section.scrollIntoView({ block: "start" });
-                  else if (++frames < 60) window.requestAnimationFrame(scrollWhenReady);
-                };
-                window.requestAnimationFrame(scrollWhenReady);
-              }}
-            />
+            {/* AI agents (MCP): the way in, and which agent is driving. */}
+            <AgentButton onOpenSettings={openAgentSettings} />
 
             {/* Search toggle */}
             <button
@@ -1336,6 +1339,7 @@ export function App() {
             <DiskPicker
               onScanDrive={handleScanDrive}
               onScanFolder={handleScanFolder}
+              onConnectAgent={() => openAgentSettings("connect")}
             />
           ) : (
             <>

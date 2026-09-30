@@ -100,7 +100,7 @@ describe("McpPolicyStore", () => {
     const store = new McpPolicyStore(policyFile);
     expectCode(() => store.createSession("   ", "builtin.reader", oauth()), "invalid_input");
     expectCode(() => store.createSession("x".repeat(201), "builtin.reader", oauth()), "invalid_input");
-    expectCode(() => store.createSession("Agent", "builtin.admin", oauth()), "invalid_input");
+    expectCode(() => store.createSession("Agent", "builtin.root", oauth()), "invalid_input");
     expect(store.sessions()).toEqual([]);
   });
 
@@ -114,6 +114,7 @@ describe("McpPolicyStore", () => {
       roleId: "builtin.guide",
       roleName: "Cleanup Guide",
       capabilities: ["disk.read", "scan.run", "app.navigate"],
+      oauthClientId: session.oauth!.clientId,
     });
     // No required capabilities: still identifies the session.
     expect(store.authorize(token).sessionId).toBe(session.id);

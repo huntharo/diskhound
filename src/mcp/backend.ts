@@ -16,6 +16,7 @@ import type {
   WindowViewState,
 } from "../shared/contracts";
 import type { AgentActivityEntry } from "../shared/agentAccess";
+import type { RemovalMeasurement } from "./removalMeasure";
 
 /**
  * Everything the MCP tool layer needs from DiskHound's main process.
@@ -30,6 +31,8 @@ import type { AgentActivityEntry } from "../shared/agentAccess";
 export interface DiskhoundAgentBackend {
   readonly platform: NodeJS.Platform;
   readonly appVersion: string;
+  /** 1000 or 1024, from Settings → General → size units. Defaults to 1024. */
+  sizeUnitBase?(): 1000 | 1024;
 
   listDrives(): Promise<DiskSpaceInfo[]>;
   /** Roots with an in-flight scan, plus the live snapshot for each. */
@@ -59,12 +62,23 @@ export interface DiskhoundAgentBackend {
   navigate(request: NavigateRequest): Promise<void>;
   revealPath(targetPath: string): Promise<PathActionResult>;
   /**
+   * Walk the paths now and say what removing them together frees, with
+   * APFS clones and hardlinks counted once. Missing on Windows, where the
+   * scan already counts each file once.
+   */
+  measureRemoval?(paths: readonly string[], signal?: AbortSignal): Promise<RemovalMeasurement>;
+  /**
    * Show a native confirmation dialog in DiskHound and, only if the
    * user accepts, move each path to the Trash / Recycle Bin through the
    * same protected-folder checks the UI uses. Throws when none of the
    * paths can be offered (missing, or refused for agents).
    */
   confirmAndTrash(request: TrashRequest): Promise<TrashOutcome>;
+  /**
+   * Same checks and a sterner confirmation, then delete each path
+   * permanently (not to the Trash) with DiskHound's own delete.
+   */
+  confirmAndDelete(request: TrashRequest): Promise<TrashOutcome>;
 }
 
 export interface FolderChildren {
@@ -90,10 +104,14 @@ export interface NavigateRequest {
   folderPath?: string;
   /** Bring the window to the front. Off by default so agents don't steal focus. */
   focus?: boolean;
+  /** With view 'settings', a section to scroll to. */
+  section?: "ai-agents";
 }
 
 export interface TrashRequest {
+  sessionId: string;
   sessionName: string;
+  roleName: string;
   paths: string[];
   reason?: string;
   /**

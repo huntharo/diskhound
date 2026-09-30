@@ -9,15 +9,24 @@ import { mcpAuthMetadataRouter } from "@modelcontextprotocol/sdk/server/auth/rou
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 import { AGENT_ACCESS_HOST, AGENT_ACCESS_PORT, MCP_AGENT_CAPABILITIES, agentAccessMcpUrl } from "../shared/agentAccess";
-import { McpPolicyStore, PolicyFileAuthorizer } from "./accessPolicy";
+import { McpPolicyStore, PolicyFileAuthorizer, type McpAuthorization } from "./accessPolicy";
 import { AgentOAuth, type RequestConsent } from "./agentOAuth";
 import type { AgentActivitySink, DiskhoundAgentBackend } from "./backend";
-import { createDiskhoundMcpServer } from "./server";
+import type { AgentSecuritySink } from "./securityLog";
+import { createDiskhoundMcpServer, TOOL_CAPABILITIES, toolActionText } from "./server";
 import type { SkillCatalog } from "./skills";
+
+/**
+ * The session's permissions on every /mcp response. The stdio helper
+ * compares it between calls and tells its client to reload the tool
+ * list (notifications/tools/list_changed) when a role changes.
+ */
+export const CAPABILITIES_HEADER = "DiskHound-Capabilities";
 
 export interface AgentAccessServerOptions {
   backend: DiskhoundAgentBackend;
   activity: AgentActivitySink;
+  security?: AgentSecuritySink;
   skills: SkillCatalog;
   policy: McpPolicyStore;
   clientsFile: string;
@@ -111,6 +120,13 @@ export class AgentAccessServer {
       app.get("/authorize/status", (req, res) => {
         oauth.status(typeof req.query.id === "string" ? req.query.id : "", res);
       });
+      // The stdio helper withdraws its request when its client hangs up.
+      // The same answer either way, so it reveals nothing about ids.
+      app.post("/authorize/cancel", express.urlencoded({ extended: false, limit: "1kb" }), (req, res) => {
+        const id = (req.body as { id?: unknown } | undefined)?.id;
+        oauth.cancel(typeof id === "string" ? id : "");
+        res.status(204).end();
+      });
       app.all("/authorize", (req, res, next) => {
         if (req.method !== "GET") {
           res.setHeader("Allow", "GET");
@@ -177,9 +193,12 @@ export class AgentAccessServer {
 
   private async handleMcp(req: Request, res: Response, oauth: AgentOAuth): Promise<void> {
     const token = /^Bearer\s+(.+)$/i.exec(req.headers.authorization?.trim() ?? "")?.[1];
+    // What this session may do right now decides which tools the
+    // per-request server registers. Tool calls re-check on their own.
+    let session: McpAuthorization;
     try {
       if (!token) throw new Error("missing token");
-      await oauth.verifyAccessToken(token);
+      session = oauth.authorizeToken(token);
     } catch {
       res.setHeader(
         "WWW-Authenticate",
@@ -189,6 +208,8 @@ export class AgentAccessServer {
       res.status(401).json({ error: "unauthorized" });
       return;
     }
+    res.setHeader(CAPABILITIES_HEADER, [...session.capabilities].sort().join(","));
+    if (this.refuseHiddenTool(req.body, session, res)) return;
 
     const pending = this.pendingByToken.get(token) ?? 0;
     if (pending >= MAX_PENDING_PER_TOKEN) {
@@ -209,6 +230,8 @@ export class AgentAccessServer {
       activity: this.options.activity,
       skills: this.options.skills,
       authorizer: new PolicyFileAuthorizer(this.options.policy, token),
+      granted: session.capabilities,
+      security: this.options.security,
       signal: closed.signal,
     });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
@@ -223,6 +246,60 @@ export class AgentAccessServer {
       await transport.close().catch(() => undefined);
       await mcp.close().catch(() => undefined);
     }
+  }
+
+  /**
+   * A call to a DiskHound tool this session's role doesn't grant. The
+   * tool isn't in the session's tools/list, so the agent has a stale
+   * list (its role was lowered) or guessed. Answer it as a failed tool
+   * call that says why, and log it for the user.
+   */
+  private refuseHiddenTool(body: unknown, session: McpAuthorization, res: Response): boolean {
+    // A batch gets the SDK's own "unknown tool" answers, but each hidden
+    // call in it is still logged for the user.
+    if (Array.isArray(body)) {
+      for (const message of body) {
+        const hidden = hiddenTool(message, session);
+        if (hidden) this.recordHiddenTool(hidden.name, session);
+      }
+      return false;
+    }
+    const hidden = hiddenTool(body, session);
+    if (!hidden) return false;
+    const { name, missing, id } = hidden;
+    this.recordHiddenTool(name, session);
+    res.status(200).json({
+      jsonrpc: "2.0",
+      id,
+      result: {
+        isError: true,
+        content: [{
+          type: "text",
+          text: `${name} isn't available to this DiskHound session (${session.roleName} doesn't grant ${missing.join(", ")}). ` +
+            "Nothing was changed, and DiskHound logged the attempt. Ask the user to change this session's role in " +
+            "DiskHound → Settings → AI Agents if they want you to do this, then reload your tool list.",
+        }],
+      },
+    });
+    return true;
+  }
+
+  private recordHiddenTool(name: string, session: McpAuthorization): void {
+    this.options.security?.record({
+      sessionId: session.sessionId,
+      sessionName: session.sessionName,
+      roleName: session.roleName,
+      kind: "tool_not_allowed",
+      tool: name,
+      detail: `Tried to ${toolActionText(name)}; ${session.roleName} doesn't allow it.`,
+    });
+    this.options.activity.record({
+      sessionId: session.sessionId,
+      sessionName: session.sessionName,
+      tool: name,
+      summary: `Blocked: tried to ${toolActionText(name)} (${session.roleName})`,
+      ok: false,
+    });
   }
 
   async stop(): Promise<void> {
@@ -252,6 +329,21 @@ export function allowedOrigin(origin: string | undefined): boolean {
   } catch {
     return false;
   }
+}
+
+/** A tools/call for a DiskHound tool the session's role doesn't grant. */
+function hiddenTool(
+  body: unknown,
+  session: McpAuthorization,
+): { name: string; missing: string[]; id: unknown } | null {
+  const message = body as { id?: unknown; method?: unknown; params?: { name?: unknown } } | null;
+  if (!message || typeof message !== "object" || Array.isArray(message) || message.method !== "tools/call") return null;
+  const name = message.params?.name;
+  if (typeof name !== "string") return null;
+  const required = TOOL_CAPABILITIES[name];
+  if (!required) return null;
+  const missing = required.filter((capability) => !session.capabilities.includes(capability));
+  return missing.length === 0 ? null : { name, missing, id: message.id ?? null };
 }
 
 /**

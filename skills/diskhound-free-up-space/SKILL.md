@@ -109,8 +109,14 @@ Put each finding in exactly one bucket:
 
 ### 7. Check that removal will free the space
 
-Before promising a number, check each candidate against this list. When one
-applies, say so plainly and give the realistic amount.
+Before promising a number, call `diskhound_measure_removal` with the paths
+the user might remove, as one call. It measures the disk now and counts
+shared blocks once: `total.frees` is what removing them together frees, and
+each path's `freesAlone` is what removing only that one frees. Quote those
+rather than adding up sizes, and don't measure clones yourself with shell
+commands. If the call times out, make the same call again; DiskHound keeps
+the result it finished. Then check each candidate against this list. When one
+applies, say so plainly.
 
 - **Trash / Recycle Bin.** Nothing is freed until the Trash is emptied.
   DiskHound only moves items to the Trash.
@@ -120,7 +126,10 @@ applies, say so plainly and give the realistic amount.
   their last reference is removed; a copy's exclusive blocks can be reclaimed
   separately.** Deleting one project's
   `node_modules` often frees very little while the pnpm store and other
-  projects still hold clones. Details and how to test:
+  projects still hold clones. `diskhound_dev_artifacts` gives each tree's
+  `freesAlone` and a `listed.freesTogether` range from the last scan;
+  `diskhound_measure_removal` gives the exact figure for the set you pick.
+  Details:
   [references/macos.md#apfs-clones](references/macos.md#apfs-clones).
 - **Time Machine local snapshots (macOS).** Anything deleted since the last
   local snapshot stays allocated until that snapshot expires (usually within

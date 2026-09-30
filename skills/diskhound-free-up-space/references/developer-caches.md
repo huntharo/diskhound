@@ -12,8 +12,10 @@ Before removing anything inside a project:
   deleting the folder, and run `git worktree prune` afterwards.
 - **Shared storage.** pnpm uses APFS clones on macOS and hardlinks on Linux.
   Removing one `node_modules` frees little while other projects or the store
-  still share it. See [macos.md](macos.md#apfs-clones) and
-  [linux.md](linux.md#shared-storage).
+  still share it. Worktrees of one repository often share their dependency
+  folders the same way. Pass every tree the user might remove to
+  `diskhound_measure_removal` in one call for what they free together. See
+  [macos.md](macos.md#apfs-clones) and [linux.md](linux.md#shared-storage).
 
 | Ecosystem | Where it lives | Cleanup |
 | --- | --- | --- |

@@ -218,7 +218,7 @@ describe("AgentOAuth", () => {
     await begin(await registerClient("   "), pkce().challenge, { scopes: [] });
     expect(requests.map((request) => [request.clientName, request.scopes])).toEqual([
       ["Claude Code", ["disk.read"]],
-      ["Local MCP client", ["disk.read", "scan.run", "app.navigate", "files.trash"]],
+      ["Local MCP client", ["disk.read", "scan.run", "app.navigate", "files.trash", "files.delete"]],
     ]);
   });
 
@@ -227,6 +227,47 @@ describe("AgentOAuth", () => {
     const client = await registerClient();
     for (let i = 0; i < 64; i++) await begin(client);
     await expect(oauth.authorize(client, params(pkce().challenge), new FakeResponse().asExpress)).rejects.toBeInstanceOf(InvalidRequestError);
+  });
+
+  it("shows the same waiting page for a repeated authorize URL instead of asking twice", async () => {
+    const decide: ((decision: ConsentDecision) => void)[] = [];
+    consent = () => new Promise<ConsentDecision>((resolve) => decide.push(resolve));
+    const client = await registerClient("Codex");
+    const { challenge } = pkce();
+    const first = await begin(client, challenge);
+    // Codex opens the URL in the browser and the user opens it again.
+    const again = await begin(client, challenge);
+    expect(again).toBe(first);
+    expect(decide).toHaveLength(1);
+    // A new login (new PKCE challenge) is a new request.
+    await begin(client);
+    expect(decide).toHaveLength(2);
+
+    decide[0]!({ decision: "allow", sessionName: "Codex", roleId: "builtin.guide" });
+    await flush();
+    expect(poll(first).statusCode).toBe(302);
+  });
+
+  it("withdraws a request its client gave up on, but not one already decided", async () => {
+    const signals: AbortSignal[] = [];
+    const decide: ((decision: ConsentDecision) => void)[] = [];
+    consent = (request) => {
+      signals.push(request.signal);
+      return new Promise<ConsentDecision>((resolve) => decide.push(resolve));
+    };
+    const client = await registerClient("Claude Code");
+    const gone = await begin(client);
+    oauth.cancel(gone);
+    expect(signals[0]!.aborted).toBe(true);
+    expect(poll(gone).statusCode).toBe(404);
+
+    const decided = await begin(client);
+    decide[1]!({ decision: "allow", sessionName: "Claude Code", roleId: "builtin.guide" });
+    await flush();
+    oauth.cancel(decided);
+    oauth.cancel("no-such-id");
+    expect(signals[1]!.aborted).toBe(false);
+    expect(poll(decided).statusCode).toBe(302);
   });
 
   it("close() aborts every pending approval", async () => {

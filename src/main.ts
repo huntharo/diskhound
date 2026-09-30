@@ -2127,8 +2127,15 @@ void (async () => {
       return { ok: true, message: "Moved to trash." };
     }
   };
-  ipcMain.handle("diskhound:trash-path", (_event, targetPath: string) => trashPathImpl(targetPath));
-  ipcMain.handle("diskhound:permanent-delete-path", async (_event, targetPath: string, expectedFiles?: number) => {
+  // Removals from the UI change what an agent's removal measurement
+  // would find. The agent host sets this once it exists.
+  let pathsRemoved = () => {};
+  const noteRemoved = (result: PathActionResult) => {
+    if (result.ok) pathsRemoved();
+    return result;
+  };
+  ipcMain.handle("diskhound:trash-path", async (_event, targetPath: string) => noteRemoved(await trashPathImpl(targetPath)));
+  const permanentDeletePathImpl = async (targetPath: string, expectedFiles?: number): Promise<PathActionResult> => {
     const blocked = protectedPathBlock(targetPath, "Delete");
     if (blocked) {
       writeCrashLog("delete", `blocked path=${targetPath} ${blocked.message}`);
@@ -2165,7 +2172,10 @@ void (async () => {
       `${result.ok ? "ok" : result.requiresElevation ? "needs-admin" : "fail"} elapsedMs=${Date.now() - deleteStartedAt} path=${resolved} ${result.message}`,
     );
     return result;
-  });
+  };
+  ipcMain.handle("diskhound:permanent-delete-path", async (_event, targetPath: string, expectedFiles?: number) =>
+    noteRemoved(await permanentDeletePathImpl(targetPath, expectedFiles)),
+  );
   ipcMain.handle("diskhound:permanent-delete-path-elevated", async (_event, targetPath: string) => {
     const blocked = protectedPathBlock(targetPath, "Delete");
     if (blocked) {
@@ -2192,7 +2202,7 @@ void (async () => {
       };
     } catch {
       writeCrashLog("delete", `elevated-ok path=${Path.resolve(targetPath)}`);
-      return { ok: true, message: "Permanently deleted." };
+      return noteRemoved({ ok: true, message: "Permanently deleted." });
     }
   });
 
@@ -4269,12 +4279,21 @@ void (async () => {
         quitDiskHound();
       },
     };
+    // Settings → AI Agents, for users who never scroll that far.
+    const connectAgentItem: MenuItemConstructorOptions = {
+      label: "Connect an AI Agent…",
+      click: () => {
+        void agentHost?.showSettings();
+      },
+    };
     const template: MenuItemConstructorOptions[] = process.platform === "darwin"
       ? [
           {
             label: app.name,
             submenu: [
               { role: "about" },
+              { type: "separator" },
+              connectAgentItem,
               { type: "separator" },
               { role: "hide" },
               { role: "hideOthers" },
@@ -4287,7 +4306,7 @@ void (async () => {
           { role: "editMenu" },
         ]
       : [
-          { label: "File", submenu: [quitItem] },
+          { label: "File", submenu: [connectAgentItem, { type: "separator" }, quitItem] },
           { role: "editMenu" },
         ];
     Menu.setApplicationMenu(Menu.buildFromTemplate(template));
@@ -4322,6 +4341,12 @@ void (async () => {
         label: "Open System Widget",
         click: () => {
           void createSystemWidgetWindow();
+        },
+      },
+      {
+        label: "AI Agents…",
+        click: () => {
+          void agentHost?.showSettings();
         },
       },
       { type: "separator" },
@@ -4693,7 +4718,9 @@ void (async () => {
       },
       startDuplicateScan: (rootPath, minSizeBytes) => startDuplicateScanImpl(rootPath, { minSizeBytes }),
       trashPath: (targetPath) => trashPathImpl(targetPath),
+      permanentDeletePath: (targetPath) => permanentDeletePathImpl(targetPath),
     });
+    pathsRemoved = () => agentHost?.pathsRemoved();
   } catch (err) {
     writeCrashLog("agent-access", `startup failed: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
   }

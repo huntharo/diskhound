@@ -5,6 +5,7 @@ import { dirname } from "node:path";
 import {
   BUILT_IN_MCP_ROLES,
   MCP_AGENT_CAPABILITIES,
+  type AgentClientVia,
   type McpAgentCapability,
   type McpAgentRole,
   type McpAgentSession,
@@ -44,6 +45,8 @@ export interface McpAuthorization {
   roleId: string;
   roleName: string;
   capabilities: readonly McpAgentCapability[];
+  /** The OAuth client that holds this session's token, if it signed in with OAuth. */
+  oauthClientId?: string;
 }
 
 export interface McpAuthorizer {
@@ -87,6 +90,7 @@ function publicSession(session: McpAgentSessionRecord): McpAgentSession {
     updatedAt: session.updatedAt,
     revokedAt: session.revokedAt,
     ...(session.oauth ? { oauth: { clientId: session.oauth.clientId, scopes: [...session.oauth.scopes] } } : {}),
+    ...(session.client ? { client: { name: session.client.name, via: session.client.via } } : {}),
   };
 }
 
@@ -112,6 +116,13 @@ function parseSession(value: unknown): McpAgentSessionRecord {
     !Array.isArray(session.oauth.scopes) || !session.oauth.scopes.every(isCapability)
   )) {
     throw new McpAccessError("invalid_policy", "invalid OAuth session binding");
+  }
+  if (session.client !== undefined && (
+    session.client === null || typeof session.client !== "object" ||
+    typeof session.client.name !== "string" || session.client.name.length > 200 ||
+    (session.client.via !== "stdio" && session.client.via !== "http")
+  )) {
+    throw new McpAccessError("invalid_policy", "invalid session client");
   }
   return session as McpAgentSessionRecord;
 }
@@ -154,6 +165,7 @@ export class McpPolicyStore {
     nameInput: string,
     roleId: string,
     oauth: { clientId: string; scopes: McpAgentCapability[] },
+    client?: { name: string; via: AgentClientVia },
   ): { session: McpAgentSession; token: string } {
     const policy = this.read();
     const name = nameInput.trim();
@@ -180,6 +192,7 @@ export class McpPolicyStore {
       updatedAt: timestamp,
       revokedAt: null,
       oauth: { clientId: oauth.clientId, scopes: [...oauth.scopes] },
+      ...(client ? { client: { name: client.name.trim().slice(0, 200), via: client.via } } : {}),
     };
     policy.sessions.push(record);
     this.write(policy);
@@ -247,6 +260,7 @@ export class McpPolicyStore {
       roleId: role.id,
       roleName: role.name,
       capabilities: [...permissions],
+      ...(session.oauth ? { oauthClientId: session.oauth.clientId } : {}),
     };
   }
 

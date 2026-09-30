@@ -37,7 +37,7 @@ function rows<T extends object>(template: T, n: number): T[] {
 const cases = [
   "diskhound_status", "diskhound_scan_summary", "diskhound_list_folder", "diskhound_search_files",
   "diskhound_cleanup_suggestions", "diskhound_dev_artifacts", "diskhound_scan_history",
-  "diskhound_changes", "diskhound_changes_files", "diskhound_duplicates",
+  "diskhound_changes", "diskhound_changes_files", "diskhound_duplicates", "diskhound_measure_removal",
 ] as const;
 
 async function measure(name: typeof cases[number], factor: number) {
@@ -53,6 +53,7 @@ async function measure(name: typeof cases[number], factor: number) {
   const dev = (await backend.devArtifacts(ROOT))!;
   const diff = (await backend.diff("scan-2", "scan-3"))!;
   const full = (await backend.fullDiff("scan-2", "scan-3", 200))!;
+  const measured = await backend.measureRemoval(["/x"]);
   backend.scannedRoots.mockReturnValue(c.wrap(rows(history[0]!, n)));
   backend.activeScans.mockResolvedValue(c.wrap(rows(snapshot, n)));
   backend.scanHistory.mockReturnValue(c.wrap(rows(history[0]!, n).map((entry, i) => ({ ...entry,
@@ -73,6 +74,9 @@ async function measure(name: typeof cases[number], factor: number) {
   backend.diff.mockResolvedValue(c.wrap({ ...diff, fileDeltas: rows(diff.fileDeltas[0]!, n),
     directoryDeltas: rows(diff.directoryDeltas[0]!, n), extensionDeltas: rows(diff.extensionDeltas[0]!, n) }));
   backend.fullDiff.mockResolvedValue(c.wrap({ ...full, changes: rows(full.changes[0]!, n) }));
+  backend.measureRemoval.mockResolvedValue(c.wrap({ ...measured,
+    paths: Array.from({ length: n }, (_, i) => ({ ...measured.paths[0]!, path: `${ROOT}/wt/${i}`,
+      freesAloneBytes: (i * 31337) % n, sizeBytes: n - i })) }));
   backend.duplicates.mockReturnValue(c.wrap({ running: false, progress: null, analysis: {
     rootPath: ROOT, analyzedAt: NOW, filesWalked: n * 16, filesHashed: n * 16, elapsedMs: 1,
     totalGroups: n, totalDuplicateFiles: n * 16, totalWastedBytes: n * 100,
@@ -88,7 +92,7 @@ async function measure(name: typeof cases[number], factor: number) {
   try {
     c.reset();
     const result = await client.callTool({ name: name === "diskhound_changes_files" ? "diskhound_changes" : name,
-      arguments: { path: ROOT, query: "file", limit, pathsPerSuggestion: 4 * factor,
+      arguments: { path: ROOT, query: "file", limit, pathsPerSuggestion: 4 * factor, paths: [`${ROOT}/wt`],
         ...(name.startsWith("diskhound_changes") ? { baselineId: "scan-1", currentId: "scan-0", detail: name.endsWith("_files") ? "files" : "summary" } : {}) } });
     expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
     expect(result.structuredContent).toBeDefined();
