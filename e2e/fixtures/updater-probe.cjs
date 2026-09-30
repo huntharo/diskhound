@@ -7,6 +7,11 @@ Object.defineProperty(app, "isPackaged", { value: process.env.DISKHOUND_PROBE_PA
 globalThis.updaterProbe = { imports: 0, checks: 0 };
 const updater = new EventEmitter();
 updater.checkForUpdates = async () => { globalThis.updaterProbe.checks++; return null; };
+updater.quitAndInstall = () => {
+  const error = new Error("Stubbed installation failure");
+  if (globalThis.updaterInstallFailure === "event") updater.emit("error", error);
+  else throw error;
+};
 const load = Module._load;
 Module._load = function (id, ...args) {
   if (id === "electron-updater") {

@@ -4661,7 +4661,15 @@ void (async () => {
     });
   };
 
-  const clearUpdateCheckTimer = () => updateScheduler?.stop();
+  const handleUpdateError = (err: Error) => {
+    if (lastUpdateStatus?.phase === "installing") {
+      isQuitting = false;
+      clearPendingInstall();
+      updateScheduler?.schedule();
+    }
+    // The scheduler records check attempts before calling the updater.
+    emitUpdateStatus({ phase: "error", currentVersion, errorMessage: err.message });
+  };
   // Unpacked launches (including direct Playwright launches) cannot initialize
   // the updater. The test-runner flag also covers packaged-app tests.
   const updatesDisabled = process.env.DISKHOUND_DISABLE_UPDATES === "1";
@@ -4693,10 +4701,7 @@ void (async () => {
         emitUpdateStatus({ phase: "downloaded", currentVersion, availableVersion: info?.version });
         sendToast("success", "Update ready", "Restart DiskHound to apply the update.");
       });
-      autoUpdater.on("error", (err: Error) => {
-        // The scheduler records attempts before calling the updater.
-        emitUpdateStatus({ phase: "error", currentVersion, errorMessage: err?.message });
-      });
+      autoUpdater.on("error", handleUpdateError);
 
       updateScheduler = createUpdateScheduler({
         state: updaterState,
@@ -4777,7 +4782,7 @@ void (async () => {
       availableVersion: availableVersion ?? undefined,
       installStartedAt,
     });
-    clearUpdateCheckTimer();
+    updateScheduler?.cancelPending();
     // Silent install + auto-relaunch after update.
     // isSilent=true → skip NSIS UI; isForceRunAfter=true → relaunch DiskHound once install finishes.
     setTimeout(() => {
@@ -4785,12 +4790,7 @@ void (async () => {
       try {
         autoUpdater.quitAndInstall(true, true);
       } catch (err) {
-        clearPendingInstall();
-        emitUpdateStatus({
-          phase: "error",
-          currentVersion,
-          errorMessage: err instanceof Error ? err.message : "Failed to start installer",
-        });
+        handleUpdateError(err instanceof Error ? err : new Error("Failed to start installer"));
       }
     }, 500);
   });
@@ -4808,7 +4808,7 @@ void (async () => {
   app.on("before-quit", () => {
     isQuitting = true;
     clearInterval(affinityInterval);
-    clearUpdateCheckTimer();
+    updateScheduler?.stop();
     for (const session of activeScans.values()) {
       void session.stop();
     }

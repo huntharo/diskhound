@@ -157,3 +157,25 @@ it("caps repeated failures at one automatic attempt per day", async () => {
   expect(state.get().nextCheckAt).toBe(Date.now() + 24 * 60 * 60 * 1000);
   expect(state.get().lastSuccessAt).toBeNull();
 });
+
+it("can resume automatic and manual checks after cancelling for a failed install", async () => {
+  const { scheduler, check } = boot();
+  scheduler.cancelPending();
+  await vi.advanceTimersByTimeAsync(GRACE);
+  expect(check).not.toHaveBeenCalled();
+  // Installation failed: scheduling again must not leave a permanent stop.
+  scheduler.schedule();
+  await vi.advanceTimersByTimeAsync(1);
+  expect(check).toHaveBeenCalledTimes(1);
+  scheduler.cancelPending();
+  await scheduler.checkNow();
+  expect(check).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(STABLE);
+  expect(check).toHaveBeenCalledTimes(3);
+  // Real shutdown still prevents both kinds of check.
+  scheduler.stop();
+  scheduler.schedule();
+  await scheduler.checkNow();
+  await vi.advanceTimersByTimeAsync(STABLE);
+  expect(check).toHaveBeenCalledTimes(3);
+});

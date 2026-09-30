@@ -75,6 +75,9 @@ export function createUpdateScheduler(options: {
   };
   return {
     schedule,
+    // Installation may fail without quitting. Only cancel the pending timer;
+    // manual checks and schedule() must remain usable in that process.
+    cancelPending: clear,
     // An explicit user action bypasses automatic delays/backoff; concurrent
     // actions share one request. It also advances the automatic schedule.
     checkNow: () => run(true),

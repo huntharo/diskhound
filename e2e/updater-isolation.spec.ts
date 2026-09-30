@@ -31,6 +31,20 @@ for (const [packaged, disabled] of [[false, false], [true, true], [true, false]]
       }
       await page.evaluate(() => window.diskhound.checkForUpdates());
       expect(await probe()).toEqual({ imports: active ? 1 : 0, checks: active ? 1 : 0 });
+      if (active) {
+        let checks = 1;
+        for (const failure of ["throw", "event"]) {
+          await app.evaluate((_electron, mode) => {
+            (globalThis as typeof globalThis & { updaterInstallFailure: string }).updaterInstallFailure = mode;
+          }, failure);
+          await page.evaluate(() => window.diskhound.quitAndInstall());
+          await expect.poll(() => page.evaluate(async () =>
+            (await window.diskhound.getUpdateState()).lastStatus?.errorMessage,
+          )).toBe("Stubbed installation failure");
+          await page.evaluate(() => window.diskhound.checkForUpdates());
+          expect(await probe()).toEqual({ imports: 1, checks: ++checks });
+        }
+      }
     } finally {
       await app.close();
       rmSync(profile, { recursive: true, force: true });
