@@ -100,7 +100,7 @@ export function AgentsSection() {
       {status.enabled && (
         <div className="agent-connect">
           <div className="agent-subtitle">Connect an agent</div>
-          {agentConnectRecipes(status.port).map((recipe) => (
+          {agentConnectRecipes(status.port, snapshot.stdioPath, snapshot.platform).map((recipe) => (
             <div key={recipe.name} className="agent-recipe">
               <div className="agent-recipe-head">
                 <span>{recipe.name}</span>
@@ -120,8 +120,10 @@ export function AgentsSection() {
             </div>
           ))}
           <div className="agent-hint">
-            The agent opens a browser tab to sign in; approve the request in the DiskHound window that
-            appears.
+            Keep DiskHound open. Approve the first connection in its window; later stdio connections
+            reuse the approval saved in your OS credential store. Windows commands use PowerShell.
+            For an AppImage, copy diskhound-mcp from its resources/native folder to a stable location
+            and use that path in the command.
           </div>
         </div>
       )}

@@ -499,6 +499,11 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
     })(),
     activity: activity.list(),
     policyFile: policy.filePath,
+    stdioPath: Path.join(
+      app.isPackaged ? Path.join(process.resourcesPath, "native") : Path.join(deps.projectRoot, "native", "diskhound-mcp", "target", "debug"),
+      process.platform === "win32" ? "diskhound-mcp.exe" : "diskhound-mcp",
+    ),
+    platform: process.platform,
   });
   const broadcast = () => mainWindowSend(AGENT_ACCESS_CHANGED_CHANNEL, snapshot());
 

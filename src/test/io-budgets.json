@@ -1398,6 +1398,26 @@
     "open": 0,
     "observedBytesWritten": 56122
   },
+  "mcp-stdio-approval-and-reuse": {
+    "note": "One stdio registration and approval with 32 saved clients/sessions, then 24 reconnects and 1,440 requests. The helper's separate OS-store budget is in native/diskhound-mcp/io-budgets.json; no token is written to a file. Not tied to monitoring: at default or aggressive 1-minute monitoring, assuming 1 event/day: 2 file writes/day, 0.028 MB/day; 24 events/day: 48 file writes/day, 0.677 MB/day. Each changed file is atomically replaced with a rename; polling adds no writes.",
+    "writeFile": 2,
+    "appendFile": 0,
+    "rename": 2,
+    "copyFile": 0,
+    "link": 0,
+    "mkdir": 2,
+    "createWriteStream": 0,
+    "unlink": 0,
+    "readFile": 2881,
+    "readdir": 0,
+    "stat": 0,
+    "lstat": 0,
+    "access": 0,
+    "existsSync": 0,
+    "createReadStream": 0,
+    "open": 0,
+    "observedBytesWritten": 28191
+  },
   "permanent-delete-tree": {
     "note": "User-requested 4 MiB build tree: 256 file unlinks, 9 streamed directory opens, no content writes or persisted progress. rmdir metadata operations are outside this harness's counters. No automatic deletion: 0 writes/day and 0 MB/day at default and 1-minute monitoring. One manual delete performs these 256 metadata unlinks; OS metadata bytes are not measured.",
     "writeFile": 0,

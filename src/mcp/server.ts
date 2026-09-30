@@ -102,7 +102,7 @@ function platformSpaceNote(platform: NodeJS.Platform): string {
 export function serverInstructions(platform: NodeJS.Platform): string {
   const os = platform === "darwin" ? "macOS" : platform === "win32" ? "Windows" : "Linux";
   return [
-    `DiskHound is a disk-space analyzer running on the user's ${os} computer. Use these tools to find where space went and help the user reclaim it.`,
+    `DiskHound is a disk-space analyzer running on the user's ${os} computer. Use DiskHound for disk usage, full drives, large files, duplicates, caches, cleanup, or disk growth. If tools are deferred, search your host's tool catalog for DiskHound and the task before calling them.`,
     "Start with diskhound_status (drives, scanned roots, active scans). If the drive has no recent scan, call diskhound_start_scan and poll diskhound_status until it finishes.",
     "Drill down with diskhound_list_folder from the scan root. Targeted views: diskhound_dev_artifacts (node_modules, build output, caches, worktrees), diskhound_cleanup_suggestions, diskhound_duplicates, diskhound_search_files, and diskhound_changes (what grew between scans).",
     `Before recommending deletions, read the skill ${FREE_UP_SPACE_SKILL} (resources/read works if your host does not load MCP skills). It covers cases where deleting files does not free space: APFS clones, Time Machine local snapshots, hardlinks, shadow copies, and snapshots on btrfs/ZFS. For "why did my disk fill up?", read ${INVESTIGATE_GROWTH_SKILL}.`,
