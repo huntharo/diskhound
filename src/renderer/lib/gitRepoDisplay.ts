@@ -1,5 +1,6 @@
-import type { DevArtifact, DevGitRepoCheck, DevGitRepoInfo } from "../../shared/contracts";
+import type { DevArtifact, DevGitRepoCheck, DevGitRepoInfo, DevWorktreeCheck } from "../../shared/contracts";
 import { basenameOf, dirnameOf } from "../../shared/pathUtils";
+import { worktreeRisks } from "../../shared/worktreeRisks";
 import { isUninformativeParent } from "./devArtifactDisplay";
 import { formatBytes, formatCount } from "./format";
 
@@ -175,4 +176,34 @@ export function gitRemovalConfirm(input: {
       + `${trash} is emptied, it cannot be recovered.`
     : null;
   return { first: lines.join("\n"), second };
+}
+
+export { worktreeRisks };
+
+const KEPT_SHOWN = 5;
+
+/**
+ * The bulk-delete confirm's worktree paragraph: how many git cleared, and
+ * the ones held back with their first reason. Held-back worktrees must
+ * have their work saved or their Git problem resolved before deletion.
+ */
+export function worktreeBulkNote(
+  cleared: number,
+  kept: ReadonlyArray<{ artifact: Pick<DevArtifact, "path">; check: DevWorktreeCheck }>,
+): string {
+  const lines: string[] = [];
+  if (cleared > 0) {
+    lines.push(`Git checked ${plural(cleared, "worktree")}: no uncommitted changes, no commits outside a branch.`);
+    lines.push("Git will permanently remove these worktrees and their registrations.");
+  }
+  if (kept.length > 0) {
+    if (lines.length > 0) lines.push("");
+    lines.push(`Not deleted: ${plural(kept.length, "worktree")} that Git could not clear for removal:`);
+    for (const { artifact, check } of kept.slice(0, KEPT_SHOWN)) {
+      lines.push(`    ${basenameOf(artifact.path) || artifact.path} — ${worktreeRisks(check)[0] ?? ""}`);
+    }
+    if (kept.length > KEPT_SHOWN) lines.push(`    …and ${formatCount(kept.length - KEPT_SHOWN)} more`);
+    lines.push("Save their work or resolve the Git checks before trying again.");
+  }
+  return lines.join("\n");
 }
