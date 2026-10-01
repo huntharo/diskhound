@@ -71,6 +71,16 @@ test("lists Git repos with their remotes and moves one to the Trash only after t
     }),
   ]);
   expect(repos[0]!.size).toBeGreaterThanOrEqual(PACK_BYTES);
+  // The linked worktree is a row of its own, under the repo its .git file names.
+  expect(report?.artifacts.filter((a) => a.kind === "worktree")).toEqual([
+    expect.objectContaining({
+      path: join(rootPath, "openclaw-feat"),
+      projectPath: join(rootPath, "openclaw"),
+      projectName: "openclaw",
+      fileCount: 2,
+      worktree: { project: join(rootPath, "openclaw") },
+    }),
+  ]);
 
   // Stand in for the OS Trash: record the path and leave the files.
   await handle.app.evaluate(({ ipcMain }) => {
@@ -86,13 +96,17 @@ test("lists Git repos with their remotes and moves one to the Trash only after t
   await openTab(page, "Dev Artifacts");
   await expect(page.locator('.dev-kind-cell[title="Git repos (.git)"] .dev-kind-cell-label')).toHaveText("Git repos");
   const rows = page.locator(".dev-row");
-  await expect(rows).toHaveCount(2);
-  const openclaw = rows.filter({ has: page.locator(".dev-row-name", { hasText: /^openclaw$/ }) });
-  const scratch = rows.filter({ has: page.locator(".dev-row-name", { hasText: /^scratch$/ }) });
+  await expect(rows).toHaveCount(3);
+  const repoRows = rows.filter({ has: page.locator(".dev-git-badge") });
+  await expect(repoRows).toHaveCount(2);
+  const openclaw = repoRows.filter({ has: page.locator(".dev-row-name", { hasText: /^openclaw$/ }) });
+  const scratch = repoRows.filter({ has: page.locator(".dev-row-name", { hasText: /^scratch$/ }) });
+  const worktree = rows.filter({ hasNot: page.locator(".dev-git-badge") });
   await expect(openclaw.locator(".dev-git-badge")).toHaveText("github.com/openclaw/openclaw");
   await expect(scratch.locator(".dev-git-badge.warn")).toHaveText("No remote");
+  await expect(worktree.locator(".dev-row-tail")).toHaveText("openclaw-feat");
   // No checkbox: repos stay out of Delete selected and Delete all.
-  await expect(rows.locator("input[type=checkbox]")).toHaveCount(0);
+  await expect(repoRows.locator("input[type=checkbox]")).toHaveCount(0);
 
   const dialogs: string[] = [];
   page.on("dialog", (dialog) => {
@@ -100,7 +114,7 @@ test("lists Git repos with their remotes and moves one to the Trash only after t
     void dialog.accept();
   });
   await scratch.getByRole("button", { name: "Remove…" }).click();
-  await expect(rows).toHaveCount(1);
+  await expect(rows).toHaveCount(2);
   expect(dialogs).toHaveLength(2);
   expect(dialogs[0]).toContain("No remote is configured");
   expect(dialogs[0]).toContain(join(rootPath, "scratch"));
@@ -110,5 +124,18 @@ test("lists Git repos with their remotes and moves one to the Trash only after t
     .toEqual([join(rootPath, "scratch")]);
 
   const after = await page.evaluate((r) => window.diskhound.getDevArtifacts(r, { sidecarOnly: true }), rootPath);
-  expect(after?.artifacts.map((a) => a.projectName)).toEqual(["openclaw"]);
+  expect(after?.artifacts.map((a) => a.kind)).toEqual(["git-repo", "worktree"]);
+
+  // The worktree's repo has no worktrees/openclaw-feat folder, so git
+  // cannot vouch for it: Delete moves it to the Trash after two warnings
+  // instead of deleting it for good.
+  dialogs.length = 0;
+  await worktree.getByRole("button", { name: "Delete" }).click();
+  await expect(rows).toHaveCount(1);
+  expect(dialogs).toHaveLength(2);
+  expect(dialogs[0]).toContain("Move the openclaw-feat worktree to the Trash?");
+  expect(dialogs[0]).toContain("repository is gone");
+  expect(dialogs[1]).toContain("cannot be recovered");
+  expect(await handle.app.evaluate(() => (globalThis as typeof globalThis & { trashed?: string[] }).trashed))
+    .toEqual([join(rootPath, "scratch"), join(rootPath, "openclaw-feat")]);
 });
