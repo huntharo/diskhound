@@ -1,5 +1,8 @@
 import { defineConfig } from "@playwright/test";
 
+// Inherited by direct launches too, including tests of packaged apps.
+process.env.DISKHOUND_DISABLE_UPDATES = "1";
+
 export default defineConfig({
   testDir: "./e2e",
   // Each test starts a real Electron app, and a scan starts the native

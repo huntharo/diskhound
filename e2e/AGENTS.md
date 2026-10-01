@@ -46,6 +46,11 @@ wrap the command in `xvfb-run --auto-servernum`.
   checks and OS notifications off. Pass `launch({ settings })` to
   change more. Groups are merged one level deep, as `settingsStore`
   does.
+- **Updater isolation.** Playwright's config and the fixture set
+  `DISKHOUND_DISABLE_UPDATES=1`, including for direct or packaged launches.
+  Main also refuses to initialize the updater in unpackaged apps. Updater
+  tests that remove the flag must stub `electron-updater` before main loads;
+  `updater-isolation.spec.ts` demonstrates this. Never use live releases.
 - **Folder dialog.** `dialog.showOpenDialog` is stubbed in main.
   `handle.setPickDirectory(dir)` sets what "Browse for folder..."
   returns.
