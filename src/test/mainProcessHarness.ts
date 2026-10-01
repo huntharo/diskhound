@@ -128,6 +128,31 @@ function callListeners(harness: HarnessState, channel: string, args: unknown[]):
   for (const listener of listeners) listener(ipcEvent(harness), ...args);
 }
 
+/** Let before-quit handlers defer exit and resume it through app.quit(). */
+function quitApp(harness: HarnessState): void {
+  let prevented = false;
+  harness.app.emit("before-quit", { preventDefault: () => { prevented = true; } });
+  if (!prevented) harness.app.emit("harness:quit-ready");
+}
+
+async function waitForQuit(harness: HarnessState): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onQuit: () => void = () => {};
+  try {
+    await new Promise<void>((resolve, reject) => {
+      onQuit = resolve;
+      harness.app.once("harness:quit-ready", onQuit);
+      // Main's diagnostics flush has a 10 s deadline; the harness must
+      // outlive it, but must not hang if app.quit() is never resumed.
+      timer = setTimeout(() => reject(new Error("main.ts did not finish quitting within 15 s")), 15_000);
+      quitApp(harness);
+    });
+  } finally {
+    clearTimeout(timer);
+    harness.app.removeListener("harness:quit-ready", onQuit);
+  }
+}
+
 /** Any member the fakes below do not define is a no-op returning undefined. */
 function lenient<T extends object>(target: T): T {
   return new Proxy(target, {
@@ -320,7 +345,7 @@ export function fakeElectron(): Record<string, unknown> {
     requestSingleInstanceLock: () => true,
     getLoginItemSettings: () => ({ openAtLogin: false }),
     getFileIcon: () => Promise.resolve(fakeImage()),
-    quit: () => undefined,
+    quit: () => quitApp(harness),
     exit: () => undefined,
   }));
   const ipcMain = lenient({
@@ -531,10 +556,11 @@ export async function disposeMainProcess(): Promise<void> {
   try {
     for (const cleanup of beforeDispose.splice(0)) await cleanup();
     stopTimers();
-    harness.app.emit("before-quit");
+    await waitForQuit(harness);
     for (const window of harness.windows) window.destroy();
     await settleFsIo();
     harness.app.emit("will-quit");
+    harness.app.emit("quit");
   } finally {
     for (const cleanup of logCleanups.splice(0)) cleanup();
     stopTimers();

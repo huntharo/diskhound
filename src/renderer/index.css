@@ -4360,6 +4360,43 @@ button, input, select, textarea { font: inherit; }
   word-break: break-word;
 }
 
+/* Settings → Diagnostics: status pills, captured sessions, handoff text. */
+.diagnostics-status {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0 8px;
+}
+.diagnostics-status .perf-status { margin-top: 0; }
+.diagnostics-last-event { padding: 0 12px; }
+/* Full-width rows; .setting-row's align-items would center them. */
+.diagnostics-captures { align-items: stretch; }
+.diagnostics-sessions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.diagnostics-session {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-row);
+}
+.diagnostics-session-name {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.diagnostics-session-meta {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  word-break: break-word;
+}
+.diagnostics-handoff { max-height: 220px; }
+
 /* Toggle switch */
 .toggle {
   position: relative;
@@ -5854,6 +5891,8 @@ button, input, select, textarea { font: inherit; }
   flex-direction: column;
   gap: 6px;
   pointer-events: none;
+  max-height: calc(100vh - 60px);
+  overflow-y: auto;
 }
 
 .toast {
@@ -5870,6 +5909,7 @@ button, input, select, textarea { font: inherit; }
   max-width: 400px;
   pointer-events: auto;
   animation: toast-in 0.25s ease-out;
+  flex-shrink: 0;
   box-shadow: 0 4px 20px rgba(0,0,0,0.3);
 }
 :root.light .toast {
@@ -5893,7 +5933,8 @@ button, input, select, textarea { font: inherit; }
 
 .toast-content { flex: 1; min-width: 0; }
 .toast-title { font-weight: 600; color: var(--text); }
-.toast-body { color: var(--text-secondary); margin-top: 2px; font-size: 11px; }
+.toast-body { color: var(--text-secondary); margin-top: 2px; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.toast-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 
 .toast-close {
   flex-shrink: 0;
