@@ -18,6 +18,7 @@ import {
   emptyDevReport,
   mergeDiagLogHotspots,
 } from "../../shared/devArtifacts";
+import { filterModifiedArtifacts, type ModificationWindow } from "../../shared/devArtifactRecency";
 import { inFlightDeleteBytes } from "../../shared/deleteProgress";
 import { basenameOf, formatScanRoot, normPath } from "../../shared/pathUtils";
 import {
@@ -217,6 +218,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
   const [sortBy, setSortBy] = useState<DevSortBy>("size");
   const [kindFilter, setKindFilter] = useState<DevArtifactKind | "all">("all");
   const [busyPaths, setBusyPaths] = useState<Set<string>>(() => new Set());
+  const [modificationWindow, setModificationWindow] = useState<ModificationWindow>(0);
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
   const [deleteProgress, setDeleteProgress] = useState<DeleteProgress | null>(null);
@@ -413,11 +415,13 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     loadError,
   });
 
+  const eligible = useMemo(() => filterModifiedArtifacts(remaining, modificationWindow, Date.now()), [remaining, modificationWindow]);
+
   const rows = useMemo(() => {
     return kindFilter === "all"
-      ? remaining
-      : remaining.filter((a) => a.kind === kindFilter);
-  }, [remaining, kindFilter]);
+      ? eligible
+      : eligible.filter((a) => a.kind === kindFilter);
+  }, [eligible, kindFilter]);
 
   const summary = useMemo(() => ({
     totalBytes: remaining.reduce((sum, a) => sum + a.size, 0),
@@ -488,8 +492,8 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
   );
 
   const selectableRows = useMemo(() => rows.filter(isSelectable), [rows]);
-  const deletable = useMemo(() => remaining.filter(isSelectable), [remaining]);
-  const skippedRepos = remaining.length - deletable.length;
+  const deletable = selectableRows;
+  const skippedRepos = rows.length - deletable.length;
   const selectedVisible = useMemo(
     () => selectableRows.filter((a) => selected.has(a.path)),
     [selectableRows, selected],
@@ -537,7 +541,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
 
   const deleteMany = async (paths: string[], label: string) => {
     if (paths.length === 0 || !root) return;
-    const targets = artifactsAtPaths(remaining, paths);
+    const targets = artifactsAtPaths(selectableRows, paths);
     if (targets.length === 0) return;
     const totalBytes = targets.reduce((sum, artifact) => sum + artifact.size, 0);
     const targetSharing = summarizeDevSharing(targets);
@@ -550,11 +554,12 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
         : null,
     ));
     if (!ok) return;
+    // Freeze protection controls before the first asynchronous pre-delete check.
+    setBulkBusy(true);
     // Did free space actually move? (macOS; see freedSpaceCheck.ts)
     const freeBefore = await freeBytesBeforeDelete(root, totalBytes);
     let deletedSharedBytes = 0;
     let deletedMeasured = false;
-    setBulkBusy(true);
     let succeeded = 0;
     let failed = 0;
     let deletedBytes = 0;
@@ -1043,6 +1048,23 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
         </div>
       )}
       <div className="dev-toolbar">
+        <label className="dev-toolbar-cluster">
+          <input type="checkbox" checked={modificationWindow !== 0} disabled={bulkBusy}
+            onChange={(event) => { setSelected(new Set()); setModificationWindow(event.currentTarget.checked ? 48 : 0); }} />
+          Exclude recently modified folders
+        </label>
+        <select className="setting-select" aria-label="Modification protection window" value={modificationWindow || 48} disabled={bulkBusy || modificationWindow === 0}
+          onChange={(event) => { setSelected(new Set()); setModificationWindow(Number(event.currentTarget.value) as ModificationWindow); }}>
+          <option value={24}>24 hours</option>
+          <option value={48}>48 hours</option>
+          <option value={168}>1 week</option>
+        </select>
+      </div>
+      {modificationWindow !== 0 && <p className="dev-recency-note">
+        {formatCount(remaining.length - eligible.length)} folders protected: recent file modifications or unknown timestamps.
+        Based on the last scan or refresh; files may have changed since. Use “Rescan trees” to update timestamps.
+      </p>}
+      <div className="dev-toolbar">
         <div className="dev-toolbar-cluster">
           <span className="dev-toolbar-label" id="dev-group-by-label">Group</span>
           <div className="chip-group" role="radiogroup" aria-labelledby="dev-group-by-label">
@@ -1175,6 +1197,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                   ? `Delete all listed developer trees permanently?\n\nGit repos are not included.`
                   : "Delete all listed developer trees permanently?",
               )}
+
             >
               Delete all
             </button>

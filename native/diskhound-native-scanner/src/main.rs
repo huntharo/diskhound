@@ -350,7 +350,7 @@ impl IndexWriter {
                                 Some(acc) => acc
                                     .lock()
                                     .unwrap_or_else(|e| e.into_inner())
-                                    .add(&path, size, extra_hardlink, clone.as_ref()),
+                                    .add(mtime, &path, size, extra_hardlink, clone.as_ref()),
                                 None => None,
                             };
                             if let (Some(attrs), false) = (clone.as_ref(), extra_hardlink) {

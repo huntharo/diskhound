@@ -4,6 +4,7 @@ import * as Path from "node:path";
 
 import type { DevArtifact, DevArtifactCloneInfo, DevArtifactKind, DevArtifactReport } from "./contracts";
 import { classifyArtifactPath } from "./devArtifacts";
+import { validFileMtime, mergeFileMtime } from "./devArtifactRecency";
 import { occupancyBytes } from "./allocatedSize";
 import { basenameOf, dirnameOf, normPath } from "./pathUtils";
 
@@ -14,6 +15,7 @@ export const DEV_ARTIFACTS_SIDECAR_SUFFIX = ".dev-artifacts.json";
 export const DEV_SIDECAR_ROOT_CAP = 2_500;
 
 export interface DevArtifactRootRec {
+  latestFileMtimeMs?: number | null;
   path: string;
   kind: DevArtifactKind;
   size: number;
@@ -87,7 +89,7 @@ export function isProjectMarkerName(fileName: string): boolean {
 }
 
 export function createDevAcc(): {
-  artifacts: Map<string, { kind: DevArtifactKind; size: number; files: number }>;
+  artifacts: Map<string, { kind: DevArtifactKind; size: number; files: number; latestFileMtimeMs?: number | null }>;
   projects: Set<string>;
 } {
   return { artifacts: new Map(), projects: new Set() };
@@ -95,20 +97,22 @@ export function createDevAcc(): {
 
 export type DevAcc = ReturnType<typeof createDevAcc>;
 
-export function noteDevFile(acc: DevAcc, filePath: string, size: number, extraHardlink: boolean): void {
+export function noteDevFile(acc: DevAcc, filePath: string, size: number, extraHardlink: boolean, mtimeMs?: number): void {
   const name = basenameOf(filePath);
   if (isProjectMarkerName(name)) {
     acc.projects.add(dirnameOf(filePath));
   }
   const match = classifyArtifactPath(filePath);
   if (!match) return;
+  const latestFileMtimeMs = validFileMtime(mtimeMs) ? mtimeMs : null;
   const occupancy = extraHardlink ? 0 : size;
   const existing = acc.artifacts.get(match.root);
   if (existing) {
     existing.size += occupancy;
     existing.files += 1;
+    existing.latestFileMtimeMs = mergeFileMtime(existing.latestFileMtimeMs, latestFileMtimeMs);
   } else {
-    acc.artifacts.set(match.root, { kind: match.kind, size: occupancy, files: 1 });
+    acc.artifacts.set(match.root, { kind: match.kind, size: occupancy, files: 1, latestFileMtimeMs });
   }
 }
 
@@ -202,7 +206,7 @@ export function sidecarFromAcc(acc: DevAcc, rootPath: string): DevArtifactSideca
   const roots: DevArtifactRootRec[] = [];
   for (const [path, rec] of acc.artifacts) {
     if (rec.size <= 0) continue;
-    roots.push({ path, kind: rec.kind, size: rec.size, files: rec.files });
+    roots.push({ path, kind: rec.kind, size: rec.size, files: rec.files, latestFileMtimeMs: rec.latestFileMtimeMs });
   }
   roots.sort((a, b) => b.size - a.size);
   return {
@@ -322,6 +326,7 @@ export function sidecarFromReport(report: DevArtifactReport): DevArtifactSidecar
       kind: artifact.kind,
       size: artifact.size,
       files: artifact.fileCount,
+      latestFileMtimeMs: artifact.latestFileMtimeMs,
       ...(artifact.clone ? { clone: artifact.clone } : {}),
     })),
     projects,
@@ -353,6 +358,7 @@ export function reportFromSidecar(
       projectName: projectPath ? basenameOf(projectPath) : "Unscoped",
       size: rec.size,
       fileCount: rec.files,
+      latestFileMtimeMs: rec.latestFileMtimeMs,
       previousSize,
       deltaBytes: previousSize != null ? rec.size - previousSize : null,
       ...(rec.clone ? { clone: rec.clone } : {}),
@@ -465,7 +471,7 @@ export async function writeDevArtifactSidecar(filePath: string, sidecar: DevArti
 async function walkTreeOccupancy(
   root: string,
   onTick?: (delta: { files: number; size: number }) => void,
-): Promise<{ size: number; files: number } | null> {
+): Promise<{ size: number; files: number; latestFileMtimeMs: number | null } | null> {
   try {
     const st = await FSP.lstat(root);
     if (st.isSymbolicLink() || !st.isDirectory()) return null;
@@ -474,6 +480,7 @@ async function walkTreeOccupancy(
   }
   let size = 0;
   let files = 0;
+  let latestFileMtimeMs: number | null = 0;
   let tickFiles = 0;
   let tickSize = 0;
   let lastTick = Date.now();
@@ -493,6 +500,7 @@ async function walkTreeOccupancy(
     try {
       entries = await FSP.readdir(dir, { withFileTypes: true });
     } catch {
+      latestFileMtimeMs = null;
       continue;
     }
     for (const entry of entries) {
@@ -505,6 +513,8 @@ async function walkTreeOccupancy(
       if (!entry.isFile()) continue;
       try {
         const st = await FSP.stat(full);
+        latestFileMtimeMs = latestFileMtimeMs === null || !validFileMtime(st.mtimeMs)
+          ? null : Math.max(latestFileMtimeMs, st.mtimeMs);
         const occ = occupancyBytes(st);
         size += occ;
         files += 1;
@@ -512,7 +522,7 @@ async function walkTreeOccupancy(
         tickSize += occ;
         flush();
       } catch {
-        /* vanished */
+        latestFileMtimeMs = null; // Incomplete walk cannot establish safe recency.
       }
     }
     if (files > 0 && (files & 8191) === 0) {
@@ -520,7 +530,7 @@ async function walkTreeOccupancy(
     }
   }
   flush(true);
-  return { size, files };
+  return { size, files, latestFileMtimeMs };
 }
 
 function pathKey(p: string): string {
@@ -663,8 +673,9 @@ export async function rescanDevArtifactSidecar(
     if (existing) {
       existing.size += walked.size;
       existing.files += walked.files;
+      existing.latestFileMtimeMs = mergeFileMtime(existing.latestFileMtimeMs, walked.latestFileMtimeMs);
     } else {
-      acc.artifacts.set(path, { kind, size: walked.size, files: walked.files });
+      acc.artifacts.set(path, { kind, ...walked });
     }
   }
 

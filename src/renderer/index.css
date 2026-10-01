@@ -9539,6 +9539,13 @@ body.system-widget-body #app {
   padding: 8px 16px;
   border-bottom: 1px solid var(--border);
 }
+.dev-recency-note {
+  margin: 0;
+  padding: 8px 16px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
 .dev-toolbar-cluster {
   display: flex;
   flex-wrap: wrap;
