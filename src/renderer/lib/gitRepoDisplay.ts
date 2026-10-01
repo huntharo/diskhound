@@ -1,4 +1,4 @@
-import type { DevArtifact, DevGitRepoCheck, DevGitRepoInfo } from "../../shared/contracts";
+import type { DevArtifact, DevGitRepoCheck, DevGitRepoInfo, DevWorktreeCheck } from "../../shared/contracts";
 import { basenameOf, dirnameOf } from "../../shared/pathUtils";
 import { isUninformativeParent } from "./devArtifactDisplay";
 import { formatBytes, formatCount } from "./format";
@@ -175,4 +175,79 @@ export function gitRemovalConfirm(input: {
       + `${trash} is emptied, it cannot be recovered.`
     : null;
   return { first: lines.join("\n"), second };
+}
+
+/**
+ * What git found in a worktree that exists nowhere else, one line each.
+ * Empty when git checked it and found nothing: it can go with a bulk
+ * delete. An unknown count is a risk, not a pass.
+ */
+export function worktreeRisks(check: DevWorktreeCheck): string[] {
+  const risks: string[] = [];
+  if (!check.checked) risks.push(check.problem ?? "git could not check it.");
+  if (check.lockReason !== null) {
+    risks.push(`Locked with git worktree lock${check.lockReason ? `: ${check.lockReason}` : ""}.`);
+  }
+  if (!check.checked) return risks;
+  if (check.changedFiles === null) risks.push("Could not check for uncommitted changes.");
+  else if (check.changedFiles > 0) risks.push(`${plural(check.changedFiles, "file")} with uncommitted changes.`);
+  if (check.commitsOnlyHere === null) risks.push("Could not check for commits outside a branch.");
+  else if (check.commitsOnlyHere > 0) {
+    risks.push(`${plural(check.commitsOnlyHere, "commit")} on its detached HEAD ${check.commitsOnlyHere === 1 ? "is" : "are"} on no branch.`);
+  }
+  return risks;
+}
+
+const KEPT_SHOWN = 5;
+
+/**
+ * The bulk-delete confirm's worktree paragraph: how many git cleared, and
+ * the ones held back with their first reason. Held-back worktrees are
+ * deleted one at a time, where the confirm says what would be lost.
+ */
+export function worktreeBulkNote(
+  cleared: number,
+  kept: ReadonlyArray<{ artifact: Pick<DevArtifact, "path">; check: DevWorktreeCheck }>,
+): string {
+  const lines: string[] = [];
+  if (cleared > 0) {
+    lines.push(`Git checked ${plural(cleared, "worktree")}: no uncommitted changes, no commits outside a branch.`);
+  }
+  if (kept.length > 0) {
+    if (lines.length > 0) lines.push("");
+    lines.push(`Not deleted: ${plural(kept.length, "worktree")} with work that exists only there:`);
+    for (const { artifact, check } of kept.slice(0, KEPT_SHOWN)) {
+      lines.push(`    ${basenameOf(artifact.path) || artifact.path} — ${worktreeRisks(check)[0] ?? ""}`);
+    }
+    if (kept.length > KEPT_SHOWN) lines.push(`    …and ${formatCount(kept.length - KEPT_SHOWN)} more`);
+    lines.push("Delete those one at a time to see what would be lost.");
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Confirm text for one worktree git did not clear. It goes to the Trash,
+ * not a permanent delete, since its work exists nowhere else; `second`
+ * is the blunter confirm.
+ */
+export function worktreeRemovalConfirm(input: {
+  artifact: Pick<DevArtifact, "path" | "size">;
+  check: DevWorktreeCheck;
+  trash: string;
+}): { first: string; second: string } {
+  const { artifact, check, trash } = input;
+  const name = basenameOf(artifact.path) || artifact.path;
+  const first = [
+    `Move the ${name} worktree to the ${trash}?`,
+    "",
+    artifact.path,
+    `${formatBytes(artifact.size)}${check.branch ? ` · branch ${check.branch}` : ""}`,
+    "",
+    ...worktreeRisks(check).map((risk) => `⚠ ${risk}`),
+    "",
+    `That work exists only in this worktree. The whole folder goes to the ${trash}; `
+      + `space comes back when you empty the ${trash}.`,
+  ].join("\n");
+  const second = `${name}: are you sure?\n\nOnce the ${trash} is emptied, this worktree's uncommitted work cannot be recovered.`;
+  return { first, second };
 }

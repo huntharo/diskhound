@@ -742,6 +742,26 @@ export interface DevGitRepoCheck {
   linkedWorktrees: string[];
 }
 
+/**
+ * What `git` reports about a linked worktree just before the Dev tab
+ * deletes it. Its commits live in the main repo and stay there, so what
+ * can be lost is the worktree's own: uncommitted files, and commits on a
+ * detached HEAD that no branch holds.
+ */
+export interface DevWorktreeCheck {
+  /** False when git could not answer for this worktree; `problem` says why. */
+  checked: boolean;
+  problem: string | null;
+  /** Its branch, or null when HEAD is detached or unknown. */
+  branch: string | null;
+  /** Modified, staged and untracked paths. Ignored files are not counted. */
+  changedFiles: number | null;
+  /** Commits reachable from its HEAD but from no branch, remote or tag. */
+  commitsOnlyHere: number | null;
+  /** `git worktree lock` reason ("" for a lock without one), or null when not locked. */
+  lockReason: string | null;
+}
+
 export interface DevArtifactReport {
   artifacts: DevArtifact[];
   totalBytes: number;
@@ -1492,6 +1512,8 @@ export interface DiskhoundNativeApi {
   forgetDevArtifactPaths: (rootPath: string, paths: string[]) => Promise<DevArtifactReport | null>;
   /** Run `git` in a `git-repo` row's checkout to find work that is not on a remote. */
   checkGitRepo: (checkoutPath: string) => Promise<DevGitRepoCheck>;
+  /** Run `git` in a linked worktree to find work that exists only there. */
+  checkGitWorktree: (worktreePath: string) => Promise<DevWorktreeCheck>;
   onDevArtifactsProgress: (listener: (progress: DevArtifactsRescanProgress) => void) => () => void;
 
   // Easy Move

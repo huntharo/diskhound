@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import * as FSP from "node:fs/promises";
 import * as Path from "node:path";
 
-import type { DevArtifactReport, DevGitRepoCheck, DevGitRepoInfo } from "./contracts";
+import type { DevArtifactReport, DevGitRepoCheck, DevGitRepoInfo, DevWorktreeCheck } from "./contracts";
 
 /**
  * Remote names and URLs from the text of a `.git/config`. Only
@@ -191,5 +191,76 @@ export async function checkGitRepo(
     stashes: stashes === null ? null : lines(stashes).length,
     // The first entry is the main checkout itself.
     linkedWorktrees: worktreePaths.filter((path, i) => i > 0 && Path.resolve(path).toLowerCase() !== self),
+  };
+}
+
+/**
+ * The admin folder a linked worktree's `.git` file points at
+ * (`<common dir>/worktrees/<name>`), or null when the file is not a
+ * worktree's: a submodule's points into `.git/modules`. A relative
+ * gitdir (`git worktree add --relative-paths`) resolves against the
+ * worktree. Same rule as `worktree_project` in the native scanner's
+ * dev_artifacts.rs.
+ */
+export function worktreeAdminDir(worktreePath: string, gitFile: string): string | null {
+  const line = gitFile.split(/\r?\n/, 1)[0]!.trim();
+  if (!line.startsWith("gitdir:")) return null;
+  const target = line.slice("gitdir:".length).trim();
+  if (!target) return null;
+  const resolved = Path.resolve(worktreePath, target);
+  const parts = resolved.split(/[\\/]+/).filter(Boolean);
+  if (parts.length < 3 || parts[parts.length - 2]!.toLowerCase() !== "worktrees") return null;
+  return resolved;
+}
+
+async function readSmallText(filePath: string): Promise<string | null> {
+  try {
+    return await FSP.readFile(filePath, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function notChecked(problem: string): DevWorktreeCheck {
+  return { checked: false, problem, branch: null, changedFiles: null, commitsOnlyHere: null, lockReason: null };
+}
+
+/**
+ * What would be lost with this linked worktree. Reads its `.git` file,
+ * its admin folder's `HEAD` (gone when the main repo was deleted or the
+ * worktree pruned) and `locked`, then runs three read-only git commands:
+ * the branch, `status`, and the commits only its HEAD reaches.
+ */
+export async function checkGitWorktree(
+  worktreePath: string,
+  git: GitCommand = runGitCommand,
+  readText: (filePath: string) => Promise<string | null> = readSmallText,
+): Promise<DevWorktreeCheck> {
+  const gitFile = await readText(Path.join(worktreePath, ".git"));
+  const adminDir = gitFile === null ? null : worktreeAdminDir(worktreePath, gitFile);
+  if (!adminDir) {
+    return notChecked("It has no .git file pointing at a repository, so git cannot check it.");
+  }
+  if (await readText(Path.join(adminDir, "HEAD")) === null) {
+    return notChecked(`Its repository is gone (${adminDir}), so git cannot check it.`);
+  }
+  const lock = await readText(Path.join(adminDir, "locked"));
+  const base = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
+  const [head, status, onlyHere] = await Promise.all([
+    git(worktreePath, [...base, "rev-parse", "--abbrev-ref", "HEAD"]),
+    git(worktreePath, [...base, "status", "--porcelain", "--untracked-files=normal"]),
+    git(worktreePath, [...base, "rev-list", "--count", "HEAD", "--not", "--branches", "--remotes", "--tags"]),
+  ]);
+  if (head === null) {
+    return { ...notChecked("git could not run here."), lockReason: lock === null ? null : lock.trim() };
+  }
+  const branch = head.trim();
+  return {
+    checked: true,
+    problem: null,
+    branch: branch && branch !== "HEAD" ? branch : null,
+    changedFiles: status === null ? null : lines(status).length,
+    commitsOnlyHere: count(onlyHere),
+    lockReason: lock === null ? null : lock.trim(),
   };
 }

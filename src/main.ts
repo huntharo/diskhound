@@ -68,7 +68,7 @@ import {
   startDiskMonitoring,
 } from "./shared/diskMonitor";
 import { readDevBranch } from "./shared/devBranch";
-import { annotateGitRepos, checkGitRepo } from "./shared/gitRepo";
+import { annotateGitRepos, checkGitRepo, checkGitWorktree } from "./shared/gitRepo";
 import { getStorageAccounting } from "./shared/macStorageAccounting";
 import { createScanSnapshotStore, type SnapshotWriteOptions } from "./shared/scanStore";
 import { createAffinityEnforcer, upsertAffinityRule } from "./shared/affinityEnforcer";
@@ -3585,6 +3585,23 @@ void (async () => {
       `git check git=${check.gitAvailable} remotes=${check.remotes.length} unpushed=${check.unpushedCommits} `
         + `changed=${check.changedFiles} stashes=${check.stashes} worktrees=${check.linkedWorktrees.length}`,
     );
+    return check;
+  });
+
+  // Just before the Dev tab deletes worktree rows: once per selected
+  // worktree, on that click. Logs only the ones held back.
+  ipcMain.handle("diskhound:check-git-worktree", async (_event, worktreePath: unknown) => {
+    if (typeof worktreePath !== "string" || !Path.isAbsolute(worktreePath)) {
+      throw new Error("check-git-worktree needs an absolute worktree path");
+    }
+    const check = await checkGitWorktree(worktreePath);
+    if (!check.checked || check.lockReason !== null || check.changedFiles !== 0 || check.commitsOnlyHere !== 0) {
+      writeCrashLog(
+        "dev-artifacts",
+        `worktree check checked=${check.checked} changed=${check.changedFiles} onlyHere=${check.commitsOnlyHere} `
+          + `locked=${check.lockReason !== null}`,
+      );
+    }
     return check;
   });
 
