@@ -1,6 +1,6 @@
 import * as FS from "node:fs/promises";
 
-import type { FullDiffResult, ScanSnapshot } from "./contracts";
+import type { FullDiffResult, ScanSnapshot, FullDiffProgress, FullDiffWorkProgress } from "./contracts";
 import { hasFullDiffCache, readFullDiffCache, writeFullDiffCache } from "./fullDiffCacheStore";
 import type { FullDiffWorkerInput } from "./fullDiffWorkerProtocol";
 import { getLatestPair } from "./scanHistory";
@@ -17,9 +17,10 @@ import { indexFilePath } from "./scanIndex";
 
 export interface FullDiffLoaderDeps {
   loadSnapshot: (id: string) => Promise<ScanSnapshot | null>;
-  runWorker: (input: FullDiffWorkerInput) => Promise<FullDiffResult | null>;
+  runWorker: (input: FullDiffWorkerInput, onProgress?: (progress: FullDiffWorkProgress) => void) => Promise<FullDiffResult | null>;
   /** Main-thread fallback when the worker fails. */
-  computeInline: (input: FullDiffWorkerInput) => Promise<FullDiffResult | null>;
+  computeInline: (input: FullDiffWorkerInput, onProgress?: (progress: FullDiffWorkProgress) => void) => Promise<FullDiffResult | null>;
+  onProgress?: (progress: FullDiffProgress) => void;
   log: (tag: string, message: string) => void;
 }
 
@@ -38,11 +39,12 @@ export interface FullDiffLoader {
   /** Whether a full diff for this pair is on disk; asks the disk once per pair. */
   hasOnDisk: (baselineId: string, currentId: string, limit: number) => Promise<boolean>;
   /** Computes the latest pair's diff in the background, after a scan. */
-  warmLatest: (rootPath: string) => Promise<FullDiffResult | null> | null;
+  warmLatest: (rootPath: string, snapshot?: ScanSnapshot) => Promise<FullDiffResult | null> | null;
   /** Drops what the loader holds for a scan that is pruned or cleared. */
   forgetScan: (id: string) => void;
   /** Memory-cache entries, for the memory diagnostics line. */
   memoryEntries: () => number;
+  getProgress: () => FullDiffProgress[];
 }
 
 // Full diffs are capped at the requested limit (1,000 changes from
@@ -67,6 +69,8 @@ export function normalizeDiffLimit(limit?: number): number {
 }
 
 export function createFullDiffLoader(deps: FullDiffLoaderDeps): FullDiffLoader {
+  const progressByPair = new Map<string, FullDiffProgress>();
+  let revision = 0;
   const fullDiffCache = new Map<string, FullDiffResult | null>();
   const fullDiffInflight = new Map<string, Promise<FullDiffResult | null>>();
   /**
@@ -112,6 +116,7 @@ export function createFullDiffLoader(deps: FullDiffLoaderDeps): FullDiffLoader {
     currentId: string,
     limit?: number,
     options?: FullDiffLoadOptions,
+    warmSnapshot?: ScanSnapshot,
   ): Promise<FullDiffResult | null> => {
     const normalizedLimit = normalizeDiffLimit(limit);
     const cacheKey = cacheKeyFor(baselineId, currentId, normalizedLimit);
@@ -124,6 +129,28 @@ export function createFullDiffLoader(deps: FullDiffLoaderDeps): FullDiffLoader {
     if (existing) {
       return existing;
     }
+
+    let currentSnapshot = warmSnapshot;
+    let isLatestPair = Boolean(warmSnapshot);
+    const progressKey = `${baselineId}::${currentId}`;
+    const publish = (work: FullDiffWorkProgress, status: FullDiffProgress["status"] = "running") => {
+      if (!currentSnapshot?.rootPath) return;
+      const progress: FullDiffProgress = {
+        ...work, rootPath: currentSnapshot.rootPath, baselineId, currentId,
+        scanStartedAt: currentSnapshot.startedAt, isLatestPair, status, revision: ++revision,
+      };
+      progressByPair.delete(progressKey);
+      progressByPair.set(progressKey, progress);
+      // Retain terminal states for windows opened just after completion;
+      // never evict work a newly opened window needs to join.
+      if (progressByPair.size > 32) {
+        for (const [key, value] of progressByPair) {
+          if (value.status !== "running") { progressByPair.delete(key); break; }
+        }
+      }
+      deps.onProgress?.(progress);
+    };
+    publish({ phase: "sorting", fraction: 0, completed: 0, total: 0 });
 
     const pending = (async () => {
       const signature = `${await indexSignature(baselineId)}|${await indexSignature(currentId)}`;
@@ -177,6 +204,10 @@ export function createFullDiffLoader(deps: FullDiffLoaderDeps): FullDiffLoader {
         return emptyResult;
       }
 
+      currentSnapshot = currSnap ?? undefined;
+      const latest = currSnap?.rootPath ? getLatestPair(currSnap.rootPath) : null;
+      isLatestPair ||= latest?.baseline.id === baselineId && latest?.current.id === currentId;
+      publish({ phase: "sorting", fraction: 0, completed: 0, total: 0 });
       const input: FullDiffWorkerInput = {
         baselineId,
         currentId,
@@ -187,14 +218,14 @@ export function createFullDiffLoader(deps: FullDiffLoaderDeps): FullDiffLoader {
 
       let result: FullDiffResult | null = null;
       try {
-        result = await deps.runWorker(input);
+        result = await deps.runWorker(input, publish);
       } catch (err) {
         deps.log("full-diff-worker", err instanceof Error ? (err.stack ?? err.message) : String(err));
         // Fallback: run inline on the main thread. Still slow for big
         // indexes but at least produces a result rather than leaving
         // the user stuck on "preparing…" forever.
         try {
-          result = await deps.computeInline(input);
+          result = await deps.computeInline(input, publish);
         } catch (fallbackErr) {
           deps.log(
             "full-diff-inline",
@@ -226,7 +257,13 @@ export function createFullDiffLoader(deps: FullDiffLoaderDeps): FullDiffLoader {
         }
       }
       return result;
-    })().finally(() => {
+    })().then((result) => {
+      publish({ phase: "merging", fraction: result ? 1 : 0, completed: 0, total: 0 }, result ? "complete" : "error");
+      return result;
+    }, (error) => {
+      publish({ phase: "merging", fraction: 0, completed: 0, total: 0 }, "error");
+      throw error;
+    }).finally(() => {
       fullDiffInflight.delete(cacheKey);
     });
 
@@ -255,14 +292,14 @@ export function createFullDiffLoader(deps: FullDiffLoaderDeps): FullDiffLoader {
     }
   };
 
-  const warmLatest = (rootPath: string) => {
+  const warmLatest = (rootPath: string, snapshot?: ScanSnapshot) => {
     const latestPair = getLatestPair(rootPath);
     if (!latestPair) return null;
-    return load(latestPair.baseline.id, latestPair.current.id, 1000).catch(() => {
+    return load(latestPair.baseline.id, latestPair.current.id, 1000, undefined, snapshot).catch(() => {
       // best effort background warmup
       return null;
     });
   };
 
-  return { load, hasOnDisk, warmLatest, forgetScan, memoryEntries: () => fullDiffCache.size };
+  return { load, hasOnDisk, warmLatest, forgetScan, memoryEntries: () => fullDiffCache.size, getProgress: () => [...progressByPair.values()] };
 }

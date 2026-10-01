@@ -49,6 +49,8 @@ describe("scan snapshot store (last-scan.json)", () => {
 
     const { io } = await measureFsIo(async () => {
       for (const snapshot of progressSnapshots(done, 450)) await store.set(snapshot);
+      await store.set({ ...done, status: "running", scanPhase: "finalizing", finalizingStep: "writing_folder_tree" });
+      await store.set({ ...done, status: "running", scanPhase: "finalizing", finalizingStep: "classifying_dev_artifacts" });
       await store.set(done);
     });
 

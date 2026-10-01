@@ -10,6 +10,26 @@ import {
   type PowerEfficiency,
 } from "./powerEfficiency";
 
+/** In-memory progress only; never persisted with scan history. */
+export interface FullDiffWorkProgress {
+  phase: "sorting" | "merging";
+  fraction: number;
+  completed: number;
+  total: number;
+}
+
+export interface FullDiffProgress extends FullDiffWorkProgress {
+  rootPath: string;
+  baselineId: string;
+  currentId: string;
+  scanStartedAt: number | null;
+  /** Historical comparisons only affect their Changes panel. */
+  isLatestPair: boolean;
+  status: "running" | "complete" | "error";
+  /** Monotonic within the main process, including retries. */
+  revision: number;
+}
+
 export type ScanStatus = "idle" | "running" | "done" | "cancelled" | "error";
 export type ScanEngine = "js-worker" | "native-sidecar" | "usn-journal";
 
@@ -149,6 +169,7 @@ export interface ScanSnapshot {
    *  right status text and progress-bar denominator. Optional because
    *  older snapshots (walker path, pre-0.3.15) don't populate it. */
   scanPhase?: ScanPhase;
+  finalizingStep?: "finishing_index" | "writing_folder_tree" | "flushing_index" | "classifying_dev_artifacts" | null;
   /** Total file count the scanner expects to emit, set once the MFT
    *  fast path has counted records. Lets the UI draw a files-based
    *  progress bar during the `indexing` phase where byte-based progress
@@ -1626,6 +1647,8 @@ export interface DiskhoundNativeApi {
   onWindowShownChanged: (listener: (shown: boolean) => void) => () => void;
 
   // Events
+  getFullDiffProgress: () => Promise<FullDiffProgress[]>;
+  onFullDiffProgress: (listener: (progress: FullDiffProgress) => void) => () => void;
   onScanSnapshot: (listener: (snapshot: ScanSnapshot) => void) => () => void;
   onDiskDelta: (listener: (delta: DiskDelta) => void) => () => void;
   onNotification: (listener: (message: ToastMessage) => void) => () => void;

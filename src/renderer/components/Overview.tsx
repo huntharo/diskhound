@@ -45,7 +45,11 @@ import { Treemap } from "./Treemap";
 const MONITORING_NUDGE_DISMISSED_KEY = "diskhound:monitoring-nudge-dismissed";
 const TREEMAP_FOLDERS_STORAGE_KEY = "diskhound:treemap-folders";
 
+import { ScanProgress } from "./ScanProgress";
+import type { ScanDisplayProgress } from "../lib/scanProgress";
+
 interface Props {
+  progress: ScanDisplayProgress;
   snapshot: ScanSnapshot;
   onFilterExtension: (ext: string) => void;
   /** Switch to the Changes view. Called from the LatestScanSummary
@@ -125,7 +129,7 @@ function getInitialShowFolders(): boolean {
 // canvas render performance.
 const DENSE_TREEMAP_LIMIT = 5_000;
 
-export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev, scanPercent, drives, onOpenDrive }: Props) {
+export function Overview({ progress, snapshot, onFilterExtension, onViewChanges, onViewDev, scanPercent, drives, onOpenDrive }: Props) {
   const { bytesSeen, filesVisited, directoriesVisited, skippedEntries } = snapshot;
   const storageTotal = overviewStorageTotal(snapshot);
   // Live-ticking elapsed: during a running scan the snapshot only updates
@@ -141,7 +145,7 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
     ? liveNow - snapshot.startedAt
     : snapshot.elapsedMs;
   // Use the caller-supplied scanPercent directly — App.tsx's
-  // scanProgressFraction already switches to a files-based fraction
+  // shared progress helper already switches to a files-based fraction
   // during the indexing phase, so the header PROGRESS metric, the
   // drive pill, and the scan stripe at the top of the window all track
   // the same linear value instead of diverging (98% vs 69% etc).
@@ -317,6 +321,7 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
   return (
     <div className="overview">
       <MonitoringNudge />
+      {(progress.active || progress.label === "Comparison unavailable") && <ScanProgress progress={progress} />}
       <div className="metrics-strip">
         <Metric
           value={formatBytes(storageTotal.primaryBytes)}
@@ -338,7 +343,7 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
         {/* Progress metric — only rendered during live scans when we
          * have a real ratio. Shows both the number AND a thin fill
          * bar so users have a visual sense of pace at a glance. */}
-        {snapshot.status === "running" && typeof headerProgressPct === "number" && (
+        {progress.active && typeof headerProgressPct === "number" && (
           <div className="metric metric-progress">
             <span className="metric-value accent">{headerProgressPct}%</span>
             <span className="metric-label">progress</span>
@@ -549,19 +554,8 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
                     const hasFiles = snapshot.filesVisited > 0;
                     const phase = snapshot.scanPhase;
                     const expected = snapshot.expectedTotalFiles;
-                    // Phase-aware title. During "finalizing" we know the
-                    // heavy work is done — tell the user that directly
-                    // rather than leaving them on "Scanning..." while
-                    // folder-tree / index cleanup wraps up.
-                    // Single title for the whole running-scan lifecycle.
-                    // Earlier we swapped between "Starting" / "Reading
-                    // metadata" / "Scanning" / "Finalizing" — each
-                    // transition was a visible text flash that users
-                    // read as a glitch. Phase-specific detail now goes
-                    // in the subtitle (which has a persistent elapsed
-                    // counter so the flash is absorbed), keeping the
-                    // title stable from scan-start to completion.
-                    const title = `Scanning ${snapshot.rootPath}…`;
+                    // Match the header and widget throughout finalization.
+                    const title = `${progress.label} ${snapshot.rootPath}…`;
                     // Phase-specific pre-scan copy. We dispatch on
                     // `phase` FIRST (what's actually happening) and
                     // only use elapsed time as a secondary qualifier
@@ -615,7 +609,7 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
                     }
                     const sub =
                       phase === "finalizing"
-                        ? `Building folder tree and flushing index — almost done (${formatElapsed(displayElapsedMs)} elapsed).`
+                        ? `${progress.detail} · ${formatElapsed(displayElapsedMs)} elapsed`
                         : filesFraction !== null
                           ? `${filesFraction} · ${formatBytes(snapshot.bytesSeen)} · ${formatElapsed(displayElapsedMs)} elapsed`
                           : hasFiles

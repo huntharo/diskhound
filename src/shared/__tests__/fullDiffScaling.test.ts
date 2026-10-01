@@ -57,7 +57,7 @@ async function diffWork(files: number, limit: number): Promise<number> {
     caseSensitive: true,
     limit,
     sortChunkRecords: RUN_RECORDS,
-  });
+  }, { onProgress: () => { fullDiffWork.steps += 1; } });
   expect(result?.totalChanges).toBeGreaterThan(0);
   return fullDiffWork.steps;
 }

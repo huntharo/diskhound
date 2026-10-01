@@ -10005,3 +10005,20 @@ body.system-widget-body #app {
   .dev-summary-actions { margin-left: 0; }
   .dev-select-bar { padding-left: 12px; padding-right: 12px; }
 }
+
+
+/* One progress treatment for scan finalization and the background comparison. */
+.phase-progress-track { height: 4px; width: 100%; overflow: hidden; border-radius: 3px; background: var(--border); }
+.phase-progress-fill { height: 100%; background: var(--amber); transition: width 180ms linear; }
+.phase-progress-track.indeterminate .phase-progress-fill { width: 32%; animation: phase-progress-slide 1.4s ease-in-out infinite; }
+@keyframes phase-progress-slide { from { transform: translateX(-100%); } to { transform: translateX(415%); } }
+.scan-phase-card { padding: 12px 16px; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 12px; }
+.scan-phase-heading { color: var(--text); display: flex; align-items: center; justify-content: space-between; gap: 16px; font-size: 12px; }
+.scan-phase-detail { color: var(--text-secondary); font-size: 11px; margin-top: 5px; }
+.scan-phase-card .phase-progress-track { margin-top: 10px; }
+.changes-empty-detail .scan-phase-card { width: min(400px, 100%); text-align: left; margin: 0 auto; }
+.system-widget-scan-phase { margin: 5px 0 8px; font-size: 11px; color: var(--text-secondary); }
+@media (prefers-reduced-motion: reduce) {
+  .phase-progress-track.indeterminate .phase-progress-fill { animation: none; width: 100%; opacity: 0.5; }
+  .phase-progress-fill { transition: none; }
+}

@@ -268,7 +268,7 @@ describe("Changes tab", () => {
   it("revisits diff modes, ranges, baselines and tabs from memory", async () => {
     let view!: HTMLElement;
     const mount = async () => {
-      view = ui.mount(h(ChangesView, { rootPath: ROOT, snapshot, drives: [] }));
+      view = ui.mount(h(ChangesView, { rootPath: ROOT, snapshot, drives: [], comparisons: [] }));
       await ui.settle();
     };
     // What a user flicks through. Every click picks a scan pair, and
@@ -326,7 +326,10 @@ describe("Changes tab", () => {
 
 describe("Overview tab", () => {
   it("switches treemap layouts and filters, and hovers the treemap, without asking main", async () => {
-    const view = ui.mount(h(Overview, { snapshot, onFilterExtension: () => undefined, drives: [] }));
+    const view = ui.mount(h(Overview, {
+      snapshot, onFilterExtension: () => undefined, drives: [],
+      progress: { active: false, label: "Complete", detail: "", percent: 100 },
+    }));
     await ui.settle();
     // Expanding the dominant files mounts cards with larger icons. Warm them.
     const featured = view.querySelector(".treemap-featured-header");

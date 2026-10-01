@@ -1,3 +1,5 @@
+import { useFullDiffProgress } from "./lib/useFullDiffProgress";
+import { scanDisplayProgress } from "./lib/scanProgress";
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { owningDrive, rootKeyFor } from "./lib/driveMatch";
 
@@ -123,6 +125,7 @@ function rootKey(rootPath: string | null | undefined): string {
 
 export function App() {
   useSizeUnitBase();
+  const comparisons = useFullDiffProgress();
   // Per-root snapshot store — allows concurrent scans on different drives
   // and lets users switch drive views without losing each drive's state.
   // Each entry is the latest known snapshot for that root (from fresh
@@ -249,64 +252,8 @@ export function App() {
     return () => ro.disconnect();
   }, [drives.length]);
 
-  /**
-   * Compute an approximate scan-progress fraction [0, 0.99] for a
-   * given root. Uses `bytesSeen / usedBytes` where `usedBytes =
-   * totalBytes - freeBytes` for the drive the root lives on. Returns
-   * null for non-running snapshots, roots we can't match to a known
-   * drive (network mounts, folders outside any detected drive), and
-   * the first sample before any bytes have been counted.
-   *
-   * Clamped to 0.99 max because `bytesSeen` can exceed `usedBytes`
-   * slightly on filesystems where free-space accounting and summed
-   * file sizes diverge (NTFS sparse / hardlinked files, metadata
-   * overhead). Showing "103% scanned" reads as broken — 99% at most
-   * until the Done snapshot arrives.
-   */
-  const scanProgressFraction = useCallback(
-    (snap: ScanSnapshot): number | null => {
-      if (snap.status !== "running" || !snap.rootPath) {
-        return null;
-      }
-      // Finalizing phase: scanner has stopped walking, is now writing
-      // the folder-tree sidecar + flushing the index. Return null so
-      // the drive pill / stripe go indeterminate instead of sitting at
-      // the misleading "98%" the previous run ended on.
-      if (snap.scanPhase === "finalizing") {
-        return null;
-      }
-      // During the indexing phase the scanner pre-sorts records
-      // biggest-first, so bytes saturate the progress near 100% while
-      // millions of small files are still streaming. Prefer a
-      // files-based fraction here so the drive pill, scan stripe, and
-      // header PROGRESS metric all track the same linear thing. Falls
-      // back to bytes-based when expected file count isn't known (walker
-      // path or pre-indexing phases).
-      if (
-        snap.scanPhase === "indexing"
-        && typeof snap.expectedTotalFiles === "number"
-        && snap.expectedTotalFiles > 0
-      ) {
-        const frac = snap.filesVisited / snap.expectedTotalFiles;
-        if (!Number.isFinite(frac)) return null;
-        return Math.min(0.99, Math.max(0, frac));
-      }
-      if (snap.bytesSeen <= 0) return null;
-      const drive = drives.find((d) =>
-        snap.rootPath!.toLowerCase().startsWith(d.drive.toLowerCase()),
-      );
-      if (!drive || !drive.usedBytes || drive.usedBytes <= 0) return null;
-      const raw = snap.bytesSeen / drive.usedBytes;
-      if (!Number.isFinite(raw)) return null;
-      return Math.min(0.99, Math.max(0, raw));
-    },
-    [drives],
-  );
-
-  const currentScanPercent = useMemo(() => {
-    const frac = scanProgressFraction(snapshot);
-    return frac === null ? null : Math.round(frac * 100);
-  }, [snapshot, scanProgressFraction]);
+  const displayProgress = scanDisplayProgress(snapshot, drives, comparisons, nativeApi.platform);
+  const currentScanPercent = displayProgress.active ? displayProgress.percent : null;
 
   // Longest mount wins. A scan of `/` must not light every pill
   // (every Linux path starts with `/`), and `/home/tom` belongs to
@@ -315,15 +262,6 @@ export function App() {
   const viewedDrive = rootPath
     ? owningDrive(drivePaths, rootPath, nativeApi.platform)
     : null;
-  const scanningDrives = useMemo(() => {
-    const owned = new Set<string>();
-    for (const key of activeScanKeys) {
-      const drive = owningDrive(drivePaths, key, nativeApi.platform);
-      if (drive) owned.add(drive);
-    }
-    return owned;
-  }, [activeScanKeys, drivePaths]);
-
   const applyResolvedTheme = useCallback((resolved: "dark" | "light") => {
     const root = document.documentElement;
     root.classList.remove("light", "dark");
@@ -895,23 +833,7 @@ export function App() {
     return { ...snapshot, largestFiles: indexSearchHits };
   }, [searchQuery, indexSearchHits, searchFilteredSnapshot, snapshot]);
 
-  const statusLabel = useMemo(() => {
-    switch (snapshot.status) {
-      case "running":
-        // Differentiate the last 30-60s of a scan — the scanner has
-        // stopped walking and is writing the folder-tree sidecar +
-        // flushing the gzipped index. Without this the top-bar label
-        // said "Scanning" for a full minute after the progress bar
-        // hit 100%, which looked stuck to the user.
-        if (snapshot.scanPhase === "finalizing") return "Finalizing";
-        if (snapshot.scanPhase === "reading_metadata") return "Reading metadata";
-        return "Scanning";
-      case "done": return "Complete";
-      case "cancelled": return "Stopped";
-      case "error": return "Error";
-      default: return "Ready";
-    }
-  }, [snapshot.status, snapshot.scanPhase]);
+  const statusLabel = displayProgress.label;
 
   const updateBannerVisible =
     updateStatus?.phase === "downloaded" ||
@@ -931,7 +853,7 @@ export function App() {
          * baseline-load / first-file phase, then converts to a real
          * progress fill the moment we have a bytesSeen-vs-usedBytes
          * ratio we can trust. */}
-        <div className={`scan-stripe ${snapshot.status === "running" ? "active" : ""} ${currentScanPercent !== null ? "determinate" : ""}`}>
+        <div className={`scan-stripe ${displayProgress.active ? "active" : ""} ${currentScanPercent !== null ? "determinate" : ""}`}>
           {currentScanPercent !== null && (
             <div
               className="scan-stripe-fill"
@@ -1135,16 +1057,22 @@ export function App() {
             className={`drive-pills ${drivePillsOverflowing ? "overflowing" : ""}`}
           >
             {drives.map((d) => {
-              const isScanning = scanningDrives.has(d.drive);
               const isViewed = viewedDrive === d.drive;
-              const pillScanPercent =
-                isScanning && isViewed ? currentScanPercent : null;
+              const driveSnapshot = isViewed && displayProgress.active ? snapshot : [...snapshotsByRoot.values()].find((snap) =>
+                owningDrive(drivePaths, snap.rootPath ?? "", nativeApi.platform) === d.drive
+                && scanDisplayProgress(snap, drives, comparisons, nativeApi.platform).active);
+              const pillProgress = driveSnapshot
+                ? scanDisplayProgress(driveSnapshot, drives, comparisons, nativeApi.platform) : null;
+              const isScanning = pillProgress?.active || [...activeScanKeys].some((key) =>
+                owningDrive(drivePaths, key, nativeApi.platform) === d.drive);
+              const pillScanPercent = pillProgress?.active ? pillProgress.percent : null;
               return (
                 <DrivePill
                   key={d.drive}
                   drive={d}
                   active={isViewed}
                   scanning={isScanning}
+                  phaseLabel={pillProgress?.label ?? "Scanning"}
                   scanPercent={pillScanPercent}
                   onScan={() => void handleScanDrive(d.drive)}
                 />
@@ -1270,13 +1198,15 @@ export function App() {
             </span>
           )}
           <div className="tab-status">
-            <span className={`status-dot ${snapshot.status}`} />
+            <span className={`status-dot ${displayProgress.active ? "running" : snapshot.status}`} />
             <span>{statusLabel}</span>
-            {snapshot.status === "running" && (
+            {displayProgress.active && (
               <>
                 <span>&middot;</span>
                 <span className="scan-progress-ticker">
-                  {snapshot.filesVisited > 0
+                  {displayProgress.detail || snapshot.status === "done"
+                    ? `${displayProgress.detail}${currentScanPercent !== null ? ` · ${currentScanPercent}%` : ""}`
+                    : snapshot.filesVisited > 0
                     ? `${snapshot.filesVisited.toLocaleString()} files · ${formatBytes(snapshot.bytesSeen)}${currentScanPercent !== null ? ` · ${currentScanPercent}%` : ""}`
                     : "preparing…"}
                 </span>
@@ -1294,7 +1224,7 @@ export function App() {
             />
           ) : (
             <>
-              {view === "overview" && <ErrorBoundary name="Overview"><Overview snapshot={snapshot} onFilterExtension={onFilterExtension} onViewChanges={() => setView("changes")} onViewDev={() => setView("dev")} scanPercent={currentScanPercent} drives={drives} onOpenDrive={(path) => void handleScanDrive(path)} /></ErrorBoundary>}
+              {view === "overview" && <ErrorBoundary name="Overview"><Overview progress={displayProgress} snapshot={snapshot} onFilterExtension={onFilterExtension} onViewChanges={() => setView("changes")} onViewDev={() => setView("dev")} scanPercent={currentScanPercent} drives={drives} onOpenDrive={(path) => void handleScanDrive(path)} /></ErrorBoundary>}
               {view === "files" && <ErrorBoundary name="File List"><FileList snapshot={indexSearchSnapshot} initialFilter={filterExt} onRescan={() => void doScan(indexSearchSnapshot.rootPath ?? rootPath)} /></ErrorBoundary>}
               {view === "folders" && (
                 <ErrorBoundary name="Folders">
@@ -1342,7 +1272,7 @@ export function App() {
                   />
                 </ErrorBoundary>
               )}
-              {view === "changes" && <ErrorBoundary name="Changes"><ChangesView rootPath={snapshot.rootPath} snapshot={snapshot} drives={drives} /></ErrorBoundary>}
+              {view === "changes" && <ErrorBoundary name="Changes"><ChangesView comparisons={comparisons} rootPath={snapshot.rootPath} snapshot={snapshot} drives={drives} /></ErrorBoundary>}
               {view === "easyMove" && <ErrorBoundary name="Easy Move"><EasyMoveView /></ErrorBoundary>}
               {view === "memory" && <ErrorBoundary name="Processes"><MemoryView /></ErrorBoundary>}
               {view === "diskIo" && <ErrorBoundary name="Disk I/O"><DiskIoView /></ErrorBoundary>}
@@ -1362,11 +1292,11 @@ export function App() {
               <span className="status-bar-stat">{snapshot.filesVisited.toLocaleString()} files</span>
               <span>&middot;</span>
               <span className="status-bar-stat">{snapshot.directoriesVisited.toLocaleString()} dirs</span>
-              {currentScanPercent !== null && (
+              {displayProgress.active && (
                 <>
                   <span>&middot;</span>
                   <span className="status-bar-stat status-bar-scan-percent">
-                    {currentScanPercent}% scanned
+                    {displayProgress.label}{currentScanPercent !== null ? ` · ${currentScanPercent}%` : ""}
                   </span>
                 </>
               )}
@@ -1428,17 +1358,18 @@ export function App() {
   );
 }
 
-function DrivePill({ drive, active, scanning, scanPercent, onScan }: {
+function DrivePill({ drive, active, scanning, scanPercent, phaseLabel, onScan }: {
   drive: DiskSpaceInfo;
   active: boolean;
   scanning: boolean;
   scanPercent: number | null;
+  phaseLabel: string;
   onScan: () => void;
 }) {
   const pct = driveUsedPercent(drive);
   const level = pct > 90 ? "high" : pct > 70 ? "mid" : "low";
   const title = scanning
-    ? `${drive.drive} — scanning${scanPercent !== null ? ` (${scanPercent}%)` : ""}. Click to view.`
+    ? `${drive.drive} — ${phaseLabel}${scanPercent !== null ? ` (${scanPercent}%)` : ""}. Click to view.`
     : `View ${drive.drive} (${formatDriveSpace(drive)})`;
 
   return (
@@ -1464,8 +1395,8 @@ function DrivePill({ drive, active, scanning, scanPercent, onScan }: {
         )}
       </div>
       <span className="drive-pill-free">
-        {scanning && scanPercent !== null
-          ? `${scanPercent}%`
+        {scanning
+          ? `${phaseLabel}${scanPercent !== null ? ` · ${scanPercent}%` : ""}`
           : <>
               {formatBytes(drive.availableBytes ?? drive.freeBytes)} {driveSpaceLabel(drive)}
               {drive.availableBytes !== undefined && drive.purgeableBytes !== undefined && (

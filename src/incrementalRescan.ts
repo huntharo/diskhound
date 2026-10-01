@@ -31,7 +31,7 @@ export interface IncrementalRescanDeps {
   /** A history entry's snapshot, from main.ts's cache when it has it. */
   loadSnapshot: (id: string) => Promise<ScanSnapshot | null>;
   /** Starts the background full diff of the latest pair. */
-  warmFullDiff: (rootPath: string) => void;
+  warmFullDiff: (rootPath: string, snapshot?: ScanSnapshot) => void;
   /** In-memory side of a new history entry whose index is in place. */
   onCommitted: (rootPath: string, historyId: string) => void;
   /** In-memory side of a scan that fell out of retention. */
@@ -199,9 +199,9 @@ export async function runIncrementalRescan(
 
   dropPrunedScans({ onPruned: deps.onPruned });
 
+  deps.warmFullDiff(rootPath, result.snapshot);
   await deps.publishSnapshot(result.snapshot);
   deps.markFullScan();
-  deps.warmFullDiff(rootPath);
 
   // Persist the new cursor so the NEXT tick picks up from here.
   await setCursor(result.newCursor);

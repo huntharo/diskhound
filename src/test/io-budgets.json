@@ -361,6 +361,26 @@
     "open": 0,
     "observedBytesWritten": 485
   },
+  "full-diff-progress": {
+    "note": "400 progress messages (100 s at 4/s), a Changes load joining the warm, and a late window reading progress: 0 writes, 0 MB/day at both the 6-hour default and the 1-minute interval. The existing diff runs and result cache retain their separate budgets.",
+    "writeFile": 0,
+    "appendFile": 0,
+    "rename": 0,
+    "copyFile": 0,
+    "link": 0,
+    "mkdir": 0,
+    "createWriteStream": 0,
+    "unlink": 0,
+    "readFile": 0,
+    "readdir": 0,
+    "stat": 0,
+    "lstat": 0,
+    "access": 0,
+    "existsSync": 0,
+    "createReadStream": 0,
+    "open": 0,
+    "observedBytesWritten": 0
+  },
   "full-diff-retry-after-failure": {
     "note": "asking again for a pair whose diff failed in the worker and inline: 2 stats and 0 writes, since the failure is remembered against both indexes' size and mtime. Was both indexes' runs written again: 2 × 0.82 MB here and ~0.58 GB at 7M files per retry, and 2 × 10.6 MB and ~7.4 GB before the runs were deflated",
     "writeFile": 0,
