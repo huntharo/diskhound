@@ -133,7 +133,8 @@ test("lists Git repos with their remotes and moves one to the Trash only after t
   await worktree.getByRole("button", { name: "Delete" }).click();
   await expect(rows).toHaveCount(1);
   expect(dialogs).toHaveLength(2);
-  expect(dialogs[0]).toContain("Move the openclaw-feat worktree to the Trash?");
+  // "Recycle Bin" on Windows.
+  expect(dialogs[0]).toMatch(/^Move the openclaw-feat worktree to the (Trash|Recycle Bin)\?/);
   expect(dialogs[0]).toContain("repository is gone");
   expect(dialogs[1]).toContain("cannot be recovered");
   expect(await handle.app.evaluate(() => (globalThis as typeof globalThis & { trashed?: string[] }).trashed))
