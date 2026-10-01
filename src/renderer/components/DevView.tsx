@@ -27,7 +27,7 @@ import {
   userDataSnapshots,
   type DevArtifactSharing,
 } from "../../shared/storageSharing";
-import { artifactDeltaLabel, artifactHeadline, artifactTail } from "../lib/devArtifactDisplay";
+import { artifactDeltaLabel, artifactHeadline, artifactTail, worktreeNestedNote } from "../lib/devArtifactDisplay";
 import { devReclaimDisplay } from "../lib/devReclaimDisplay";
 import {
   artifactsAtPaths,
@@ -1210,6 +1210,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                 const repo = artifact.kind === "git-repo";
                 const remote = repo ? gitRemoteBadge(artifact.git) : null;
                 const removalBlock = repo ? gitRepoRemovalBlock(artifact, root) : null;
+                const nested = worktreeNestedNote(artifact);
                 return (
                 <div
                   key={artifact.path}
@@ -1235,6 +1236,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                       <span className="dev-row-tail" title={artifact.path}>{artifactTail(artifact)}</span>
                       {groupBy !== "kind" ? ` · ${DEV_KIND_SHORT[artifact.kind]}` : ""}
                       {` · ${formatCount(artifact.fileCount)} files`}
+                      {nested && <span title={nested.title}>{` · ${nested.label}`}</span>}
                       {artifact.deltaBytes != null && artifact.deltaBytes !== 0 ? (
                         <span className={artifact.deltaBytes > 0 ? "dev-delta-up" : "dev-delta-down"}>
                           {` · ${artifactDeltaLabel(artifact.deltaBytes)}`}

@@ -691,6 +691,24 @@ export interface DevArtifact {
   clone?: DevArtifactCloneInfo;
   /** `git-repo` rows only: what main read from the repo's `.git/config`. */
   git?: DevGitRepoInfo;
+  /** `worktree` rows only. */
+  worktree?: DevWorktreeInfo;
+}
+
+/**
+ * A `worktree` row is the whole linked checkout: `size`, `fileCount` and
+ * `clone` cover every file in it, so the row says what removing it frees.
+ * Trees inside it (node_modules, target, ...) are part of the row, not
+ * rows of their own, so no byte is counted twice.
+ */
+export interface DevWorktreeInfo {
+  /**
+   * The main checkout (or bare repo) the worktree's `.git` file points
+   * at. Absent for a `.worktrees/<name>` folder without a readable one.
+   */
+  project?: string;
+  /** Bytes of the trees inside the worktree, by kind. Already in `size`. */
+  nestedSize?: Partial<Record<DevArtifactKind, number>>;
 }
 
 /**

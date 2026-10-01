@@ -10,6 +10,7 @@ import {
   isUninformativeParent,
   shortenUnscopedParent,
   shortenVisiblePath,
+  worktreeNestedNote,
 } from "../devArtifactDisplay";
 
 function artifact(partial: Partial<DevArtifact> & Pick<DevArtifact, "path">): DevArtifact {
@@ -255,5 +256,39 @@ describe("artifact display", () => {
     expect(shortenUnscopedParent("/opt/tools")).toBe("opt/tools");
     expect(shortenUnscopedParent("/var/lib/tools/cache")).toBe("lib/tools/cache");
     expect(shortenUnscopedParent("C:\\ProgramData\\tools\\cache\\x")).toBe("tools\\cache\\x");
+  });
+});
+
+describe("linked worktree rows", () => {
+  const row: DevArtifact = {
+    path: "/Users/me/claude-worktrees/app/feat",
+    kind: "worktree",
+    projectPath: "/Users/me/github/app",
+    projectName: "app",
+    size: 2_000_000_000,
+    fileCount: 90_000,
+    previousSize: null,
+    deltaBytes: null,
+    worktree: {
+      project: "/Users/me/github/app",
+      nestedSize: { "node-modules": 1_500_000_000, "rust-target": 300_000_000, python: 1_000 },
+    },
+  };
+
+  it("headline the main checkout and keep the worktree's path as the tail", () => {
+    expect(artifactHeadline(row)).toBe("app");
+    expect(artifactTail(row)).toBe("claude-worktrees/app/feat");
+  });
+
+  it("name their largest nested tree and list the rest in the tooltip", () => {
+    const note = worktreeNestedNote(row)!;
+    expect(note.label).toMatch(/^incl\. 1\.\d+ GB node_modules$/);
+    expect(note.title.split("\n")).toHaveLength(4);
+    expect(note.title).toContain("Rust target/");
+  });
+
+  it("say nothing when the nested trees are a sliver of the row or absent", () => {
+    expect(worktreeNestedNote({ ...row, worktree: { nestedSize: { python: 1_000 } } })).toBeNull();
+    expect(worktreeNestedNote({ ...row, worktree: undefined })).toBeNull();
   });
 });
