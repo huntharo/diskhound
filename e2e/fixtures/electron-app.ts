@@ -39,8 +39,8 @@ export type SeedSettings = {
 };
 
 /**
- * No update checks and no OS notifications. An unpacked app never
- * downloads an update, but it still schedules a check. A scan-complete
+ * No update checks and no OS notifications. The environment guard also
+ * prevents checks when a test changes these settings. A scan-complete
  * notification would pop a real banner on the developer's desktop.
  */
 const E2E_SETTINGS: SeedSettings = {
@@ -185,6 +185,7 @@ export async function launchApp(
       env: appEnv({
         DISKHOUND_NATIVE_SCANNER_PATH: scanner,
         DISKHOUND_AGENT_PORT: String(agentPort),
+        DISKHOUND_DISABLE_UPDATES: "1",
         ...(process.platform === "linux" ? { HOME: homeDir } : {}),
       }),
     });
