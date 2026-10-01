@@ -1,3 +1,5 @@
+import ambiguousNames from "../../test/fixtures/devArtifactAmbiguousSegments.json";
+import cases from "../../test/fixtures/devArtifactClassification.json";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -16,17 +18,50 @@ describe("classifyArtifactPath", () => {
   });
 
   it("detects Rust debug targets", () => {
-    expect(classifyArtifactPath("/home/dev/diskhound/target/debug/diskhound")).toEqual({
-      root: "/home/dev/diskhound/target/debug",
+    expect(classifyArtifactPath("/home/dev/diskhound/target/debug/deps/diskhound")).toEqual({
+      root: "/home/dev/diskhound/target/debug/deps",
       kind: "rust-target",
     });
   });
 
-  it("classifies a bare target directory", () => {
-    expect(classifyArtifactPath("C:\\src\\diskhound\\target")).toEqual({
-      root: "C:\\src\\diskhound\\target",
-      kind: "rust-target",
-    });
+  it("rejects a bare target directory", () => {
+    expect(classifyArtifactPath("/src/diskhound/target")).toBeNull();
+  });
+
+  it("agrees with the native classifier's adversarial corpus across path spellings", () => {
+    for (const fixture of cases) {
+      for (const prefix of ["/", "C:/", "//nas/share/"]) {
+        for (const sep of ["/", "\\"]) {
+          if (prefix === "/" && sep === "\\") continue;
+          for (const upper of [false, true]) {
+            const spell = (path: string) => {
+              const value = (prefix + path.slice(1)).replaceAll("/", sep);
+              return upper ? value.toUpperCase() : value;
+            };
+            const path = spell(fixture.path);
+            const expectedRoot = fixture.root ? spell(fixture.root) : null;
+            // UNC paths are normalized to backslashes by both classifiers.
+            const root = prefix.startsWith("//") ? expectedRoot?.replaceAll("/", "\\") : expectedRoot;
+            expect(classifyArtifactPath(path), path).toEqual(root ? { root, kind: fixture.kind } : null);
+            if (root) expect(classifyArtifactPath(root, true), root).toEqual({ root, kind: fixture.kind });
+          }
+        }
+      }
+    }
+  });
+
+  it("fuzzes ambiguous names, depths and near-miss signatures with a fixed seed", () => {
+    let seed = 0x5ca1ab1e;
+    const random = (n: number) => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed % n;
+    };
+    const names = ambiguousNames;
+    for (let trial = 0; trial < 2_000; trial++) {
+      const parts = Array.from({ length: 1 + random(24) }, () => names[random(names.length)]!);
+      const path = `/mono/${parts.join("/")}/notes.txt`;
+      expect(classifyArtifactPath(path), path).toBeNull();
+    }
   });
 
   it("detects git worktrees", () => {
@@ -132,10 +167,8 @@ describe("classifyArtifactPath", () => {
     for (const name of ARTIFACT_SEGMENT_NAMES) {
       expect(name, name).toMatch(/^[\x21-\x7e]+$/);
       expect(name.toLowerCase(), name).toBe(name);
-      const inside = classifyArtifactPath(`/p/${name}/debug/x`) ?? classifyArtifactPath(`/p/${name}/registry/x`)
-        ?? classifyArtifactPath(`/p/${name}/mod/x`) ?? classifyArtifactPath(`/p/${name}/ccache/x`)
-        ?? classifyArtifactPath(`/p/${name}/store/x`)
-        ?? classifyArtifactPath(`/p/${name}/providers/x`) ?? classifyArtifactPath(`/p/${name}/plugin-cache/x`);
+      const fixture = cases.find((c) => c.kind && c.path.toLowerCase().split("/").includes(name));
+      const inside = fixture ? classifyArtifactPath(fixture.path) : null;
       expect(inside, name).not.toBeNull();
     }
   });

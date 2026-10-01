@@ -1,3 +1,4 @@
+import { VM_SPACE_NOTE } from "../../shared/fileCategories";
 import { Fragment } from "preact";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 
@@ -29,8 +30,8 @@ import {
 } from "../lib/treemap";
 import {
   FILE_CATEGORY_CHIPS,
-  FILTER_EXTS,
   fileMatchesCategory,
+  overviewExtensionInventory,
   type FileCategoryFilter,
 } from "../lib/fileQuickFilters";
 import { nativeApi } from "../nativeApi";
@@ -258,11 +259,12 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
     return files;
   }, [sourceFilesRaw, recentOn, recentWindow, typeFilter]);
 
-  const visibleExtensions = useMemo(() => {
-    if (typeFilter === "all") return snapshot.topExtensions;
-    const allowed = FILTER_EXTS[typeFilter];
-    return snapshot.topExtensions.filter((bucket) => allowed.has(bucket.extension.toLowerCase()));
-  }, [snapshot.topExtensions, typeFilter]);
+  const extensionInventory = useMemo(
+    () => overviewExtensionInventory(snapshot.topExtensions, sourceFiles, typeFilter),
+    [snapshot.topExtensions, typeFilter, sourceFiles],
+  );
+  const visibleExtensions = extensionInventory.buckets;
+  const sampledExtensions = extensionInventory.scope === "sample";
 
   const treemapComposition = useMemo(
     () => buildTreemapComposition(sourceFiles),
@@ -473,13 +475,15 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
                   type="button"
                   className={`chip ${typeFilter === chip.id ? "active" : ""}`}
                   aria-pressed={typeFilter === chip.id}
-                  title={chip.id === "all" ? "Show every file type" : `Show only ${chip.label.toLowerCase()}`}
+                  title={chip.title ?? (chip.id === "all" ? "Show every file type" : `Show only ${chip.label.toLowerCase()}`)}
                   onClick={() => setTypeFilter(chip.id)}
                 >
                   {chip.label}
                 </button>
               ))}
             </div>
+
+            {typeFilter === "virtual-machines" && <p className="file-category-note">{VM_SPACE_NOTE}</p>}
 
             {condensedMode && (
               <div className={`treemap-featured ${dominantExpanded ? "expanded" : "collapsed"}`}>
@@ -702,12 +706,12 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
               <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.6">
                 <path d="M7 2L3 5L7 8" />
               </svg>
-              <span className="ext-sidebar-collapsed-label">Extensions</span>
+              <span className="ext-sidebar-collapsed-label">{sampledExtensions ? "Extensions · sample" : "Extensions"}</span>
             </button>
           ) : (
             <>
               <div className="ext-sidebar-header">
-                <span>Extensions</span>
+                <span>{sampledExtensions ? "Extensions · sample" : "Extensions"}</span>
                 <button
                   className="ext-sidebar-toggle"
                   onClick={() => setExtSidebarCollapsed(true)}
@@ -720,10 +724,16 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
                   </svg>
                 </button>
               </div>
+              {sampledExtensions && (
+                <p className="file-category-note" role="note">
+                  Totals from the loaded file sample only. Smaller files may be missing.
+                  Choose All for scan-wide extension totals.
+                </p>
+              )}
               <div className="ext-sidebar-list">
                 {visibleExtensions.length === 0 ? (
                   <div className="empty-view" style={{ height: "100%" }}>
-                    <span>{snapshot.topExtensions.length === 0 ? "No data yet" : "No extensions in this filter"}</span>
+                    <span>{sampledExtensions ? "No matching extensions in the loaded sample" : snapshot.topExtensions.length === 0 ? "No data yet" : "No extensions in this filter"}</span>
                   </div>
                 ) : (
                   visibleExtensions.map((b) => (

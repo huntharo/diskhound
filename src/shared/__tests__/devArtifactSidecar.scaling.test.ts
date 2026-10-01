@@ -89,7 +89,9 @@ describe("compactDevArtifactSidecar / reportFromSidecar scaling", () => {
     // Stay under the root cap so both runs keep every root.
     expect(PROJECTS * 8 * 2).toBeLessThan(DEV_SIDECAR_ROOT_CAP);
     expectNearLinear("compactDevArtifactSidecar", run(PROJECTS), run(PROJECTS * 8), {
-      maxTotal: PROJECTS * 8 * 2 * 45,
+      // Includes evidence revalidation of legacy roots: ~45.3 operations/root
+      // on POSIX, with headroom for Windows path normalization.
+      maxTotal: PROJECTS * 8 * 2 * 60,
     });
   });
 

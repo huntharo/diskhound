@@ -2,7 +2,7 @@ import * as FS from "node:fs";
 import { pipeline } from "node:stream";
 import { createGunzip } from "node:zlib";
 
-import { ARTIFACT_SEGMENT_NAMES } from "./devArtifacts";
+import { ARTIFACT_ROOT_LOOKBACK, ARTIFACT_SEGMENT_NAMES } from "./devArtifacts";
 import {
   createDevAcc,
   dropNestedRoots,
@@ -35,9 +35,9 @@ import {
  *
  * So it streams raw bytes the way folderTreeSidecarQuery.ts does, and
  * holds only artifact roots and the project folders that could own one.
- * A folder row becomes a string only when its last or second-to-last
- * path segment is a name `classifyArtifactPath` can start a match on,
- * because an artifact root always ends at or one past that segment.
+ * A folder row becomes a string only when one of its last ARTIFACT_ROOT_LOOKBACK
+ * path segments is a name `classifyArtifactPath` can start a match on,
+ * because an artifact root always ends within that many segments of the match.
  * Every other row is skipped where it lies.
  */
 
@@ -83,19 +83,17 @@ const SEGMENTS_BY_LENGTH = namesByLength(ARTIFACT_SEGMENT_NAMES);
 const MARKERS_BY_LENGTH = namesByLength(PROJECT_MARKERS);
 
 /**
- * Whether escape-free bytes, lowercased, are one of `names`. Bytes past
- * ASCII take the string path: `toLowerCase` folds a few of them (the
- * Kelvin sign) into ASCII letters.
+ * Whether escape-free ASCII bytes, lowercased, match a name in `table`.
+ * Unicode lookalikes do not match reserved tool or project-marker names.
  */
 function bytesNameIn(
   buf: Buffer,
   start: number,
   end: number,
   table: Buffer[][],
-  names: ReadonlySet<string>,
 ): boolean {
   for (let i = start; i < end; i++) {
-    if (buf[i]! >= 0x80) return names.has(buf.toString("utf8", start, end).toLowerCase());
+    if (buf[i]! >= 0x80) return false;
   }
   const candidates = table[end - start];
   if (!candidates) return false;
@@ -115,18 +113,18 @@ function isSeparator(b: number): boolean {
 }
 
 /**
- * Whether the last or second-to-last segment of a raw path names an
+ * Whether one of the last ARTIFACT_ROOT_LOOKBACK segments of a raw path names an
  * artifact. Only for paths whose sole escape is `\\`, where every
  * backslash byte is part of a separator.
  */
 function tailNamesArtifact(buf: Buffer, start: number, end: number): boolean {
   let i = end;
-  for (let segment = 0; segment < 2; segment++) {
+  for (let segment = 0; segment < ARTIFACT_ROOT_LOOKBACK; segment++) {
     while (i > start && isSeparator(buf[i - 1]!)) i -= 1;
     const segmentEnd = i;
     while (i > start && !isSeparator(buf[i - 1]!)) i -= 1;
     if (i === segmentEnd) return false;
-    if (bytesNameIn(buf, i, segmentEnd, SEGMENTS_BY_LENGTH, ARTIFACT_SEGMENT_NAMES)) return true;
+    if (bytesNameIn(buf, i, segmentEnd, SEGMENTS_BY_LENGTH)) return true;
   }
   return false;
 }
@@ -166,7 +164,7 @@ class LineKeepers implements FolderTreeLineVisitor {
     this.rows += 1;
     if (this.hasMarker) return;
     if (escapes === ESCAPES_NONE) {
-      this.hasMarker = bytesNameIn(buf, start, end, MARKERS_BY_LENGTH, PROJECT_MARKERS);
+      this.hasMarker = bytesNameIn(buf, start, end, MARKERS_BY_LENGTH);
       return;
     }
     this.decodedRows += 1;
