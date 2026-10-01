@@ -54,7 +54,7 @@ export function DevBranchChip() {
         );
       }}
     >
-      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         {copied ? (
           <path d="M2.5 6.5L5 9L9.5 3.5" />
         ) : (

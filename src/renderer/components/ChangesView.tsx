@@ -519,7 +519,7 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
         />
         <div className="changes-empty">
           <div className="changes-empty-icon">
-            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" opacity="0.3">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.3">
               <path d="M12 8V12L15 15" />
               <circle cx="12" cy="12" r="9" />
             </svg>
@@ -1069,7 +1069,7 @@ function EngineBadge({ engine }: { engine?: ScanEngine }) {
         title="Full scan — walked the entire tree. Authoritative numbers, but slower than a delta."
         aria-label="Full scan"
       >
-        <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true">
+        <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
           <rect x="1.5" y="1.5" width="9" height="5" rx="0.5" />
           <rect x="1.5" y="5.5" width="9" height="5" rx="0.5" />
         </svg>

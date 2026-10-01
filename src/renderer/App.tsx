@@ -1059,7 +1059,7 @@ export function App() {
         <header className="header">
           <div className="header-brand">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <rect x="1" y="1" width="14" height="14" rx="2" stroke="currentColor" strokeWidth="1.5" />
+              <rect x="1" y="1" width="14" height="14" rx="2" stroke="currentColor" stroke-width="1.5" />
               <rect x="4" y="4" width="4" height="4" fill="currentColor" opacity="0.8" />
               <rect x="9" y="4" width="3" height="8" fill="currentColor" opacity="0.5" />
               <rect x="4" y="9" width="4" height="3" fill="currentColor" opacity="0.3" />
@@ -1107,7 +1107,7 @@ export function App() {
                   title="Scan a different drive or folder (runs in parallel)"
                   aria-label="Scan another drive or folder"
                 >
-                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round">
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round">
                     <path d="M6 2V10M2 6H10" />
                   </svg>
                 </button>
@@ -1178,7 +1178,7 @@ export function App() {
               }}
               title={`Search the scan index (${platformTerminology(nativeApi.platform).modifier}+F)}`}
             >
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
                 <circle cx="6" cy="6" r="4" />
                 <path d="M9.5 9.5L12.5 12.5" />
               </svg>
@@ -1192,14 +1192,14 @@ export function App() {
              *  rows) read as "settings panel" / "document" rather
              *  than "detach to floating monitor." */}
             <button className="header-icon-btn" onClick={() => void nativeApi.openSystemWidget()} title={`Open system widget (${platformTerminology(nativeApi.platform).modifier}+Shift+W)}`}>
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round">
                 <rect x="1.5" y="2.5" width="11" height="9" rx="1.4" />
                 <rect x="6.5" y="6.5" width="5" height="4" rx="0.8" fill="currentColor" stroke="none" />
               </svg>
             </button>
 
             <button className="header-icon-btn" onClick={() => { setShowPicker(false); setView("settings"); }} title="Settings">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
                 <circle cx="12" cy="12" r="3" />
               </svg>
@@ -1210,7 +1210,7 @@ export function App() {
         {/* ── Search bar (slides in) ── */}
         {searchOpen && !showPicker && isSearchableView && (
           <div className="search-bar">
-            <svg className="search-bar-icon" width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+            <svg className="search-bar-icon" width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
               <circle cx="6" cy="6" r="4" />
               <path d="M9.5 9.5L12.5 12.5" />
             </svg>
@@ -1230,7 +1230,7 @@ export function App() {
               className="search-bar-close"
               onClick={() => { setSearchOpen(false); setSearchQuery(""); }}
             >
-              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5">
                 <path d="M2 2L8 8M8 2L2 8" />
               </svg>
             </button>
@@ -1397,16 +1397,16 @@ export function App() {
             title={`Theme: ${themePreference}. Click to switch to ${cycleThemePreference(themePreference)}.`}
           >
             {themePreference === "system" ? (
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <rect x="3" y="4" width="18" height="12" rx="2" />
                 <path d="M8 20h8M12 16v4" />
               </svg>
             ) : activeTheme === "dark" ? (
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
               </svg>
             ) : (
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <circle cx="12" cy="12" r="5" />
                 <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
               </svg>

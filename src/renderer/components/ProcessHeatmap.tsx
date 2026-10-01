@@ -560,7 +560,7 @@ function HeatmapRowLabel(props: {
           aria-label="Affinity rule active"
           title={`Pinned by rule: ${matchedRule.name || matchedRule.matchPattern}`}
         >
-          <svg width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2">
+          <svg width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.2">
             <rect x="0.5" y="0.5" width="3.5" height="3.5" />
             <rect x="6"   y="0.5" width="3.5" height="3.5" />
             <rect x="0.5" y="6"   width="3.5" height="3.5" />

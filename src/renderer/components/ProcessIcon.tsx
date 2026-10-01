@@ -59,7 +59,7 @@ const FALLBACK_SVG = (
     viewBox="0 0 24 24"
     fill="none"
     stroke="currentColor"
-    strokeWidth="1.6"
+    stroke-width="1.6"
     opacity="0.55"
   >
     <rect x="5" y="3" width="14" height="18" rx="2" />
