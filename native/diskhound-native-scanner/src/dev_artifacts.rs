@@ -2,9 +2,9 @@
 //! `src/shared/devArtifacts.ts`. Runs on the index-writer thread so
 //! every emitted file (MFT, walker, inherit) is classified once.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
-use std::io;
+use std::io::{self, Read};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -53,6 +53,38 @@ impl Kind {
     }
 }
 
+/// APFS clone sums over a set of files (macOS).
+#[derive(Clone, Copy, Default)]
+struct CloneSums {
+    size: u64,
+    private_size: u64,
+    /// Each clone file's share of the blocks it shares: its shared bytes
+    /// divided by the copies APFS counts for its full-clone group. See
+    /// `SidecarClone::clone_shared_blocks`.
+    block_share: u64,
+}
+
+impl CloneSums {
+    fn add(&mut self, occupancy: u64, attrs: &CloneAttrs) {
+        if !attrs.may_share() {
+            return;
+        }
+        let private = attrs.clone_private_of(occupancy);
+        self.size = self.size.saturating_add(occupancy);
+        self.private_size = self.private_size.saturating_add(private);
+        // A modified clone has no group, so its copies are unknown:
+        // count its shared bytes whole.
+        let copies = attrs.full_clone_group().map_or(1, |(_, refcnt)| u64::from(refcnt));
+        self.block_share = self.block_share.saturating_add((occupancy - private) / copies);
+    }
+
+    fn absorb(&mut self, other: &CloneSums) {
+        self.size = self.size.saturating_add(other.size);
+        self.private_size = self.private_size.saturating_add(other.private_size);
+        self.block_share = self.block_share.saturating_add(other.block_share);
+    }
+}
+
 struct AccRec {
     kind: Kind,
     size: u64,
@@ -63,31 +95,86 @@ struct AccRec {
     /// APFS clone accounting (macOS). `measured` stays false on other
     /// platforms / volumes, and the sidecar then omits the block.
     measured: bool,
-    clone_size: u64,
-    clone_private_size: u64,
-    /// Each clone file's share of the blocks it shares: its shared bytes
-    /// divided by the copies APFS counts for its full-clone group. See
-    /// `SidecarClone::clone_shared_blocks`.
-    clone_block_share: u64,
+    clone: CloneSums,
+    /// `Kind::Worktree` only: the main checkout the worktree's `.git`
+    /// file points at, when one was read.
+    project: Option<String>,
+    /// `Kind::Worktree` only: bytes of the trees inside it by kind
+    /// (node_modules, target, ...). They are part of `size`, not rows.
+    nested: BTreeMap<&'static str, u64>,
 }
+
+impl AccRec {
+    fn new(kind: Kind, id: u32) -> Self {
+        AccRec {
+            kind,
+            size: 0,
+            files: 0,
+            id,
+            measured: false,
+            clone: CloneSums::default(),
+            project: None,
+            nested: BTreeMap::new(),
+        }
+    }
+}
+
+/// Reads a `.git` file. A field so tests can stand in for the disk.
+type GitFileReader = fn(&str) -> Option<String>;
 
 pub struct DevArtifactAcc {
     artifacts: HashMap<String, AccRec>,
     projects: HashSet<String>,
     root_paths: Vec<String>,
+    /// Linked worktrees found by their `.git` file: folder → main checkout.
+    /// They become roots in `resolve_worktrees`, once every file is in.
+    worktrees: HashMap<String, String>,
+    /// Clone sums of files outside every tree, by folder. A worktree
+    /// takes the ones under it when it is resolved.
+    loose_clones: HashMap<String, CloneSums>,
+    /// Some file came with clone attributes: this volume is measured.
+    saw_clone_attrs: bool,
+    /// `.git` files read, for the scan log. One per linked worktree or
+    /// submodule outside every tree.
+    git_file_reads: u64,
+    read_git_file: GitFileReader,
+    /// Old root id → the id clone groups count it under. Folded trees map
+    /// to their worktree. Empty until `resolve_worktrees`.
+    root_remap: Vec<u32>,
 }
 
 impl DevArtifactAcc {
     pub fn new() -> Self {
+        Self::with_git_reader(read_git_file)
+    }
+
+    fn with_git_reader(read_git_file: GitFileReader) -> Self {
         Self {
             artifacts: HashMap::new(),
             projects: HashSet::new(),
             root_paths: Vec::new(),
+            worktrees: HashMap::new(),
+            loose_clones: HashMap::new(),
+            saw_clone_attrs: false,
+            git_file_reads: 0,
+            read_git_file,
+            root_remap: Vec::new(),
         }
     }
 
     pub fn root_count(&self) -> usize {
         self.artifacts.values().filter(|rec| rec.size > 0).count()
+    }
+
+    pub fn git_file_reads(&self) -> u64 {
+        self.git_file_reads
+    }
+
+    pub fn worktree_count(&self) -> usize {
+        self.artifacts
+            .values()
+            .filter(|rec| matches!(rec.kind, Kind::Worktree) && rec.size > 0)
+            .count()
     }
 
     /// Classify one file. Returns its root id when it belongs to a Dev
@@ -99,51 +186,251 @@ impl DevArtifactAcc {
         extra_hardlink: bool,
         clone: Option<&CloneAttrs>,
     ) -> Option<u32> {
-        if let Some(name) = file_name(path) {
+        let name = file_name(path);
+        if let Some(name) = name {
             if is_project_marker(name) {
                 if let Some(dir) = parent_path(path) {
                     self.projects.insert(dir);
                 }
             }
         }
-        let (root, kind) = classify(path)?;
+        if clone.is_some() {
+            self.saw_clone_attrs = true;
+        }
         let occupancy = if extra_hardlink { 0 } else { size };
+        let parts = split_segments(path);
+        let classified = classify_parts(&parts, 0);
+        if name == Some(".git") && !extra_hardlink {
+            self.note_git_file(path, &parts, classified);
+        }
+        let Some((depth, kind)) = classified else {
+            if let (Some(attrs), false) = (clone, extra_hardlink) {
+                if attrs.may_share() {
+                    self.add_loose_clone(path, occupancy, attrs);
+                }
+            }
+            return None;
+        };
+        let root = join_segments(path, &parts, depth);
         let next_id = self.root_paths.len() as u32;
         let entry = self.artifacts.entry(root).or_insert_with_key(|root| {
             self.root_paths.push(root.clone());
-            AccRec {
-                kind,
-                size: 0,
-                files: 0,
-                id: next_id,
-                measured: false,
-                clone_size: 0,
-                clone_private_size: 0,
-                clone_block_share: 0,
-            }
+            AccRec::new(kind, next_id)
         });
         entry.size = entry.size.saturating_add(occupancy);
         entry.files = entry.files.saturating_add(1);
-        if let (Some(attrs), false) = (clone, extra_hardlink) {
-            entry.measured = true;
-            if attrs.may_share() {
-                let private = attrs.clone_private_of(occupancy);
-                entry.clone_size = entry.clone_size.saturating_add(occupancy);
-                entry.clone_private_size = entry.clone_private_size.saturating_add(private);
-                // A modified clone has no group, so its copies are
-                // unknown: count its shared bytes whole.
-                let copies = attrs.full_clone_group().map_or(1, |(_, refcnt)| u64::from(refcnt));
-                entry.clone_block_share = entry
-                    .clone_block_share
-                    .saturating_add((occupancy - private) / copies);
+        if matches!(kind, Kind::Worktree) {
+            if let Some((_, inner)) = classify_parts(&parts, depth) {
+                *entry.nested.entry(inner.as_str()).or_default() += occupancy;
             }
         }
+        if let (Some(attrs), false) = (clone, extra_hardlink) {
+            entry.measured = true;
+            entry.clone.add(occupancy, attrs);
+        }
         Some(entry.id)
+    }
+
+    /// Most loose clones share a folder with the last one, so look the
+    /// folder up before allocating its key.
+    fn add_loose_clone(&mut self, path: &str, occupancy: u64, attrs: &CloneAttrs) {
+        let Some(idx) = path.rfind(['\\', '/']) else { return };
+        let dir = if idx == 0 { &path[..1] } else { &path[..idx] };
+        match self.loose_clones.get_mut(dir) {
+            Some(sums) => sums.add(occupancy, attrs),
+            None => self.loose_clones.entry(dir.to_string()).or_default().add(occupancy, attrs),
+        }
+    }
+
+    /// A `.git` file is a linked worktree's or a submodule's pointer to its
+    /// real git dir. Read it when its folder is outside every tree (or is
+    /// a `.worktrees/<name>` tree), and remember the folder if it is a
+    /// worktree. Inside another tree, that tree already holds its bytes.
+    fn note_git_file(&mut self, path: &str, parts: &[&str], classified: Option<(usize, Kind)>) {
+        let dir_depth = parts.len().saturating_sub(1);
+        match classified {
+            None => {}
+            Some((depth, Kind::Worktree)) if depth == dir_depth => {}
+            Some(_) => return,
+        }
+        let Some(dir) = parent_path(path) else { return };
+        self.git_file_reads += 1;
+        let Some(contents) = (self.read_git_file)(path) else { return };
+        if let Some(project) = worktree_project(&dir, &contents) {
+            self.worktrees.insert(dir, project);
+        }
+    }
+
+    /// Make each linked worktree one root, now that every file is in.
+    ///
+    /// A worktree row is the whole checkout: what removing it frees. The
+    /// trees inside it (node_modules, target, ...) fold into it and leave
+    /// the list, so every byte is still in exactly one row. Their sizes by
+    /// kind stay on the worktree as `nested`. That is how `.worktrees/`
+    /// trees have always been counted.
+    ///
+    /// Files reach the index writer in the order parallel reads finish, so
+    /// a worktree's `.git` can arrive after files under it. Its size and
+    /// file count come from `tree_totals` (the scan's folder rollups), and
+    /// its clone sums from the trees inside it plus `loose_clones`. Clone
+    /// groups are re-attributed through `root_remap`; a group with a copy
+    /// in the worktree's own (unclassified) files counts as shared.
+    pub fn resolve_worktrees(&mut self, tree_totals: &dyn Fn(&str) -> Option<(u64, u64)>) {
+        let mut found: Vec<(String, String)> = self.worktrees.drain().collect();
+        if found.is_empty() {
+            return;
+        }
+        let mut remap: Vec<u32> = (0..self.root_paths.len() as u32).collect();
+        // Outermost first: a worktree inside another one is part of it.
+        found.sort_by(|a, b| a.0.len().cmp(&b.0.len()).then_with(|| a.0.cmp(&b.0)));
+        let mut owners: HashMap<String, u32> = HashMap::new();
+        for (path, project) in found {
+            crate::work::step();
+            if ancestor_in(&path, &owners, false).is_some() {
+                continue;
+            }
+            // A `.worktrees/<name>` tree already counts every file under it.
+            if let Some(rec) = self.artifacts.get_mut(&path) {
+                rec.project = Some(project);
+                continue;
+            }
+            let id = self.root_paths.len() as u32;
+            self.root_paths.push(path.clone());
+            remap.push(id);
+            let mut rec = AccRec::new(Kind::Worktree, id);
+            rec.measured = self.saw_clone_attrs;
+            rec.project = Some(project);
+            self.artifacts.insert(path.clone(), rec);
+            owners.insert(path, id);
+        }
+        if !owners.is_empty() {
+            let inside: Vec<(String, u32)> = self
+                .artifacts
+                .keys()
+                .filter_map(|path| {
+                    crate::work::step();
+                    ancestor_in(path, &owners, false).map(|owner| (path.clone(), owner))
+                })
+                .collect();
+            for (path, owner) in inside {
+                let Some(rec) = self.artifacts.remove(&path) else { continue };
+                remap[rec.id as usize] = owner;
+                let owner_path = &self.root_paths[owner as usize];
+                let Some(worktree) = self.artifacts.get_mut(owner_path) else { continue };
+                worktree.size = worktree.size.saturating_add(rec.size);
+                worktree.files = worktree.files.saturating_add(rec.files);
+                worktree.clone.absorb(&rec.clone);
+                *worktree.nested.entry(rec.kind.as_str()).or_default() += rec.size;
+            }
+            for (dir, sums) in self.loose_clones.drain() {
+                crate::work::step();
+                if let Some(owner) = ancestor_in(&dir, &owners, true) {
+                    let owner_path = &self.root_paths[owner as usize];
+                    if let Some(worktree) = self.artifacts.get_mut(owner_path) {
+                        worktree.clone.absorb(&sums);
+                    }
+                }
+            }
+            for (path, _) in owners.iter() {
+                crate::work::step();
+                let Some((size, files)) = tree_totals(path) else { continue };
+                if let Some(worktree) = self.artifacts.get_mut(path) {
+                    worktree.size = worktree.size.max(size);
+                    worktree.files = worktree.files.max(files);
+                }
+            }
+        }
+        self.root_remap = remap;
     }
 
     pub fn root_id_count(&self) -> usize {
         self.root_paths.len()
     }
+}
+
+/// The id of the folder in `owners` that holds `path`: one of its parent
+/// folders, or `path` itself when `or_self`.
+fn ancestor_in(path: &str, owners: &HashMap<String, u32>, or_self: bool) -> Option<u32> {
+    if or_self {
+        if let Some(id) = owners.get(path) {
+            return Some(*id);
+        }
+    }
+    let mut cursor = parent_path(path)?;
+    loop {
+        crate::work::step();
+        if let Some(id) = owners.get(&cursor) {
+            return Some(*id);
+        }
+        match parent_path(&cursor) {
+            Some(parent) if parent != cursor => cursor = parent,
+            _ => return None,
+        }
+    }
+}
+
+/// The first 4 KB of a `.git` file. A real one is a single line.
+fn read_git_file(path: &str) -> Option<String> {
+    let mut buf = Vec::with_capacity(256);
+    File::open(path).ok()?.take(4096).read_to_end(&mut buf).ok()?;
+    String::from_utf8(buf).ok()
+}
+
+/// The main checkout of the linked worktree at `dir`, from its `.git`
+/// file: `gitdir: <common dir>/worktrees/<name>`. The common dir is the
+/// main checkout's `.git` (the checkout is its parent) or a bare repo
+/// (the project itself). A submodule's file points into
+/// `<repo>/.git/modules/<name>` and gives None, as does anything else.
+/// `gitdir` may be relative to `dir` (`git worktree add --relative-paths`).
+fn worktree_project(dir: &str, contents: &str) -> Option<String> {
+    let target = contents.lines().next()?.trim().strip_prefix("gitdir:")?.trim();
+    if target.is_empty() {
+        return None;
+    }
+    let windows_style = dir.contains('\\');
+    let absolute = target.starts_with(['/', '\\']) || target.chars().nth(1) == Some(':');
+    let base = if absolute { target } else { dir };
+    let mut parts: Vec<&str> = if absolute { Vec::new() } else { split_segments(dir) };
+    for seg in split_segments(target) {
+        match seg {
+            "." => {}
+            ".." => {
+                parts.pop();
+            }
+            seg => parts.push(seg),
+        }
+    }
+    let n = parts.len();
+    if n < 3 || !parts[n - 2].eq_ignore_ascii_case("worktrees") {
+        return None;
+    }
+    let common = &parts[..n - 2];
+    let project = if common.last()?.eq_ignore_ascii_case(".git") {
+        &common[..common.len() - 1]
+    } else {
+        common
+    };
+    if project.is_empty() {
+        return None;
+    }
+    Some(format_path(base, project, windows_style))
+}
+
+/// Join `parts` back into a path shaped like `like` (UNC, drive, or
+/// POSIX root), with `\` when `backslash`.
+fn format_path(like: &str, parts: &[&str], backslash: bool) -> String {
+    let sep = if backslash { "\\" } else { "/" };
+    let joined = parts.join(sep);
+    if like.starts_with("\\\\") || like.starts_with("//") {
+        return format!("\\\\{}", parts.join("\\"));
+    }
+    if like.chars().nth(1) == Some(':') {
+        return joined;
+    }
+    if like.starts_with(['/', '\\']) {
+        return format!("{sep}{joined}");
+    }
+    joined
 }
 
 #[derive(Serialize)]
@@ -166,6 +453,30 @@ struct SidecarRoot {
     /// Mirrors `DevArtifactCloneInfo` in src/shared/contracts.ts.
     #[serde(skip_serializing_if = "Option::is_none")]
     clone: Option<SidecarClone>,
+    /// `worktree` roots only. Mirrors `DevWorktreeInfo` in contracts.ts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worktree: Option<SidecarWorktree>,
+}
+
+#[derive(Serialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct SidecarWorktree {
+    /// The main checkout (or bare repo) its `.git` file points at.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project: Option<String>,
+    /// Bytes of the trees inside it, by kind. Already in its `size`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    nested_size: BTreeMap<&'static str, u64>,
+}
+
+fn sidecar_worktree(rec: &AccRec) -> Option<SidecarWorktree> {
+    if !matches!(rec.kind, Kind::Worktree) {
+        return None;
+    }
+    Some(SidecarWorktree {
+        project: rec.project.clone(),
+        nested_size: rec.nested.clone(),
+    })
 }
 
 #[derive(Serialize, Debug, PartialEq, Eq)]
@@ -192,22 +503,23 @@ fn sidecar_clone(acc: &DevArtifactAcc, rec: &AccRec, share: Option<&RootCloneSha
     if !rec.measured {
         return None;
     }
-    let internal_files = share.map_or(0, |s| s.internal_file_bytes).min(rec.clone_size);
+    let sums = &rec.clone;
+    let internal_files = share.map_or(0, |s| s.internal_file_bytes).min(sums.size);
     let internal = share.map_or(0, |s| s.internal_bytes);
     // Clone bytes that are neither private nor inside a group this
     // tree fully owns: some other file still references them.
-    let clone_shared_size = rec
-        .clone_size
-        .saturating_sub(rec.clone_private_size)
+    let clone_shared_size = sums
+        .size
+        .saturating_sub(sums.private_size)
         .saturating_sub(internal_files);
     Some(SidecarClone {
-        clone_size: rec.clone_size,
-        clone_private_size: rec.clone_private_size,
+        clone_size: sums.size,
+        clone_private_size: sums.private_size,
         clone_internal_size: internal,
         clone_shared_size,
         // The copies of a group this tree owns outright share out to its
         // size, which `clone_internal_size` already holds.
-        clone_shared_blocks: rec.clone_block_share.saturating_sub(internal).min(clone_shared_size),
+        clone_shared_blocks: sums.block_share.saturating_sub(internal).min(clone_shared_size),
         shared_roots: share.map_or(0, |s| s.neighbors.len() as u64),
         shared_with: share
             .map(|s| {
@@ -227,7 +539,7 @@ pub fn write_sidecar(
     acc: &DevArtifactAcc,
     groups: Option<&CloneGroups>,
 ) -> io::Result<()> {
-    let shares = groups.map(|g| g.attribute(acc.root_id_count()));
+    let shares = groups.map(|g| g.attribute_remapped(acc.root_id_count(), &acc.root_remap));
     let mut roots: Vec<SidecarRoot> = acc
         .artifacts
         .iter()
@@ -242,6 +554,7 @@ pub fn write_sidecar(
                 rec,
                 shares.as_ref().and_then(|s| s.get(rec.id as usize)),
             ),
+            worktree: sidecar_worktree(rec),
         })
         .collect();
     roots.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
@@ -285,31 +598,41 @@ fn is_project_marker(name: &str) -> bool {
     )
 }
 
+#[cfg(test)]
 fn classify(path: &str) -> Option<(String, Kind)> {
     let parts = split_segments(path);
-    for i in 0..parts.len() {
+    classify_parts(&parts, 0).map(|(depth, kind)| (join_segments(path, &parts, depth), kind))
+}
+
+/// The tree `parts` falls in, as (segments in its root path, kind),
+/// looking only at segments from `start` on.
+///
+/// Linked worktrees outside `.worktrees/` are not path rules: their
+/// `.git` file says what they are, and `DevArtifactAcc` reads it.
+fn classify_parts(parts: &[&str], start: usize) -> Option<(usize, Kind)> {
+    for i in start..parts.len() {
         let lower = parts[i].to_ascii_lowercase();
         if lower == "target" {
             if i + 1 < parts.len() {
                 let next = parts[i + 1].to_ascii_lowercase();
                 if matches!(next.as_str(), "debug" | "release" | "doc" | "incremental") {
-                    return Some((join_segments(path, &parts, i + 2), Kind::RustTarget));
+                    return Some((i + 2, Kind::RustTarget));
                 }
             }
-            return Some((join_segments(path, &parts, i + 1), Kind::RustTarget));
+            return Some((i + 1, Kind::RustTarget));
         }
         if lower == ".cargo" && i + 1 < parts.len() && parts[i + 1].eq_ignore_ascii_case("registry")
         {
-            return Some((join_segments(path, &parts, i + 2), Kind::CargoRegistry));
+            return Some((i + 2, Kind::CargoRegistry));
         }
         if lower == "pkg" && i + 1 < parts.len() && parts[i + 1].eq_ignore_ascii_case("mod") {
-            return Some((join_segments(path, &parts, i + 2), Kind::GoModule));
+            return Some((i + 2, Kind::GoModule));
         }
         // pnpm's global store outside a `.pnpm-store` folder:
         // `$PNPM_HOME/store`. Same rule as `classifyArtifactPath` in
         // src/shared/devArtifacts.ts.
         if lower == "pnpm" && i + 1 < parts.len() && parts[i + 1].eq_ignore_ascii_case("store") {
-            return Some((join_segments(path, &parts, i + 2), Kind::PackageCache));
+            return Some((i + 2, Kind::PackageCache));
         }
         if lower == ".cache" && i + 1 < parts.len() {
             let next = parts[i + 1].to_ascii_lowercase();
@@ -319,7 +642,7 @@ fn classify(path: &str) -> Option<(String, Kind)> {
                 } else {
                     Kind::CompilerCache
                 };
-                return Some((join_segments(path, &parts, i + 2), kind));
+                return Some((i + 2, kind));
             }
         }
         // Only the provider downloads, which `terraform init` puts back
@@ -328,7 +651,7 @@ fn classify(path: &str) -> Option<(String, Kind)> {
         if lower == ".terraform" && i + 1 < parts.len() {
             let next = parts[i + 1].to_ascii_lowercase();
             if matches!(next.as_str(), "providers" | "plugins") {
-                return Some((join_segments(path, &parts, i + 2), Kind::Terraform));
+                return Some((i + 2, Kind::Terraform));
             }
         }
         // The documented plugin_cache_dir. `.terraform.d/plugins` holds
@@ -337,13 +660,13 @@ fn classify(path: &str) -> Option<(String, Kind)> {
             && i + 1 < parts.len()
             && parts[i + 1].eq_ignore_ascii_case("plugin-cache")
         {
-            return Some((join_segments(path, &parts, i + 2), Kind::Terraform));
+            return Some((i + 2, Kind::Terraform));
         }
         // The repo's history, not its working files. Every file here is
         // below a `.git` folder; a linked worktree's or submodule's `.git`
         // is a file and ends the path, so it never matches.
         if lower == ".git" && i + 1 < parts.len() {
-            return Some((join_segments(path, &parts, i + 1), Kind::GitRepo));
+            return Some((i + 1, Kind::GitRepo));
         }
         if let Some(kind) = mapped_kind(&lower) {
             let depth = if matches!(kind, Kind::Worktree) && i + 1 < parts.len() {
@@ -351,10 +674,10 @@ fn classify(path: &str) -> Option<(String, Kind)> {
             } else {
                 i + 1
             };
-            return Some((join_segments(path, &parts, depth), kind));
+            return Some((depth, kind));
         }
         if matches!(lower.as_str(), "dist" | "build" | "out") {
-            return Some((join_segments(path, &parts, i + 1), Kind::JsBuild));
+            return Some((i + 1, Kind::JsBuild));
         }
     }
     None
@@ -507,6 +830,7 @@ mod tests {
             size: 800_000_000,
             files: 1,
             clone: None,
+            worktree: None,
         }];
         assert_eq!(
             projects_for_roots(&acc.projects, &roots),
@@ -553,6 +877,350 @@ mod tests {
             classify("/Users/dev/app/node_modules/dep/.git/objects/ab/cdef").unwrap();
         assert_eq!(root, "/Users/dev/app/node_modules");
         assert!(matches!(kind, Kind::NodeModules));
+    }
+
+    #[test]
+    fn reads_the_main_checkout_from_a_worktree_git_file() {
+        // `git worktree add` writes an absolute gitdir.
+        assert_eq!(
+            worktree_project(
+                "/Users/dev/claude-worktrees/diskhound/fix-x",
+                "gitdir: /Users/dev/github/diskhound/.git/worktrees/fix-x\n",
+            ),
+            Some("/Users/dev/github/diskhound".to_string()),
+        );
+        // `--relative-paths` (git 2.48+) writes one relative to the worktree.
+        assert_eq!(
+            worktree_project(
+                "/Users/dev/.codex/worktrees/ab12/app",
+                "gitdir: ../../../../github/app/.git/worktrees/app\n",
+            ),
+            Some("/Users/dev/github/app".to_string()),
+        );
+        // A bare repo is its own project.
+        assert_eq!(
+            worktree_project("/srv/wt/feat", "gitdir: /srv/repos/app.git/worktrees/feat"),
+            Some("/srv/repos/app.git".to_string()),
+        );
+        // Git for Windows writes forward slashes; keep the scan's style.
+        assert_eq!(
+            worktree_project(
+                r"C:\Users\dev\wt\app",
+                "gitdir: C:/Users/dev/src/app/.git/worktrees/app\r\n",
+            ),
+            Some(r"C:\Users\dev\src\app".to_string()),
+        );
+    }
+
+    #[test]
+    fn submodule_and_other_git_files_are_not_worktrees() {
+        for (dir, contents) in [
+            // A submodule's history lives in the parent's .git/modules.
+            ("/Users/dev/app/vendor/lib", "gitdir: ../../.git/modules/vendor/lib\n"),
+            ("/Users/dev/app/vendor/lib", "gitdir: /Users/dev/app/.git/modules/vendor/lib"),
+            // A submodule checked out inside a linked worktree.
+            ("/wt/feat/vendor/lib", "gitdir: /main/.git/worktrees/feat/modules/vendor/lib"),
+            // A nested submodule.
+            ("/Users/dev/app/a/b", "gitdir: ../../.git/modules/a/modules/b"),
+            ("/Users/dev/app", "ref: refs/heads/main\n"),
+            ("/Users/dev/app", "gitdir:\n"),
+            ("/Users/dev/app", ""),
+            // `worktrees` must be the common dir's own folder.
+            ("/x", "gitdir: worktrees"),
+        ] {
+            assert_eq!(worktree_project(dir, contents), None, "{dir}: {contents:?}");
+        }
+    }
+
+    /// Stands in for the disk: a `.git` under `vendor/` is a submodule,
+    /// any other one a worktree of /Users/dev/github/<leaf>.
+    fn fake_git_file(path: &str) -> Option<String> {
+        let dir = parent_path(path)?;
+        if dir.contains("/vendor/") {
+            return Some("gitdir: ../../.git/modules/vendor/lib\n".to_string());
+        }
+        let leaf = file_name(&dir)?;
+        Some(format!("gitdir: /Users/dev/github/{leaf}/.git/worktrees/{leaf}\n"))
+    }
+
+    /// (path, size) → recursive folder totals, like the scan's
+    /// `directory_totals`.
+    fn tree_totals_of(files: &[(&str, u64)]) -> HashMap<String, (u64, u64)> {
+        let mut totals: HashMap<String, (u64, u64)> = HashMap::new();
+        for (path, size) in files {
+            let mut cursor = parent_path(path);
+            while let Some(dir) = cursor {
+                let entry = totals.entry(dir.clone()).or_default();
+                entry.0 += size;
+                entry.1 += 1;
+                cursor = parent_path(&dir).filter(|parent| *parent != dir);
+            }
+        }
+        totals
+    }
+
+    fn resolve(acc: &mut DevArtifactAcc, files: &[(&str, u64)]) {
+        let totals = tree_totals_of(files);
+        acc.resolve_worktrees(&|path| totals.get(path).copied());
+    }
+
+    #[test]
+    fn a_worktree_git_file_makes_the_whole_checkout_one_row_in_any_order() {
+        let wt = "/Users/dev/claude-worktrees/app/feat";
+        let files: Vec<(String, u64)> = vec![
+            (format!("{wt}/src/main.ts"), 4_000),
+            (format!("{wt}/node_modules/react/index.js"), 50_000),
+            (format!("{wt}/packages/ui/node_modules/x/y.js"), 30_000),
+            (format!("{wt}/target/debug/app"), 900_000),
+            (format!("{wt}/.git"), 4_096),
+            (format!("{wt}/package.json"), 1_000),
+            // A submodule inside it: part of the worktree, not its own.
+            (format!("{wt}/vendor/lib/.git"), 4_096),
+            (format!("{wt}/vendor/lib/lib.c"), 2_000),
+            // Elsewhere: a plain project with its own node_modules.
+            ("/Users/dev/github/app/node_modules/a/b.js".to_string(), 7_000),
+        ];
+        let files: Vec<(&str, u64)> = files.iter().map(|(p, s)| (p.as_str(), *s)).collect();
+        let tree_size: u64 = files.iter().filter(|(p, _)| p.starts_with(wt)).map(|(_, s)| s).sum();
+        // The `.git` file first, last, and in the middle.
+        for order in [vec![4, 0, 1, 2, 3, 5, 6, 7, 8], vec![0, 1, 2, 3, 5, 6, 7, 8, 4], (0..9).collect()] {
+            let mut acc = DevArtifactAcc::with_git_reader(fake_git_file);
+            for i in &order {
+                let (path, size) = files[*i];
+                acc.add(path, size, false, None);
+            }
+            resolve(&mut acc, &files);
+            let rec = &acc.artifacts[wt];
+            assert!(matches!(rec.kind, Kind::Worktree));
+            assert_eq!(rec.size, tree_size);
+            assert_eq!(rec.files, 8);
+            assert_eq!(rec.project.as_deref(), Some("/Users/dev/github/feat"));
+            assert_eq!(
+                rec.nested,
+                BTreeMap::from([("node-modules", 80_000), ("rust-target", 900_000)]),
+            );
+            // Folded in, so no byte is listed twice.
+            assert!(!acc.artifacts.contains_key(&format!("{wt}/node_modules")));
+            assert!(!acc.artifacts.contains_key(&format!("{wt}/target/debug")));
+            assert!(!acc.artifacts.contains_key(&format!("{wt}/vendor/lib")));
+            assert!(acc.artifacts.contains_key("/Users/dev/github/app/node_modules"));
+            // The worktree's .git and the submodule's: both outside every tree.
+            assert_eq!(acc.git_file_reads(), 2);
+            assert_eq!(acc.worktree_count(), 1);
+        }
+    }
+
+    #[test]
+    fn a_submodule_git_file_alone_is_not_a_worktree() {
+        let files = [
+            ("/Users/dev/app/vendor/lib/.git", 4_096),
+            ("/Users/dev/app/vendor/lib/node_modules/x.js", 1_000),
+        ];
+        let mut acc = DevArtifactAcc::with_git_reader(fake_git_file);
+        for (path, size) in files {
+            acc.add(path, size, false, None);
+        }
+        resolve(&mut acc, &files);
+        assert_eq!(acc.worktree_count(), 0);
+        assert!(acc.artifacts.contains_key("/Users/dev/app/vendor/lib/node_modules"));
+        assert_eq!(acc.git_file_reads(), 1);
+    }
+
+    #[test]
+    fn git_files_inside_another_tree_are_not_read() {
+        let mut acc = DevArtifactAcc::with_git_reader(|_| panic!("read a .git inside a tree"));
+        acc.add("/Users/dev/app/node_modules/dep/.git", 100, false, None);
+        acc.add("/Users/dev/app/target/debug/build/x/.git", 100, false, None);
+        acc.add("/Users/dev/app/.git/modules/lib/.git", 100, false, None);
+        assert_eq!(acc.git_file_reads(), 0);
+    }
+
+    #[test]
+    fn a_worktree_inside_another_worktree_is_part_of_it() {
+        let outer = "/Users/dev/wt/app";
+        let inner = "/Users/dev/wt/app/.claude/worktrees/app";
+        let files = [
+            ("/Users/dev/wt/app/.git", 4_096),
+            ("/Users/dev/wt/app/.claude/worktrees/app/.git", 4_096),
+            ("/Users/dev/wt/app/.claude/worktrees/app/node_modules/a.js", 10_000),
+            ("/Users/dev/wt/app/README.md", 500),
+        ];
+        let mut acc = DevArtifactAcc::with_git_reader(fake_git_file);
+        for (path, size) in files.iter().rev() {
+            acc.add(path, *size, false, None);
+        }
+        resolve(&mut acc, &files);
+        assert_eq!(acc.worktree_count(), 1);
+        assert_eq!(acc.artifacts[outer].size, 4_096 * 2 + 10_000 + 500);
+        assert!(!acc.artifacts.contains_key(inner));
+    }
+
+    #[test]
+    fn dot_worktrees_trees_get_their_project_and_nested_sizes() {
+        let files = [
+            (r"C:\src\app\.worktrees\feat\.git", 4_096u64),
+            (r"C:\src\app\.worktrees\feat\node_modules\x\i.js", 20_000),
+            (r"C:\src\app\.worktrees\feat\src\a.rs", 1_000),
+        ];
+        fn windows_git_file(_: &str) -> Option<String> {
+            Some("gitdir: C:/src/app/.git/worktrees/feat\n".to_string())
+        }
+        let mut acc = DevArtifactAcc::with_git_reader(windows_git_file);
+        for (path, size) in files {
+            acc.add(path, size, false, None);
+        }
+        // No folder rollups: the per-file sums already cover the tree.
+        acc.resolve_worktrees(&|_| None);
+        let rec = &acc.artifacts[r"C:\src\app\.worktrees\feat"];
+        assert_eq!(rec.size, 25_096);
+        assert_eq!(rec.project.as_deref(), Some(r"C:\src\app"));
+        assert_eq!(rec.nested, BTreeMap::from([("node-modules", 20_000)]));
+        assert_eq!(acc.git_file_reads(), 1);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn reads_a_real_git_file() {
+        let dir = std::env::temp_dir().join(format!("dh-dev-wt-{}", std::process::id()));
+        let wt = dir.join("wt").join("app");
+        std::fs::create_dir_all(&wt).unwrap();
+        let git = wt.join(".git");
+        std::fs::write(&git, "gitdir: /Users/dev/github/app/.git/worktrees/app\n").unwrap();
+        let src = wt.join("main.c");
+        let mut acc = DevArtifactAcc::new();
+        acc.add(&src.to_string_lossy(), 2_000, false, None);
+        acc.add(&git.to_string_lossy(), 100, false, None);
+        acc.resolve_worktrees(&|_| None);
+        let rec = &acc.artifacts[&*wt.to_string_lossy()];
+        assert!(matches!(rec.kind, Kind::Worktree));
+        assert_eq!(rec.project.as_deref(), Some("/Users/dev/github/app"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn worktree_clone_accounting_counts_the_whole_checkout() {
+        use crate::clone_attrs::{CloneAttrs, EF_MAY_SHARE_BLOCKS, EF_SHARES_ALL_BLOCKS};
+        const SIZE: u64 = 1_000_000;
+        let copy_of = |id: u64, refcnt: u32| CloneAttrs {
+            private_size: Some(0),
+            clone_id: id,
+            volume_id: 1,
+            clone_refcnt: refcnt,
+            ext_flags: EF_MAY_SHARE_BLOCKS | EF_SHARES_ALL_BLOCKS,
+        };
+        let plain = CloneAttrs::default();
+        let wt = "/Users/dev/.codex/worktrees/ab12/app";
+        let files: [(String, u64, CloneAttrs); 6] = [
+            // Group 1: both copies in the worktree, in two node_modules.
+            (format!("{wt}/node_modules/a/i.js"), SIZE, copy_of(1, 2)),
+            (format!("{wt}/packages/ui/node_modules/a/i.js"), SIZE, copy_of(1, 2)),
+            // Group 2: one of four copies here, the rest in the pnpm store.
+            (format!("{wt}/node_modules/b/i.js"), SIZE, copy_of(2, 4)),
+            // A clone among its own files: shared with a file elsewhere.
+            (format!("{wt}/assets/logo.png"), SIZE, copy_of(3, 2)),
+            (format!("{wt}/src/main.ts"), 10_000, plain),
+            (format!("{wt}/.git"), 4_096, plain),
+        ];
+        let mut acc = DevArtifactAcc::with_git_reader(fake_git_file);
+        let mut groups = CloneGroups::new();
+        // The .git file arrives last, after every clone.
+        for (path, size, attrs) in &files {
+            let root = acc.add(path, *size, false, Some(attrs));
+            groups.add(attrs, *size, root.unwrap_or(crate::clone_attrs::OUTSIDE_ROOTS));
+        }
+        for i in 0..3 {
+            let store = format!("/Users/dev/Library/pnpm/store/v10/files/b{i}");
+            let root = acc.add(&store, SIZE, false, Some(&copy_of(2, 4))).unwrap();
+            groups.add(&copy_of(2, 4), SIZE, root);
+        }
+        let listed: Vec<(&str, u64)> = files.iter().map(|(p, s, _)| (p.as_str(), *s)).collect();
+        resolve(&mut acc, &listed);
+
+        let shares = groups.attribute_remapped(acc.root_id_count(), &acc.root_remap);
+        let rec = &acc.artifacts[wt];
+        assert_eq!(rec.size, 4 * SIZE + 10_000 + 4_096);
+        let info = sidecar_clone(&acc, rec, shares.get(rec.id as usize)).unwrap();
+        assert_eq!(info.clone_size, 4 * SIZE);
+        assert_eq!(info.clone_private_size, 0);
+        // Group 1 is the worktree's alone once its node_modules fold in.
+        assert_eq!(info.clone_internal_size, SIZE);
+        // Group 2's copy and the loose clone are shared with files elsewhere.
+        assert_eq!(info.clone_shared_size, 2 * SIZE);
+        assert_eq!(info.clone_shared_blocks, SIZE / 4 + SIZE / 2);
+        assert_eq!(info.shared_with, vec!["/Users/dev/Library/pnpm/store".to_string()]);
+        // What removing it alone frees: its plain files plus group 1.
+        let sharing_frees = rec.size - info.clone_size + info.clone_private_size + info.clone_internal_size;
+        assert_eq!(sharing_frees, 10_000 + 4_096 + SIZE);
+    }
+
+    #[test]
+    fn sidecar_writes_worktree_project_and_nested_sizes() {
+        let files = [
+            ("/Users/dev/wt/app/.git", 4_096),
+            ("/Users/dev/wt/app/node_modules/x.js", 10_000),
+        ];
+        let mut acc = DevArtifactAcc::with_git_reader(fake_git_file);
+        for (path, size) in files {
+            acc.add(path, size, false, None);
+        }
+        resolve(&mut acc, &files);
+        let dir = std::env::temp_dir().join(format!("dh-dev-wt-sidecar-{}", std::process::id()));
+        let out = dir.join("scan.dev-artifacts.json");
+        write_sidecar(&out, "/", &acc, None).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        let roots = parsed["roots"].as_array().unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0]["kind"], "worktree");
+        assert_eq!(roots[0]["size"], 14_096);
+        assert_eq!(roots[0]["worktree"]["project"], "/Users/dev/github/app");
+        assert_eq!(roots[0]["worktree"]["nestedSize"]["node-modules"], 10_000);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AGENTS.md scaling rule: count `work::step()`s at N and 8N.
+    #[test]
+    fn resolving_worktrees_is_linear_in_worktrees_trees_and_clone_folders() {
+        use crate::clone_attrs::{CloneAttrs, EF_MAY_SHARE_BLOCKS};
+        let loose = CloneAttrs {
+            private_size: Some(0),
+            ext_flags: EF_MAY_SHARE_BLOCKS,
+            ..CloneAttrs::default()
+        };
+        let run = |worktrees: usize| -> u64 {
+            let mut acc = DevArtifactAcc::with_git_reader(fake_git_file);
+            let mut files: Vec<(String, u64)> = Vec::new();
+            for w in 0..worktrees {
+                let wt = format!("/Users/dev/wt/r{}/w{w}", w % 7);
+                files.push((format!("{wt}/.git"), 4_096));
+                for p in 0..3 {
+                    files.push((format!("{wt}/packages/p{p}/node_modules/x/i.js"), 1_000));
+                    files.push((format!("{wt}/packages/p{p}/src/logo.png"), 1_000));
+                }
+                files.push((format!("{wt}/target/debug/app"), 1_000));
+                // Trees and clones outside every worktree.
+                files.push((format!("/Users/dev/github/r{w}/node_modules/x/i.js"), 1_000));
+                files.push((format!("/Users/dev/github/r{w}/src/logo.png"), 1_000));
+            }
+            for (path, size) in &files {
+                let attrs = path.ends_with(".png").then_some(&loose);
+                acc.add(path, *size, false, attrs);
+            }
+            let listed: Vec<(&str, u64)> = files.iter().map(|(p, s)| (p.as_str(), *s)).collect();
+            let totals = tree_totals_of(&listed);
+            crate::work::take();
+            acc.resolve_worktrees(&|path| totals.get(path).copied());
+            let steps = crate::work::take();
+            assert_eq!(acc.worktree_count(), worktrees);
+            steps
+        };
+        let small = run(250);
+        let large = run(2_000);
+        let growth = large as f64 / small as f64;
+        eprintln!("resolve_worktrees: {small} -> {large} steps ({growth:.1}x)");
+        assert!(growth <= 16.0, "grew {growth:.1}x from N to 8N");
+        // ~12 trees and clone folders per worktree, each a few parent hops.
+        assert!(large <= 2_000 * 150, "{large} steps at 8N");
     }
 
     #[test]

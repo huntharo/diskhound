@@ -473,3 +473,63 @@ describe("APFS clone info in the Dev sidecar", () => {
     expect(next.roots[1]!.clone).toBeUndefined();
   });
 });
+
+describe("linked worktrees in the Dev sidecar", () => {
+  const worktree = {
+    project: "/Users/me/github/app",
+    nestedSize: { "node-modules": 400, "rust-target": 100 },
+  };
+  const sidecar = {
+    version: 1 as const,
+    rootPath: "/",
+    generatedAt: 1,
+    roots: [
+      { path: "/Users/me/claude-worktrees/app/feat", kind: "worktree" as const, size: 600, files: 9, worktree },
+      { path: "/Users/me/github/app/node_modules", kind: "node-modules" as const, size: 300, files: 4 },
+    ],
+    // The worktree's own package.json makes it a project too.
+    projects: ["/Users/me/github/app", "/Users/me/claude-worktrees/app/feat"],
+  };
+
+  it("belongs to the main checkout its .git file points at, and round-trips", async () => {
+    const { reportFromSidecar, sidecarFromReport } = await import("../devArtifactSidecar");
+    const report = reportFromSidecar(sidecar);
+    const row = report.artifacts.find((a) => a.kind === "worktree")!;
+    expect(row.projectPath).toBe("/Users/me/github/app");
+    expect(row.projectName).toBe("app");
+    expect(row.worktree).toEqual(worktree);
+    // Nested trees are already in the worktree's size: nothing doubles.
+    expect(report.totalBytes).toBe(900);
+    const back = sidecarFromReport(report);
+    expect(back.roots.find((r) => r.kind === "worktree")!.worktree).toEqual(worktree);
+    expect(reportFromSidecar(back).artifacts.find((a) => a.kind === "worktree")!.projectPath)
+      .toBe("/Users/me/github/app");
+  });
+
+  it("falls back to the nearest project without one", async () => {
+    const { reportFromSidecar } = await import("../devArtifactSidecar");
+    const report = reportFromSidecar({
+      ...sidecar,
+      roots: [{ path: "/Users/me/github/app/.worktrees/feat", kind: "worktree", size: 10, files: 1, worktree: {} }],
+    });
+    expect(report.artifacts[0]!.projectPath).toBe("/Users/me/github/app");
+  });
+
+  it("rescans keep the main checkout and scale nested sizes", async () => {
+    const { carryWorktreeInfo } = await import("../devArtifactSidecar");
+    const next = carryWorktreeInfo({
+      ...sidecar,
+      roots: [
+        { path: "/Users/me/claude-worktrees/app/feat", kind: "worktree", size: 300, files: 5 },
+        { path: "/Users/me/github/app/node_modules", kind: "node-modules", size: 300, files: 4 },
+      ],
+    }, sidecar);
+    expect(next.roots[0]!.worktree).toEqual({
+      project: "/Users/me/github/app",
+      nestedSize: { "node-modules": 200, "rust-target": 50 },
+    });
+    expect(next.roots[1]!.worktree).toBeUndefined();
+    // The previous sidecar is untouched.
+    expect(worktree.nestedSize["node-modules"]).toBe(400);
+  });
+});
