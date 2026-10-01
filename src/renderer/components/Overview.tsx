@@ -399,7 +399,7 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
                     title={showFolders ? "Hide folder boundaries" : "Show folder boundaries"}
                     onClick={() => setShowFolders((v) => !v)}
                   >
-                    <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4">
+                    <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4">
                       <path d="M1.5 3.5V11.5C1.5 12.05 1.95 12.5 2.5 12.5H11.5C12.05 12.5 12.5 12.05 12.5 11.5V5.5C12.5 4.95 12.05 4.5 11.5 4.5H7L5.5 2.5H2.5C1.95 2.5 1.5 2.95 1.5 3.5Z" />
                     </svg>
                     Folders
@@ -419,7 +419,7 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
                     : "Filter the treemap to only show recently-modified files"}
                   onClick={() => setRecentOn((v) => !v)}
                 >
-                  <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4">
+                  <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4">
                     <circle cx="7" cy="7" r="5" />
                     <path d="M7 4V7L9 8.5" />
                   </svg>
@@ -535,8 +535,8 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
               {snapshot.status === "running" && treemapFiles.length === 0 ? (
                 <div className="treemap-empty">
                   <div className="treemap-empty-icon">
-                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.7">
-                      <circle cx="12" cy="12" r="9" strokeDasharray="6 4" />
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.7">
+                      <circle cx="12" cy="12" r="9" stroke-dasharray="6 4" />
                       <path d="M12 2L12 6M12 18L12 22M2 12L6 12M18 12L22 12" />
                     </svg>
                   </div>
@@ -699,7 +699,7 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
               aria-label="Show extensions"
               aria-expanded={false}
             >
-              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.6">
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6">
                 <path d="M7 2L3 5L7 8" />
               </svg>
               <span className="ext-sidebar-collapsed-label">Extensions</span>
@@ -715,7 +715,7 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
                   aria-label="Hide extensions"
                   aria-expanded={true}
                 >
-                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.6">
+                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6">
                     <path d="M3 2L7 5L3 8" />
                   </svg>
                 </button>
@@ -995,7 +995,7 @@ function MonitoringNudge() {
   return (
     <div className="monitoring-nudge">
       <div className="monitoring-nudge-icon" aria-hidden="true">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">
           <path d="M12 2a6 6 0 0 0-6 6v3.6c0 .6-.3 1.2-.8 1.6L4 14v1h16v-1l-1.2-.8a2 2 0 0 1-.8-1.6V8a6 6 0 0 0-6-6z" />
           <path d="M10 18a2 2 0 0 0 4 0" />
         </svg>

@@ -281,8 +281,7 @@ button, input, select, textarea { font: inherit; }
  * cannot wrap or move when badges come and go. --text-tertiary gives
  * 3.6:1 or better on rows in every theme, above the 3:1 WCAG 1.4.11
  * asks of an icon that is the only sign a row opens; --text-muted
- * gave 2.4:1. Stroke settings live here because Preact without compat
- * writes strokeWidth as a literal attribute that SVG ignores. */
+ * gave 2.4:1. */
 .disclosure-chevron {
   flex-shrink: 0;
   color: var(--text-tertiary);

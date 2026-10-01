@@ -494,7 +494,7 @@ function GpuProcessContextMenu({
             role="menuitem"
             onClick={() => act(() => void nativeApi.revealPath(proc.exePath!))}
           >
-            <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+            <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
               <path d="M1.5 3.5V11.5C1.5 12.05 1.95 12.5 2.5 12.5H11.5C12.05 12.5 12.5 12.05 12.5 11.5V5.5C12.5 4.95 12.05 4.5 11.5 4.5H7L5.5 2.5H2.5C1.95 2.5 1.5 2.95 1.5 3.5Z" />
             </svg>
             Reveal executable
@@ -511,7 +511,7 @@ function GpuProcessContextMenu({
               })
             }
           >
-            <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+            <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
               <rect x="4" y="4" width="8" height="9" rx="1" />
               <path d="M4 4V3C4 2.45 4.45 2 5 2H9C9.55 2 10 2.45 10 3V4" />
             </svg>
@@ -534,7 +534,7 @@ function GpuProcessContextMenu({
           })
         }
       >
-        <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+        <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
           <rect x="2" y="2" width="4" height="4" />
           <rect x="8" y="2" width="4" height="4" />
           <rect x="2" y="8" width="4" height="4" />
@@ -549,7 +549,7 @@ function GpuProcessContextMenu({
         disabled={busy}
         onClick={() => void kill(false)}
       >
-        <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+        <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
           <circle cx="7" cy="7" r="5.5" />
           <path d="M7 4V7.5" />
         </svg>
@@ -561,7 +561,7 @@ function GpuProcessContextMenu({
         disabled={busy}
         onClick={() => void kill(true)}
       >
-        <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+        <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
           <path d="M3.5 3.5L10.5 10.5M10.5 3.5L3.5 10.5" />
         </svg>
         Force kill

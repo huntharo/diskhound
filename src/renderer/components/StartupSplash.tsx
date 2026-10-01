@@ -75,9 +75,9 @@ export function StartupSplash({ delayMs = 80 }: Props) {
             fill="none"
             aria-hidden="true"
           >
-            <circle cx="36" cy="36" r="34" stroke="currentColor" strokeWidth="1" opacity="0.18" />
-            <circle cx="36" cy="36" r="24" stroke="currentColor" strokeWidth="1" opacity="0.12" />
-            <circle cx="36" cy="36" r="14" stroke="currentColor" strokeWidth="1" opacity="0.10" />
+            <circle cx="36" cy="36" r="34" stroke="currentColor" stroke-width="1" opacity="0.18" />
+            <circle cx="36" cy="36" r="24" stroke="currentColor" stroke-width="1" opacity="0.12" />
+            <circle cx="36" cy="36" r="14" stroke="currentColor" stroke-width="1" opacity="0.10" />
             <circle cx="36" cy="36" r="3" fill="currentColor" opacity="0.45" />
           </svg>
           {/* Rotating amber sweep — conic gradient masked to a ring so

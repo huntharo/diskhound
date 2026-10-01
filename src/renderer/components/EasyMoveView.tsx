@@ -103,7 +103,7 @@ export function EasyMoveView() {
       {records.length === 0 ? (
         <div className="easymove-empty">
           <div className="easymove-empty-icon">
-            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" opacity="0.3">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.3">
               <path d="M14 2H6C4.9 2 4 2.9 4 4V20C4 21.1 4.9 22 6 22H18C19.1 22 20 21.1 20 20V8L14 2Z" />
               <path d="M14 2V8H20" />
               <path d="M8 13H16M12 9V17" />
@@ -145,10 +145,10 @@ function EasyMoveRow({ record, verification, isBusy, onMoveBack }: {
       <div className="easymove-row-icon">
         {record.isDirectory ? (
           <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
-            <path d="M2 4V13C2 13.55 2.45 14 3 14H13C13.55 14 14 13.55 14 13V6C14 5.45 13.55 5 13 5H8L6.5 3H3C2.45 3 2 3.45 2 4Z" fill="currentColor" opacity="0.2" stroke="currentColor" strokeWidth="1" />
+            <path d="M2 4V13C2 13.55 2.45 14 3 14H13C13.55 14 14 13.55 14 13V6C14 5.45 13.55 5 13 5H8L6.5 3H3C2.45 3 2 3.45 2 4Z" fill="currentColor" opacity="0.2" stroke="currentColor" stroke-width="1" />
           </svg>
         ) : (
-          <svg width="16" height="16" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.1">
+          <svg width="16" height="16" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.1">
             <path d="M3 1.5H8.5L11 4V12.5H3V1.5Z" />
             <path d="M8.5 1.5V4H11" />
           </svg>
@@ -158,7 +158,7 @@ function EasyMoveRow({ record, verification, isBusy, onMoveBack }: {
         <div className="easymove-row-name">{name}</div>
         <div className="easymove-row-paths">
           <span className="easymove-row-from">{record.originalPath}</span>
-          <svg width="12" height="10" viewBox="0 0 12 10" fill="none" stroke="currentColor" strokeWidth="1.2" opacity="0.4">
+          <svg width="12" height="10" viewBox="0 0 12 10" fill="none" stroke="currentColor" stroke-width="1.2" opacity="0.4">
             <path d="M2 5H10M7.5 2.5L10 5L7.5 7.5" />
           </svg>
           <span className="easymove-row-to">{record.movedToPath}</span>

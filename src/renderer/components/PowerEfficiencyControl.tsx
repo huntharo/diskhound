@@ -314,7 +314,7 @@ export function PowerEfficiencyMenuButton({ preset, cpus, onChoose, platform = n
               >
                 <span className="power-menu-check" aria-hidden="true">
                   {p === current && (
-                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                       <polyline points="2.5,6.5 5,9 9.5,3.5" />
                     </svg>
                   )}
