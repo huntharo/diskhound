@@ -3,10 +3,8 @@ import { Worker } from "node:worker_threads";
 import { resolveBundledWorkerScript } from "./bundledWorkerPath";
 
 import type { DevArtifactReport } from "./contracts";
-import type { DevArtifactsRescanProgress } from "./devArtifactSidecar";
 import type {
   DevArtifactsClassifyInput,
-  DevArtifactsRescanInput,
   DevArtifactsWorkerRequest,
   DevArtifactsWorkerResponse,
 } from "./devArtifactsWorkerProtocol";
@@ -21,10 +19,8 @@ export function resolveBundledDevArtifactsWorkerPath(baseDir: string): string {
  * silently capped at 4 GB, and a worker that fills the cage aborts the
  * whole app ("young object promotion failed", exit 134), not just itself.
  * A worker that reaches its own, lower limit fails with
- * ERR_WORKER_OUT_OF_MEMORY instead, which main survives. Neither job
- * needs much: classify streams the folder tree and holds only artifact
- * roots and projects; rescan holds DEV_SIDECAR_ROOT_CAP roots and one
- * walk's folder stack.
+ * ERR_WORKER_OUT_OF_MEMORY instead, which main survives. Classification
+ * streams the folder tree and holds only artifact roots and projects.
  */
 const DEV_ARTIFACTS_WORKER_HEAP_MB = 1024;
 const DEV_ARTIFACTS_WORKER_YOUNG_HEAP_MB = 64;
@@ -32,7 +28,6 @@ const DEV_ARTIFACTS_WORKER_YOUNG_HEAP_MB = 64;
 export interface RunDevArtifactsWorkerOptions {
   workerPath: string;
   signal?: AbortSignal;
-  onProgress?: (progress: DevArtifactsRescanProgress) => void;
 }
 
 function runDevArtifactsRequest(
@@ -73,10 +68,6 @@ function runDevArtifactsRequest(
 
     const onMessage = (message: DevArtifactsWorkerResponse) => {
       if (!message || message.requestId !== request.requestId) return;
-      if (message.type === "progress") {
-        options.onProgress?.(message.progress);
-        return;
-      }
       if (message.type === "result") {
         settle(() => resolve(message.report));
         return;
@@ -122,13 +113,6 @@ function runDevArtifactsRequest(
 
 function nextRequestId(): string {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-export async function runDevArtifactsRescanWorker(
-  input: DevArtifactsRescanInput,
-  options: RunDevArtifactsWorkerOptions,
-): Promise<DevArtifactReport> {
-  return runDevArtifactsRequest({ type: "rescan", requestId: nextRequestId(), input }, options);
 }
 
 export async function runDevArtifactsClassifyWorker(

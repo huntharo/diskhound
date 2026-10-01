@@ -157,7 +157,6 @@ import { dropArtifactsFromReport } from "./shared/devArtifacts";
 import {
   resolveBundledDevArtifactsWorkerPath,
   runDevArtifactsClassifyWorker,
-  runDevArtifactsRescanWorker,
 } from "./shared/devArtifactsWorkerRuntime";
 import {
   deleteFullDiffCachesForScan,
@@ -185,7 +184,6 @@ const DISK_DELTA_CHANNEL = "diskhound:disk-delta";
 const NOTIFICATION_CHANNEL = "diskhound:notification";
 const DUPLICATE_PROGRESS_CHANNEL = "diskhound:duplicate-progress";
 const DUPLICATE_RESULT_CHANNEL = "diskhound:duplicate-result";
-const DEV_ARTIFACTS_PROGRESS_CHANNEL = "diskhound:dev-artifacts-progress";
 const PERMANENT_DELETE_PROGRESS_CHANNEL = "diskhound:permanent-delete-progress";
 /** Broadcast from main to every renderer window after settings
  *  are persisted. Replaces the widget's prior 12 s poll — see the
@@ -3361,7 +3359,6 @@ void (async () => {
   // ask on every mount.
   const devArtifactCache = new Map<string, DevArtifactReport>();
   const devArtifactInflight = new Map<string, Promise<DevArtifactReport | null>>();
-  const devRescanAbort = new Map<string, AbortController>();
   // Scans whose sidecar load found no sidecar, and scans whose full
   // load found nothing to classify or failed to. Both answer null from
   // memory for a while, instead of listing scan-indexes and reading
@@ -3379,11 +3376,16 @@ void (async () => {
     const at = misses.get(scanId);
     return at !== undefined && Date.now() - at < DEV_ARTIFACT_NEGATIVE_TTL_MS;
   };
-  // Remotes of each `git-repo` row, keyed by its `.git` path. Read once
-  // per repo per run; a rebuilt report (forget, tab switch) reads none.
-  const devGitInfo = new Map<string, DevGitRepoInfo>();
+  // A new drive scan must read current remotes, while a rebuilt report
+  // from the same scan (forget, tab switch) can reuse its annotations.
+  const devGitInfoByScan = new Map<string, Map<string, DevGitRepoInfo>>();
   const setDevReport = async (scanId: string, report: DevArtifactReport) => {
-    const annotated = await annotateGitRepos(report, devGitInfo);
+    let gitInfo = devGitInfoByScan.get(scanId);
+    if (!gitInfo) {
+      gitInfo = new Map<string, DevGitRepoInfo>();
+      devGitInfoByScan.set(scanId, gitInfo);
+    }
+    const annotated = await annotateGitRepos(report, gitInfo);
     devArtifactCache.set(scanId, annotated);
     devSidecarMissingAt.delete(scanId);
     devFullLoadEmptyAt.delete(scanId);
@@ -3486,12 +3488,6 @@ void (async () => {
     return pending;
   });
 
-  ipcMain.handle("diskhound:cancel-dev-artifacts-rescan", (_event, rootPath: string) => {
-    const key = scanKey(rootPath);
-    const ac = devRescanAbort.get(key);
-    if (ac) ac.abort();
-  });
-
   ipcMain.handle("diskhound:forget-dev-artifact-paths", async (_event, rootPath: string, paths: unknown) => {
     const list = Array.isArray(paths)
       ? paths.filter((path): path is string => typeof path === "string" && path.trim().length > 0)
@@ -3523,54 +3519,6 @@ void (async () => {
     const report = await setDevReport(current.id, reportFromSidecar(nextSidecar, previous));
     writeCrashLog("dev-artifacts", `forgot ${list.length} tree(s) scanId=${current.id}`);
     return report;
-  });
-
-  ipcMain.handle("diskhound:rescan-dev-artifacts", async (_event, rootPath: string) => {
-    const history = getScanHistory(rootPath);
-    const current = history[0];
-    if (!current) return null;
-    const key = scanKey(rootPath);
-    devRescanAbort.get(key)?.abort();
-    const ac = new AbortController();
-    devRescanAbort.set(key, ac);
-    // A rescan re-reads what is on disk, remotes included.
-    devGitInfo.clear();
-    try {
-      const report = await runDevArtifactsRescanWorker(
-        {
-          rootPath,
-          sidecarPath: devArtifactsSidecarPath(current.id),
-          indexPath: indexFilePath(current.id),
-        },
-        {
-          workerPath: devArtifactsWorkerEntry,
-          signal: ac.signal,
-          onProgress: (progress) => {
-            mainWindow?.webContents.send(DEV_ARTIFACTS_PROGRESS_CHANNEL, {
-              ...progress,
-              rootPath,
-            });
-          },
-        },
-      );
-      const latest = getScanHistory(rootPath)[0];
-      if (latest && latest.id !== current.id) {
-        const adopted = await loadDevReport(latest.id, rootPath, getScanHistory(rootPath)[1]?.id);
-        if (adopted && adopted.artifacts.length > 0) {
-          return setDevReport(latest.id, adopted);
-        }
-      }
-      return setDevReport(current.id, report);
-    } catch (err) {
-      if (ac.signal.aborted) return null;
-      writeCrashLog(
-        "dev-artifacts-rescan",
-        err instanceof Error ? (err.stack ?? err.message) : String(err),
-      );
-      return null;
-    } finally {
-      if (devRescanAbort.get(key) === ac) devRescanAbort.delete(key);
-    }
   });
 
   // Just before the Dev tab offers to remove a checkout. Runs only on

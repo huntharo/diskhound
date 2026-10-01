@@ -3,7 +3,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { expect, test } from "./fixtures/electron-app";
-import { openTab, scanFolderFromPicker } from "./fixtures/steps";
+import { openTab, scanFolderFromPicker, waitForScanComplete } from "./fixtures/steps";
 
 // Whole multiples of 4 KiB, so the allocated size the scanner reports
 // is at least the logical size.
@@ -93,6 +93,18 @@ test("lists Git repos with their remotes and moves one to the Trash only after t
   await expect(scratch.locator(".dev-git-badge.warn")).toHaveText("No remote");
   // No checkbox: repos stay out of Delete selected and Delete all.
   await expect(rows.locator("input[type=checkbox]")).toHaveCount(0);
+
+  // The header's drive rescan is now the only Dev refresh. It must also
+  // refresh remote details that were cached for the previous scan.
+  write(root, ["openclaw", ".git", "config"],
+    "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = https://github.com/openclaw/renamed.git\n");
+  const before = await page.evaluate((r) => window.diskhound.getScanHistory(r), rootPath);
+  await page.locator(".scan-controls").getByRole("button", { name: "Rescan", exact: true }).click();
+  await expect.poll(
+    () => page.evaluate((r) => window.diskhound.getScanHistory(r).then((history) => history[0]?.id), rootPath),
+  ).not.toBe(before[0]?.id);
+  await waitForScanComplete(page);
+  await expect(openclaw.locator(".dev-git-badge")).toHaveText("github.com/openclaw/renamed");
 
   const dialogs: string[] = [];
   page.on("dialog", (dialog) => {
