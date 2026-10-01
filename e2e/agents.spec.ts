@@ -47,16 +47,17 @@ test("an approved agent reads the scan and the window follows it", async ({ laun
   await expect(page.locator(".agent-pill")).toHaveClass(/\bactive\b/);
   await expect(page.locator(".agent-pill-name")).toHaveText("Follow-along");
 
-  // A narrow window keeps the dot and drops the name, which stays in the
-  // pill's label.
-  const win = await handle.app.browserWindow(page);
-  const [width, height] = await win.evaluate((w) => w.getSize());
-  await win.evaluate((w) => w.setSize(1000, 720));
-  await expect.poll(() => page.evaluate(() => innerWidth)).toBeLessThanOrEqual(1000);
+  // Exercise both sides of the responsive breakpoint independently of the
+  // runner's display size. Its initial native window may already be narrow.
+  const viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight }));
+  await page.setViewportSize({ width: 1000, height: 720 });
+  await expect.poll(() => page.evaluate(() => innerWidth)).toBe(1000);
   await expect(page.locator(".agent-pill-name")).toBeHidden();
   await expect(page.locator(".agent-pill")).toHaveAccessibleName(/Follow-along/);
-  await win.evaluate((w, [wide, tall]) => w.setSize(wide!, tall!), [width, height]);
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await expect.poll(() => page.evaluate(() => innerWidth)).toBe(1280);
   await expect(page.locator(".agent-pill-name")).toBeVisible();
+  await page.setViewportSize(viewport);
 
   // The pill opens a popover with the session and what it did last.
   await page.locator(".agent-pill").click();
