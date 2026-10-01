@@ -9,6 +9,15 @@ import {
   isPowerEfficiency,
   type PowerEfficiency,
 } from "./powerEfficiency";
+import type {
+  AddToClaudeResult,
+  AgentAccessSnapshot,
+  AgentActivityEntry,
+  AgentConsentDecision,
+  AgentConsentPrompt,
+  AgentConsentState,
+  AgentSecurityEvent,
+} from "./agentAccess";
 
 export type ScanStatus = "idle" | "running" | "done" | "cancelled" | "error";
 export type ScanEngine = "js-worker" | "native-sidecar" | "usn-journal";
@@ -363,6 +372,18 @@ export interface AppSettings {
    *  overridden by another tool). Matches Process Lasso's "CPU
    *  Affinity Rules" tab semantics. */
   affinityRules: AffinityRule[];
+  /** Local AI agent access over MCP (Settings → AI Agents). */
+  agents: AgentSettings;
+}
+
+export interface AgentSettings {
+  /**
+   * Listen for MCP connections from local agents (Claude Code, Codex)
+   * on the loopback port. Off by default: nothing listens until the
+   * user opts in, and every agent still needs OAuth approval in the
+   * app. Sessions and their roles live in mcp-policy.json, not here.
+   */
+  enabled: boolean;
 }
 
 export interface AffinityRule {
@@ -1302,6 +1323,23 @@ export interface NavigateViewPayload {
    * rows in the widget so clicking C: jumps to its overview.
    */
   scanRoot?: string;
+  /**
+   * With `view: "folders"`, the folder to open. Sent by the MCP
+   * `diskhound_show` / `diskhound_list_folder` tools so the window
+   * follows an agent's drill-down.
+   */
+  folderPath?: string;
+  /**
+   * With `view: "settings"`, the section to scroll to. The app menu's
+   * Connect an AI Agent… and the tray use "ai-agents".
+   */
+  section?: "ai-agents";
+}
+
+/** What the main window is showing; reported to main for agents. */
+export interface WindowViewState {
+  view: AppView;
+  rootPath: string | null;
 }
 
 // ── IPC API ─────────────────────────────────────────────────
@@ -1674,6 +1712,34 @@ export interface DiskhoundNativeApi {
    * navigation request — only the main window's renderer does.
    */
   onNavigateView: (listener: (payload: NavigateViewPayload) => void) => () => void;
+  /** Tell main which tab and root the main window shows (for agents). */
+  reportViewState: (state: WindowViewState) => void;
+  /** Paths an agent moved to the Trash (after the user confirmed). */
+  onPathsTrashed: (listener: (paths: string[]) => void) => () => void;
+  /** Paths an agent deleted permanently (after the user confirmed). */
+  onPathsDeleted: (listener: (paths: string[]) => void) => () => void;
+
+  // Local AI agent access (MCP)
+  getAgentAccess: () => Promise<AgentAccessSnapshot>;
+  setAgentAccessEnabled: (enabled: boolean) => Promise<AgentAccessSnapshot>;
+  revokeAgentSession: (sessionId: string) => Promise<AgentAccessSnapshot>;
+  assignAgentSessionRole: (sessionId: string, roleId: string) => Promise<AgentAccessSnapshot>;
+  forgetRevokedAgentSessions: () => Promise<AgentAccessSnapshot>;
+  onAgentAccessChanged: (listener: (snapshot: AgentAccessSnapshot) => void) => () => void;
+  onAgentActivity: (listener: (entry: AgentActivityEntry) => void) => () => void;
+  /** Something an agent tried and wasn't allowed to do (new or repeated). */
+  onAgentSecurityEvent: (listener: (event: AgentSecurityEvent) => void) => () => void;
+  /** Bring the approval sheet that's waiting to the front. */
+  focusAgentApproval: () => Promise<boolean>;
+  /** Deny a waiting approval from Settings. */
+  dismissAgentApproval: (requestId: string) => Promise<AgentAccessSnapshot>;
+  /** Build DiskHound's Claude extension and open it in Claude, which asks to install it. */
+  addAgentToClaude: () => Promise<AddToClaudeResult>;
+  /** Approval window only: the pending request this window was opened for. */
+  agentConsentRead: () => Promise<(AgentConsentPrompt & Omit<AgentConsentState, "requestId">) | null>;
+  agentConsentDecide: (decision: AgentConsentDecision) => Promise<{ ok: boolean; message?: string }>;
+  /** Approval window only: the waiting agent went quiet, or came back. */
+  onAgentConsentState: (listener: (state: AgentConsentState) => void) => () => void;
 }
 
 // ── Defaults ────────────────────────────────────────────────
@@ -1735,6 +1801,9 @@ export function defaultSettings(): AppSettings {
     },
     recentScans: [],
     affinityRules: [],
+    agents: {
+      enabled: false,
+    },
   };
 }
 
@@ -1788,6 +1857,7 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
     cleanup: { ...defaults.cleanup, ...(input?.cleanup ?? {}) },
     storage: { ...defaults.storage, ...(input?.storage ?? {}) },
     recentScans: Array.isArray(input?.recentScans) ? input!.recentScans : defaults.recentScans,
+    agents: { ...defaults.agents, ...(input?.agents ?? {}) },
     affinityRules: Array.isArray(input?.affinityRules)
       ? input!.affinityRules
           .map((r) => normalizeAffinityRule(r))
@@ -1923,6 +1993,9 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
         bytesFound: Math.max(0, Math.round(scan.bytesFound)),
       })),
     affinityRules: merged.affinityRules,
+    agents: {
+      enabled: Boolean(merged.agents.enabled),
+    },
   };
 }
 

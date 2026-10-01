@@ -34,6 +34,8 @@ mod index_line;
 #[cfg(not(windows))]
 mod hardlinks;
 #[cfg(not(windows))]
+mod measure;
+#[cfg(not(windows))]
 mod walk_prune;
 #[cfg(test)]
 mod test_support;
@@ -1168,6 +1170,20 @@ fn main() {
         || matches_flag(&raw_args, "--mode", "query-cursor");
     let is_sample = raw_args.iter().any(|a| a == "--mode=sample")
         || matches_flag(&raw_args, "--mode", "sample");
+    let is_measure = raw_args.iter().any(|a| a == "--mode=measure-removal")
+        || matches_flag(&raw_args, "--mode", "measure-removal");
+
+    if is_measure {
+        #[cfg(not(windows))]
+        let result = measure::run(&raw_args, &CANCELLED);
+        #[cfg(windows)]
+        let result: Result<(), String> = Err("measure-removal is not available on Windows".into());
+        if let Err(error) = result {
+            let _ = emit_message(&Message::Error { message: error });
+            std::process::exit(1);
+        }
+        return;
+    }
 
     if is_sample {
         if let Err(error) = sample::run_sample_once() {

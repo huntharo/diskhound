@@ -17,6 +17,11 @@ extraResources:
     filter:
       - "diskhound-native-scanner"
       - "diskhound-native-scanner.exe"
+  - from: native/diskhound-mcp/target/release/
+    to: native/
+    filter:
+      - "diskhound-mcp"
+      - "diskhound-mcp.exe"
   - from: build/icon.png
     to: icon.png
   # Multi-size PNGs used at runtime to (a) build a multi-rep NativeImage
@@ -29,6 +34,11 @@ extraResources:
     to: icons
     filter:
       - "*.png"
+  # MCP skills served to connected AI agents (Settings → AI Agents).
+  # Plain files under resources/skills/ so the catalog can hash and
+  # serve them without reaching into the asar.
+  - from: skills
+    to: skills
 
 asar: true
 # Native modules (.node binaries) must live OUTSIDE the asar archive

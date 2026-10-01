@@ -1,0 +1,9 @@
+{
+  "approval-reconnect-and-poll": {
+    "credentialReads": 102,
+    "credentialWrites": 1,
+    "credentialDeletes": 1,
+    "observedPayloadBytesWritten": 49,
+    "note": "One real OAuth approval (a read when the connection starts, and one more under the approval lock in case another connection was approved meanwhile), 100 reconnects and 1440 in-memory token checks per connection, then local forget. OS credential API calls are counted exactly; encrypted-store overhead is OS-owned and cannot be measured by Node measureFsIo. One new approval/day is 1 credential write and 0.000049 MB payload/day; 24 new approvals/day is 24 writes and 0.001176 MB/day, at both default and aggressive 1-minute monitoring. Reconnects and requests add zero writes. App-side registration/approval/read I/O is measured in src/mcp/__tests__/agentPersistence.ioBudget.test.ts. The zero-byte process-lock file is created once per port and client and never rewritten."
+  }
+}

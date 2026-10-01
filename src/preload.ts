@@ -1,5 +1,3 @@
-import * as OS from "node:os";
-
 import { contextBridge, ipcRenderer } from "electron";
 
 import type {
@@ -17,6 +15,7 @@ import type {
   ToastMessage,
   UpdateStatus,
 } from "./shared/contracts";
+import type { AgentAccessSnapshot, AgentActivityEntry, AgentConsentState, AgentSecurityEvent } from "./shared/agentAccess";
 
 // Normalize node's rich NodeJS.Platform union down to the three
 // platforms we actually ship binaries for. FreeBSD / AIX / SunOS are
@@ -39,10 +38,19 @@ const PERMANENT_DELETE_PROGRESS_CHANNEL = "diskhound:permanent-delete-progress";
 const SETTINGS_UPDATED_CHANNEL = "diskhound:settings-updated";
 const NAVIGATE_VIEW_CHANNEL = "diskhound:navigate-view";
 const WINDOW_SHOWN_CHANNEL = "diskhound:window-shown";
+const PATHS_TRASHED_CHANNEL = "diskhound:paths-trashed";
+const PATHS_DELETED_CHANNEL = "diskhound:paths-deleted";
+const AGENT_ACCESS_CHANGED_CHANNEL = "diskhound:agent-access-changed";
+const AGENT_ACTIVITY_CHANNEL = "diskhound:agent-activity";
+const AGENT_SECURITY_CHANNEL = "diskhound:agent-security";
+const AGENT_CONSENT_STATE_CHANNEL = "diskhound:agent-consent-state";
 
 const api: DiskhoundNativeApi = {
   platform,
-  cpuCount: OS.availableParallelism(),
+  // The sandboxed agent approval window cannot require node:os.
+  cpuCount: process.sandboxed
+    ? navigator.hardwareConcurrency || 1
+    : (require("node:os") as typeof import("node:os")).availableParallelism(),
 
   // Scan
   pickRootPath: () => ipcRenderer.invoke("diskhound:pick-root"),
@@ -260,6 +268,62 @@ const api: DiskhoundNativeApi = {
     };
     ipcRenderer.on(NAVIGATE_VIEW_CHANNEL, wrapped);
     return () => { ipcRenderer.removeListener(NAVIGATE_VIEW_CHANNEL, wrapped); };
+  },
+  reportViewState: (state) => ipcRenderer.send("diskhound:report-view-state", state),
+  onPathsTrashed: (listener) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, paths: string[]) => {
+      listener(paths);
+    };
+    ipcRenderer.on(PATHS_TRASHED_CHANNEL, wrapped);
+    return () => { ipcRenderer.removeListener(PATHS_TRASHED_CHANNEL, wrapped); };
+  },
+  onPathsDeleted: (listener) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, paths: string[]) => {
+      listener(paths);
+    };
+    ipcRenderer.on(PATHS_DELETED_CHANNEL, wrapped);
+    return () => { ipcRenderer.removeListener(PATHS_DELETED_CHANNEL, wrapped); };
+  },
+
+  // Local AI agent access (MCP)
+  getAgentAccess: () => ipcRenderer.invoke("diskhound:agent-access-get"),
+  setAgentAccessEnabled: (enabled) => ipcRenderer.invoke("diskhound:agent-access-set-enabled", enabled),
+  revokeAgentSession: (sessionId) => ipcRenderer.invoke("diskhound:agent-access-revoke", sessionId),
+  assignAgentSessionRole: (sessionId, roleId) =>
+    ipcRenderer.invoke("diskhound:agent-access-assign-role", sessionId, roleId),
+  forgetRevokedAgentSessions: () => ipcRenderer.invoke("diskhound:agent-access-forget-revoked"),
+  onAgentAccessChanged: (listener) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, snapshot: AgentAccessSnapshot) => {
+      listener(snapshot);
+    };
+    ipcRenderer.on(AGENT_ACCESS_CHANGED_CHANNEL, wrapped);
+    return () => { ipcRenderer.removeListener(AGENT_ACCESS_CHANGED_CHANNEL, wrapped); };
+  },
+  onAgentActivity: (listener) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, entry: AgentActivityEntry) => {
+      listener(entry);
+    };
+    ipcRenderer.on(AGENT_ACTIVITY_CHANNEL, wrapped);
+    return () => { ipcRenderer.removeListener(AGENT_ACTIVITY_CHANNEL, wrapped); };
+  },
+  onAgentSecurityEvent: (listener) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, event: AgentSecurityEvent) => {
+      listener(event);
+    };
+    ipcRenderer.on(AGENT_SECURITY_CHANNEL, wrapped);
+    return () => { ipcRenderer.removeListener(AGENT_SECURITY_CHANNEL, wrapped); };
+  },
+  focusAgentApproval: () => ipcRenderer.invoke("diskhound:agent-access-focus-approval"),
+  dismissAgentApproval: (requestId) => ipcRenderer.invoke("diskhound:agent-access-dismiss-approval", requestId),
+  addAgentToClaude: () => ipcRenderer.invoke("diskhound:agent-access-add-to-claude"),
+  agentConsentRead: () => ipcRenderer.invoke("diskhound:agent-consent-read"),
+  agentConsentDecide: (decision) => ipcRenderer.invoke("diskhound:agent-consent-decide", decision),
+  onAgentConsentState: (listener) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, state: AgentConsentState) => {
+      listener(state);
+    };
+    ipcRenderer.on(AGENT_CONSENT_STATE_CHANNEL, wrapped);
+    return () => { ipcRenderer.removeListener(AGENT_CONSENT_STATE_CHANNEL, wrapped); };
   },
 };
 

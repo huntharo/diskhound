@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "version": "0.6.4",
-  "description": "Fast disk space analyzer — find and clean up large files",
+  "description": "Fast disk space analyzer \u2014 find and clean up large files",
   "author": "DiskHound",
   "homepage": "https://github.com/tzarebczan/diskhound",
   "repository": {
@@ -30,19 +30,25 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:usn:windows": "bun run build:native:debug && vitest run src/__tests__/usnMonitor.windows.test.ts",
-    "build:e2e": "node node_modules/electron/install.js && bun run build:native:debug && bun run build:renderer && bun run build:electron",
+    "build:e2e": "node node_modules/electron/install.js && bun run build:native:debug && bun run build:mcp:debug && bun run build:renderer && bun run build:electron",
     "test:e2e": "bun run build:e2e && playwright test",
-    "dist": "bun run build:native && bun run build && electron-builder --config electron-builder.yml"
+    "dist": "bun run build:native && bun run build:mcp && bun run build && electron-builder --config electron-builder.yml",
+    "build:mcp": "cargo build --locked --release --manifest-path native/diskhound-mcp/Cargo.toml",
+    "build:mcp:debug": "cargo build --locked --manifest-path native/diskhound-mcp/Cargo.toml"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
     "@shutterstock/p-map-iterable": "^1.1.2",
     "blake2": "^5.0.1",
     "electron-updater": "^6.6.2",
-    "preact": "^10.26.9"
+    "express": "5.2.1",
+    "preact": "^10.26.9",
+    "zod": "4.6.5"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",
     "@preact/preset-vite": "^2.10.2",
+    "@types/express": "^5.0.6",
     "@types/node": "^24.12.0",
     "electron": "40.6.0",
     "electron-builder": "^26.0.12",

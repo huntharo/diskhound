@@ -18,6 +18,7 @@ import { dispatchSettingsUpdated, SETTINGS_UPDATED_EVENT } from "../lib/uiEvents
 import { startVisiblePoll } from "../lib/visiblePoll";
 import { PowerEfficiencyControl } from "./PowerEfficiencyControl";
 import { toast } from "./Toasts";
+import { AgentsSection } from "./AgentsSection";
 import { normPath } from "../../shared/pathUtils";
 import {
   basenameForPath,
@@ -329,6 +330,9 @@ export function SettingsView() {
           value={settings.cleanup.confirmPermanentDelete}
           onChange={(v) => void save({ ...settings, cleanup: { ...settings.cleanup, confirmPermanentDelete: v } })} />
       </div>
+
+      {/* ── AI Agents (MCP) ── */}
+      <AgentsSection />
 
       {/* ── Storage ── */}
       <StorageSection
