@@ -142,7 +142,10 @@ describe.skipIf(process.platform === "win32")("nativeRemovalMeasurer", () => {
   });
 
   it("stops the scanner when aborted", async () => {
-    const { binary } = fakeScanner("sleep 10");
+    // Replace the shell, like the real scanner's single process. A separate
+    // sleep child survives SIGTERM to the shell and holds its pipes open,
+    // delaying Node's close event until sleep finishes.
+    const { binary } = fakeScanner("exec sleep 10");
     const controller = new AbortController();
     const pending = nativeRemovalMeasurer(binary)(["/a"], controller.signal);
     setTimeout(() => controller.abort(), 50);
