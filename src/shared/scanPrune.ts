@@ -21,6 +21,9 @@ import { linuxMountPrunes } from "./linuxMounts";
  *     When both names are under the scan root, the walk keeps /Users and
  *     skips the Data-side twin. Data-only content (.Spotlight-V100,
  *     .fseventsd, MobileSoftwareUpdate, …) has no twin and is walked once.
+ *   - macOS iCloud Drive. A scan containing a home folder does not enter
+ *     Library/Mobile Documents. Selecting that directory itself as the
+ *     scan root still works.
  */
 
 export interface ScanPrunePlan {
@@ -30,18 +33,22 @@ export interface ScanPrunePlan {
   duplicateMounts: Set<string>;
   /** Data-volume names of directories reached through a firmlink below the root. */
   firmlinkTwins: Set<string>;
+  /** macOS: leave Mobile Documents out of scans rooted above it. */
+  pruneICloudDrive: boolean;
 }
 
-export type PruneReason = "other-mount" | "duplicate-mount" | "firmlink-twin";
+export type PruneReason = "other-mount" | "duplicate-mount" | "firmlink-twin" | "icloud-drive";
 
 export const emptyPrunePlan = (): ScanPrunePlan => ({
   otherMounts: new Set(),
   duplicateMounts: new Set(),
   firmlinkTwins: new Set(),
+  pruneICloudDrive: false,
 });
 
 /** Why the walk must not enter the directory `path`, or null to keep it. */
 export function skipReason(plan: ScanPrunePlan, path: string): PruneReason | null {
+  if (plan.pruneICloudDrive && mobileDocumentsSuffix(path) === "") return "icloud-drive";
   if (plan.otherMounts.has(path)) return "other-mount";
   if (plan.duplicateMounts.has(path)) return "duplicate-mount";
   if (plan.firmlinkTwins.has(path)) return "firmlink-twin";
@@ -69,6 +76,19 @@ function isUnder(root: string, path: string): boolean {
 
 function isAtOrUnder(root: string, path: string): boolean {
   return path === root || isUnder(root, path);
+}
+
+const MAC_MOBILE_DOCUMENTS_PATH = /^\/(?:System\/Volumes\/Data\/)?Users\/[^/]+\/Library\/Mobile Documents(?=\/|$)/i;
+
+/** The part below a user's Mobile Documents directory, through either Data-volume name. */
+function mobileDocumentsSuffix(path: string): string | null {
+  const match = MAC_MOBILE_DOCUMENTS_PATH.exec(path);
+  return match ? path.slice(match[0].length) : null;
+}
+
+/** Whether an old index record belongs to a directory excluded by the macOS iCloud rule. */
+export function isICloudDrivePath(path: string): boolean {
+  return mobileDocumentsSuffix(path) !== null;
 }
 
 /** Each line of /usr/share/firmlinks is `<path on />\t<path relative to the Data volume>`. */
@@ -135,6 +155,7 @@ const isStartupVolume = (point: string) => point === "/" || point === MAC_DATA_V
 export function macPrunePlan(root: string, mounts: string[], firmlinks: Firmlink[]): ScanPrunePlan {
   const trimmed = trimMountPoint(root);
   const plan = emptyPrunePlan();
+  plan.pruneICloudDrive = mobileDocumentsSuffix(trimmed) === null;
 
   for (const link of firmlinks) {
     if (isUnder(trimmed, link.data) && isAtOrUnder(trimmed, link.system)) {
