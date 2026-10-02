@@ -9,7 +9,6 @@ import {
   gitRepoManagedBy,
   gitRepoRemovalBlock,
   worktreeBulkNote,
-  worktreeRemovalConfirm,
   worktreeRisks,
 } from "../gitRepoDisplay";
 
@@ -178,22 +177,19 @@ describe("worktree checks", () => {
     }));
     const note = worktreeBulkNote(40, kept);
     expect(note).toContain("Git checked 40 worktrees: no uncommitted changes, no commits outside a branch.");
-    expect(note).toContain("Not deleted: 7 worktrees with work that exists only there:");
+    expect(note).toContain("Not deleted: 7 worktrees that Git could not clear for removal:");
     expect(note).toContain("    app — 1 file with uncommitted changes.");
     expect(note).toContain("…and 2 more");
-    expect(worktreeBulkNote(3, [])).toBe("Git checked 3 worktrees: no uncommitted changes, no commits outside a branch.");
+    expect(worktreeBulkNote(3, [])).toContain("Git will permanently remove these worktrees and their registrations.");
   });
 
-  it("move a worktree with its own work to the Trash after two confirms", () => {
-    const { first, second } = worktreeRemovalConfirm({
-      artifact: { path: "/Users/me/claude-worktrees/app/feat", size: 2_000_000_000 },
-      check: { ...CLEAR, changedFiles: 2, commitsOnlyHere: 1 },
-      trash: "Trash",
-    });
-    expect(first).toContain("Move the feat worktree to the Trash?");
-    expect(first).toContain("branch feat");
-    expect(first).toContain("⚠ 2 files with uncommitted changes.");
-    expect(first).toContain("⚠ 1 commit on its detached HEAD is on no branch.");
-    expect(second).toContain("cannot be recovered");
+  it("explains a failed Git check without claiming the worktree has unique work", () => {
+    const note = worktreeBulkNote(0, [{
+      artifact: { path: "/Users/me/worktrees/feat" },
+      check: { ...CLEAR, checked: false, problem: "git could not run here." },
+    }]);
+    expect(note).toContain("git could not run here.");
+    expect(note).toContain("Save their work or resolve the Git checks before trying again.");
+    expect(note).not.toContain("work that exists only there");
   });
 });

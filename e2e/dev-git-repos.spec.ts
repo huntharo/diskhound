@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { expect, test } from "./fixtures/electron-app";
@@ -13,6 +13,69 @@ const SMALL_PACK_BYTES = 256 * 1024;
 // Keep the tree out of the uploaded CI artifacts.
 test.afterEach(({}, testInfo) => {
   rmSync(testInfo.outputPath("dev"), { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+});
+
+test("permanently removes clean worktrees with Git and preserves ones with new work", async ({ launch }, testInfo) => {
+  const root = testInfo.outputPath("dev");
+  const repo = join(root, "repo");
+  const clean = join(root, "clean-worktree");
+  const dirty = join(root, "dirty-worktree");
+  const changedAfterCheck = join(root, "changed-after-check");
+  mkdirSync(repo, { recursive: true });
+  const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+  git(repo, "init", "-q", "-b", "main");
+  git(repo, "config", "user.email", "t@example.com");
+  git(repo, "config", "user.name", "t");
+  git(repo, "config", "commit.gpgsign", "false");
+  write(root, ["repo", "README.md"], "one\n");
+  write(root, ["repo", ".gitignore"], "node_modules/\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-q", "-m", "one");
+  git(repo, "worktree", "add", "-q", "-b", "clean", clean);
+  git(repo, "worktree", "add", "-q", "-b", "dirty", dirty);
+  git(repo, "worktree", "add", "-q", "-b", "race", changedAfterCheck);
+  write(root, ["clean-worktree", "node_modules", "build.bin"], randomBytes(PACK_BYTES));
+  write(root, ["dirty-worktree", "notes.txt"], "uncommitted work\n");
+
+  const handle = await launch();
+  const { page } = handle;
+  await scanFolderFromPicker(handle, root);
+  await openTab(page, "Dev Artifacts");
+  const rows = page.locator(".dev-row");
+  await expect(rows).toHaveCount(4);
+  const row = (name: string) => rows.filter({ has: page.locator(".dev-row-tail", { hasText: new RegExp(`^${name}$`) }) });
+  const dialogs: string[] = [];
+  page.on("dialog", async (dialog) => {
+    const message = dialog.message();
+    dialogs.push(message);
+    // Introduce an untracked file after the renderer's screening, before
+    // the main process rechecks immediately before removal.
+    if (message.includes("Git will permanently remove") && existsSync(clean) === false) {
+      write(root, ["changed-after-check", "new-work.txt"], "keep this work\n");
+    }
+    await dialog.accept();
+  });
+
+  await row("clean-worktree").getByRole("button", { name: "Delete", exact: true }).click();
+  await expect(row("clean-worktree")).toHaveCount(0);
+  expect(dialogs).toHaveLength(1);
+  expect(dialogs[0]).toContain("Git will permanently remove these worktrees and their registrations.");
+  expect(existsSync(clean)).toBe(false);
+  expect(git(repo, "worktree", "list", "--porcelain")).not.toContain(clean);
+  expect(git(repo, "branch", "--list", "clean")).toContain("clean");
+
+  await row("dirty-worktree").getByRole("button", { name: "Delete", exact: true }).click();
+  await expect(page.getByText("Nothing deleted", { exact: true })).toBeVisible();
+  expect(dialogs).toHaveLength(1);
+  expect(existsSync(join(dirty, "notes.txt"))).toBe(true);
+  expect(git(repo, "worktree", "list", "--porcelain")).toContain(dirty);
+
+  await row("changed-after-check").getByRole("button", { name: "Delete", exact: true }).click();
+  await expect(page.getByText("Could not delete", { exact: true })).toBeVisible();
+  await expect(row("changed-after-check")).toHaveCount(1);
+  expect(dialogs).toHaveLength(2);
+  expect(existsSync(join(changedAfterCheck, "new-work.txt"))).toBe(true);
+  expect(git(repo, "worktree", "list", "--porcelain")).toContain(changedAfterCheck);
 });
 
 function write(root: string, parts: string[], content: string | Buffer): void {
@@ -127,16 +190,14 @@ test("lists Git repos with their remotes and moves one to the Trash only after t
   expect(after?.artifacts.map((a) => a.kind)).toEqual(["git-repo", "worktree"]);
 
   // The worktree's repo has no worktrees/openclaw-feat folder, so git
-  // cannot vouch for it: Delete moves it to the Trash after two warnings
-  // instead of deleting it for good.
+  // cannot vouch for it: Delete leaves it in place and explains why.
   dialogs.length = 0;
   await worktree.getByRole("button", { name: "Delete" }).click();
-  await expect(rows).toHaveCount(1);
-  expect(dialogs).toHaveLength(2);
-  // "Recycle Bin" on Windows.
-  expect(dialogs[0]).toMatch(/^Move the openclaw-feat worktree to the (Trash|Recycle Bin)\?/);
-  expect(dialogs[0]).toContain("repository is gone");
-  expect(dialogs[1]).toContain("cannot be recovered");
+  await expect(page.getByText("Nothing deleted", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Its repository is gone/)).toBeVisible();
+  await expect(rows).toHaveCount(2);
+  expect(dialogs).toHaveLength(0);
   expect(await handle.app.evaluate(() => (globalThis as typeof globalThis & { trashed?: string[] }).trashed))
-    .toEqual([join(rootPath, "scratch"), join(rootPath, "openclaw-feat")]);
+    .toEqual([join(rootPath, "scratch")]);
 });
+import { execFileSync } from "node:child_process";

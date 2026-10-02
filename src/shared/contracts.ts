@@ -1514,6 +1514,8 @@ export interface DiskhoundNativeApi {
   checkGitRepo: (checkoutPath: string) => Promise<DevGitRepoCheck>;
   /** Run `git` in a linked worktree to find work that exists only there. */
   checkGitWorktree: (worktreePath: string) => Promise<DevWorktreeCheck>;
+  /** Recheck a clean worktree and permanently remove it with `git worktree remove`. */
+  removeGitWorktree: (worktreePath: string) => Promise<PathActionResult>;
   onDevArtifactsProgress: (listener: (progress: DevArtifactsRescanProgress) => void) => () => void;
 
   // Easy Move

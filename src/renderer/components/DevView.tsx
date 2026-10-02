@@ -50,7 +50,6 @@ import {
   gitRemoteBadge,
   gitRemovalConfirm,
   worktreeBulkNote,
-  worktreeRemovalConfirm,
   worktreeRisks,
   gitRepoRemovalBlock,
 } from "../lib/gitRepoDisplay";
@@ -592,45 +591,17 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     const kept = worktrees
       .map((artifact) => ({ artifact, check: checks.get(artifact.path)! }))
       .filter(({ check }) => worktreeRisks(check).length > 0);
-    if (targets.length === 1 && kept.length === 1) {
-      await trashWorktree(kept[0]!.artifact, kept[0]!.check);
-      return null;
-    }
     const keptPaths = new Set(kept.map(({ artifact }) => artifact.path));
     const rest = targets.filter((artifact) => !keptPaths.has(artifact.path));
     if (rest.length === 0) {
       toast(
         "info",
         "Nothing deleted",
-        `${formatCount(kept.length)} worktrees have work that exists only there. Delete them one at a time to see what would be lost.`,
+        worktreeBulkNote(0, kept),
       );
       return null;
     }
     return { targets: rest, note: worktreeBulkNote(worktrees.length - kept.length, kept) };
-  };
-
-  // One worktree git did not clear goes to the Trash, like a repo.
-  const trashWorktree = async (artifact: DevArtifact, check: DevWorktreeCheck) => {
-    if (!root) return;
-    const trash = platformTerminology(nativeApi.platform).trash;
-    const text = worktreeRemovalConfirm({ artifact, check, trash });
-    if (!window.confirm(text.first) || !window.confirm(text.second)) return;
-    setBusyPaths((prev) => new Set(prev).add(artifact.path));
-    try {
-      const result = await nativeApi.trashPath(artifact.path);
-      if (!result?.ok) {
-        toast("error", `Could not move to the ${trash}`, result?.message ?? artifact.path);
-        return;
-      }
-      await forgetRemoved([artifact.path]);
-      toast("success", `Moved ${basenameOf(artifact.path)} to the ${trash}`, `Empty the ${trash} to free the space.`);
-    } finally {
-      setBusyPaths((prev) => {
-        const next = new Set(prev);
-        next.delete(artifact.path);
-        return next;
-      });
-    }
   };
 
   const deleteMany = async (paths: string[], label: string) => {
@@ -676,14 +647,16 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
           itemsDeleted: 0,
           itemsTotal: null,
           percent: null,
-          phase: "preparing",
+          phase: artifact.kind === "worktree" ? "deleting" : "preparing",
           startedAt,
         });
         setBusyPaths((prev) => new Set(prev).add(artifact.path));
         await yieldToUi();
         try {
-          let result = await nativeApi.permanentlyDeletePath(artifact.path, artifact.fileCount);
-          if (result?.requiresElevation) {
+          let result = artifact.kind === "worktree"
+            ? await nativeApi.removeGitWorktree(artifact.path)
+            : await nativeApi.permanentlyDeletePath(artifact.path, artifact.fileCount);
+          if (artifact.kind !== "worktree" && result?.requiresElevation) {
             if (!askedElevate) {
               askedElevate = true;
               elevateRemaining = window.confirm(

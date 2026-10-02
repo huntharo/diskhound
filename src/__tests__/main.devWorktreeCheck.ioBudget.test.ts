@@ -1,11 +1,10 @@
 import "node:fs";
 import "node:fs/promises";
-import * as OS from "node:os";
 import * as Path from "node:path";
 
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
-import type { DevWorktreeCheck } from "../shared/contracts";
+import type { DevWorktreeCheck, PathActionResult } from "../shared/contracts";
 import { expectIoBudget, measureFsIo } from "../test/ioBudget";
 import { bootMainProcess, type MainProcess } from "../test/mainProcessHarness";
 import { seedProfile } from "../test/mainProfileFixture";
@@ -45,7 +44,11 @@ beforeAll(async () => {
   // measured ones are in play for main.
   const realFs = await vi.importActual<typeof import("node:fs")>("node:fs");
   const { execFileSync } = await vi.importActual<typeof import("node:child_process")>("node:child_process");
-  root = realFs.realpathSync(realFs.mkdtempSync(Path.join(OS.tmpdir(), "diskhound-wt-budget-")));
+  // /private (macOS temp) is protected against deletion; keep this fixture
+  // under the repo's ignored test-results directory, as E2E does.
+  const scratch = Path.resolve("test-results");
+  realFs.mkdirSync(scratch, { recursive: true });
+  root = realFs.realpathSync(realFs.mkdtempSync(Path.join(scratch, "diskhound-wt-budget-")));
   worktrees = [];
   if (!hasGit) return;
   const repo = Path.join(root, "github", "app");
@@ -56,11 +59,14 @@ beforeAll(async () => {
   git(repo, "config", "user.name", "t");
   git(repo, "config", "commit.gpgsign", "false");
   realFs.writeFileSync(Path.join(repo, "a.txt"), "one\n");
-  git(repo, "add", "a.txt");
+  realFs.writeFileSync(Path.join(repo, ".gitignore"), "node_modules/\n");
+  git(repo, "add", ".");
   git(repo, "commit", "-q", "-m", "one");
   for (let i = 0; i < WORKTREES; i++) {
     const wt = Path.join(root, "claude-worktrees", "app", `wt-${i}`);
     git(repo, "worktree", "add", "-q", "-b", `wt-${i}`, wt);
+    realFs.mkdirSync(Path.join(wt, "node_modules"));
+    realFs.writeFileSync(Path.join(wt, "node_modules", "bundle.bin"), Buffer.alloc(1024 * 1024));
     if (i >= WORKTREES - DIRTY) realFs.writeFileSync(Path.join(wt, "a.txt"), "edited\n");
     worktrees.push(wt);
   }
@@ -89,6 +95,25 @@ describe("Dev Artifacts worktree check before a delete", () => {
         + `locked probe, plus git rev-parse, status and rev-list; one crash.log append for the ${DIRTY} held back. `
         + `Runs only on a delete click, never on a timer: 0 writes/day at any setting. A 500-worktree delete runs `
         + `1,500 git processes, 6 worktrees at a time.`,
+      io: measured.io,
+    });
+  });
+
+  it.skipIf(!hasGit)("rechecks and removes clean worktrees with Git, without a filesystem delete worker", async () => {
+    const measured = await measureFsIo(
+      () => Promise.all(worktrees.map((wt) => main.invoke<PathActionResult>("diskhound:remove-git-worktree", wt))),
+      { countProcesses: true },
+    );
+    expect(measured.result.filter((r) => r.ok)).toHaveLength(WORKTREES - DIRTY);
+    expect(measured.result.slice(-DIRTY).every((r) => !r.ok)).toBe(true);
+    expectIoBudget({
+      scenario: "main-dev-worktree-remove",
+      note: `one cleanup click for ${WORKTREES} worktrees, each with a 1 MiB ignored build file: 3 small reads and `
+        + `3 read-only Git checks each, then one .git reread and git worktree remove for the ${WORKTREES - DIRTY} clean ones. `
+        + `Git's own filesystem operations are outside the JS counters; process counts lock in this work. `
+        + `One buffered crash.log append, no filesystem delete worker or fallback. `
+        + `At default and 1-minute monitoring settings: 0 automatic writes/day and 0 MB/day. `
+        + `Manual cleanup adds one log append per settled action batch; no profile or index content is rewritten here.`,
       io: measured.io,
     });
   });
