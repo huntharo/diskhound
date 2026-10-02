@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { expect, test } from "./fixtures/electron-app";
 import { openTab, scanFolderFromPicker } from "./fixtures/steps";
@@ -23,6 +23,11 @@ test("permanently removes clean worktrees with Git and preserves ones with new w
   const changedAfterCheck = join(root, "changed-after-check");
   mkdirSync(repo, { recursive: true });
   const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+  // Git prints `D:/a/...` on Windows, so compare resolved paths, not text.
+  const registered = (wt: string) => git(repo, "worktree", "list", "--porcelain")
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("worktree "))
+    .some((line) => resolve(line.slice("worktree ".length)).toLowerCase() === resolve(wt).toLowerCase());
   git(repo, "init", "-q", "-b", "main");
   git(repo, "config", "user.email", "t@example.com");
   git(repo, "config", "user.name", "t");
@@ -61,21 +66,21 @@ test("permanently removes clean worktrees with Git and preserves ones with new w
   expect(dialogs).toHaveLength(1);
   expect(dialogs[0]).toContain("Git will permanently remove these worktrees and their registrations.");
   expect(existsSync(clean)).toBe(false);
-  expect(git(repo, "worktree", "list", "--porcelain")).not.toContain(clean);
+  expect(registered(clean)).toBe(false);
   expect(git(repo, "branch", "--list", "clean")).toContain("clean");
 
   await row("dirty-worktree").getByRole("button", { name: "Delete", exact: true }).click();
   await expect(page.getByText("Nothing deleted", { exact: true })).toBeVisible();
   expect(dialogs).toHaveLength(1);
   expect(existsSync(join(dirty, "notes.txt"))).toBe(true);
-  expect(git(repo, "worktree", "list", "--porcelain")).toContain(dirty);
+  expect(registered(dirty)).toBe(true);
 
   await row("changed-after-check").getByRole("button", { name: "Delete", exact: true }).click();
   await expect(page.getByText("Could not delete", { exact: true })).toBeVisible();
   await expect(row("changed-after-check")).toHaveCount(1);
   expect(dialogs).toHaveLength(2);
   expect(existsSync(join(changedAfterCheck, "new-work.txt"))).toBe(true);
-  expect(git(repo, "worktree", "list", "--porcelain")).toContain(changedAfterCheck);
+  expect(registered(changedAfterCheck)).toBe(true);
 });
 
 function write(root: string, parts: string[], content: string | Buffer): void {

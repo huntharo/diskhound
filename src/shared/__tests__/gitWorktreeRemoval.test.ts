@@ -46,8 +46,20 @@ describe("worktree removal against real Git", () => {
     for (const dir of dirs.splice(0)) FS.rmSync(dir, { recursive: true, force: true });
   });
   const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" });
+  /**
+   * Whether `wt` is still one of the repo's worktrees. Git prints
+   * `C:/Users/...` on Windows, so compare resolved paths, not text.
+   */
+  const registered = (repo: string, wt: string) => git(repo, "worktree", "list", "--porcelain")
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("worktree "))
+    .some((line) => samePath(line.slice("worktree ".length), wt));
+  const samePath = (a: string, b: string) => process.platform === "win32"
+    ? Path.resolve(a).toLowerCase() === Path.resolve(b).toLowerCase()
+    : Path.resolve(a) === Path.resolve(b);
   function fixture(detached = false) {
-    const root = FS.realpathSync(FS.mkdtempSync(Path.join(OS.tmpdir(), "diskhound-remove-worktree-")));
+    // .native expands Windows 8.3 names (RUNNER~1), which git never prints.
+    const root = FS.realpathSync.native(FS.mkdtempSync(Path.join(OS.tmpdir(), "diskhound-remove-worktree-")));
     dirs.push(root);
     const repo = Path.join(root, "repo");
     const wt = Path.join(root, "worktree with spaces");
@@ -70,7 +82,7 @@ describe("worktree removal against real Git", () => {
     FS.writeFileSync(Path.join(wt, "node_modules", "build.bin"), Buffer.alloc(1024 * 1024));
     expect(await removeGitWorktree(wt)).toMatchObject({ ok: true });
     expect(FS.existsSync(wt)).toBe(false);
-    expect(git(repo, "worktree", "list", "--porcelain")).not.toContain(wt);
+    expect(registered(repo, wt)).toBe(false);
     expect(git(repo, "branch", "--list", "feat")).toContain("feat");
     // Git's registration no longer prevents checking the same branch out again.
     git(repo, "worktree", "add", "-q", wt, "feat");
@@ -88,7 +100,7 @@ describe("worktree removal against real Git", () => {
     git(repo, "worktree", "lock", wt);
     expect(await removeGitWorktree(wt)).toMatchObject({ ok: false });
     expect(FS.existsSync(wt)).toBe(true);
-    expect(git(repo, "worktree", "list", "--porcelain")).toContain(wt);
+    expect(registered(repo, wt)).toBe(true);
   });
 
   it.skipIf(!hasGit)("keeps a clean detached worktree whose commits exist only there until saved on a branch", async () => {
@@ -98,7 +110,7 @@ describe("worktree removal against real Git", () => {
     git(wt, "commit", "-q", "-m", "only here");
     expect(await removeGitWorktree(wt)).toMatchObject({ ok: false });
     expect(FS.existsSync(wt)).toBe(true);
-    expect(git(repo, "worktree", "list", "--porcelain")).toContain(wt);
+    expect(registered(repo, wt)).toBe(true);
     git(wt, "branch", "saved");
     expect(await removeGitWorktree(wt)).toMatchObject({ ok: true });
     expect(git(repo, "show", "saved:a.txt")).toBe("committed work\n");
