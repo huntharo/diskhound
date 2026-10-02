@@ -2,7 +2,13 @@ import * as FS from "node:fs";
 import * as FSP from "node:fs/promises";
 import * as Path from "node:path";
 
-import type { DevArtifact, DevArtifactCloneInfo, DevArtifactKind, DevArtifactReport } from "./contracts";
+import type {
+  DevArtifact,
+  DevArtifactCloneInfo,
+  DevArtifactKind,
+  DevArtifactReport,
+  DevWorktreeInfo,
+} from "./contracts";
 import { classifyArtifactPath } from "./devArtifacts";
 import { occupancyBytes } from "./allocatedSize";
 import { basenameOf, dirnameOf, normPath } from "./pathUtils";
@@ -20,6 +26,8 @@ export interface DevArtifactRootRec {
   files: number;
   /** APFS clone accounting from the native macOS scan (optional). */
   clone?: DevArtifactCloneInfo;
+  /** `worktree` roots from the native scan: main checkout and nested trees. */
+  worktree?: DevWorktreeInfo;
 }
 
 export interface DevArtifactSidecar {
@@ -312,6 +320,7 @@ export function sidecarFromReport(report: DevArtifactReport): DevArtifactSidecar
       size: artifact.size,
       files: artifact.fileCount,
       ...(artifact.clone ? { clone: artifact.clone } : {}),
+      ...(artifact.worktree ? { worktree: artifact.worktree } : {}),
     })),
     projects,
     droppedPaths: report.droppedPaths?.length ? report.droppedPaths : undefined,
@@ -329,10 +338,11 @@ export function reportFromSidecar(
   const artifacts: DevArtifact[] = [];
   for (const rec of current.roots) {
     if (!keepArtifact(rec.path, projects)) continue;
-    // A repo belongs to its checkout, marker file or not.
+    // A repo belongs to its checkout, marker file or not, and a linked
+    // worktree to the main checkout its `.git` file points at.
     const projectPath = rec.kind === "git-repo"
       ? dirnameOf(rec.path)
-      : nearestProject(rec.path, projects);
+      : rec.worktree?.project ?? nearestProject(rec.path, projects);
     const previousSize = prevByPath.get(rec.path) ?? null;
     artifacts.push({
       path: rec.path,
@@ -344,6 +354,7 @@ export function reportFromSidecar(
       previousSize,
       deltaBytes: previousSize != null ? rec.size - previousSize : null,
       ...(rec.clone ? { clone: rec.clone } : {}),
+      ...(rec.worktree ? { worktree: rec.worktree } : {}),
     });
   }
   artifacts.sort((a, b) => b.size - a.size);
@@ -651,7 +662,7 @@ export async function rescanDevArtifactSidecar(
   }
 
   emit(targets.length, targets[targets.length - 1] ?? sidecar.rootPath, true);
-  const next = carryCloneInfo(sidecarFromAcc(acc, sidecar.rootPath), sidecar);
+  const next = carryWorktreeInfo(carryCloneInfo(sidecarFromAcc(acc, sidecar.rootPath), sidecar), sidecar);
   if (!sidecar.droppedPaths?.length) return next;
   return { ...next, droppedPaths: sidecar.droppedPaths };
 }
@@ -689,6 +700,34 @@ export function carryCloneInfo(next: DevArtifactSidecar, previous: DevArtifactSi
             : {}),
         },
       };
+    }),
+  };
+}
+
+/**
+ * Rescan walks each worktree whole but cannot read `.git` files or split
+ * out the trees inside it. Keep the last full scan's main checkout, and
+ * scale its nested sizes like `carryCloneInfo` scales clone bytes.
+ */
+export function carryWorktreeInfo(next: DevArtifactSidecar, previous: DevArtifactSidecar): DevArtifactSidecar {
+  const byPath = new Map<string, DevWorktreeInfo & { size: number }>();
+  for (const rec of previous.roots) {
+    if (rec.worktree) byPath.set(pathKey(rec.path), { ...rec.worktree, size: rec.size });
+  }
+  if (byPath.size === 0) return next;
+  return {
+    ...next,
+    roots: next.roots.map((rec) => {
+      const old = byPath.get(pathKey(rec.path));
+      if (!old) return rec;
+      const { size: oldSize, ...worktree } = old;
+      const ratio = oldSize > 0 ? Math.min(1, rec.size / oldSize) : 1;
+      if (worktree.nestedSize) {
+        worktree.nestedSize = Object.fromEntries(
+          Object.entries(worktree.nestedSize).map(([kind, size]) => [kind, Math.round((size ?? 0) * ratio)]),
+        );
+      }
+      return { ...rec, worktree };
     }),
   };
 }

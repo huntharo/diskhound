@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { countReads, expectNearLinear, measureOpsSync } from "../../testing/opCounter";
 import type { DevArtifact, DevArtifactReport } from "../contracts";
 import {
+  carryWorktreeInfo,
   compactDevArtifactSidecar,
   DEV_SIDECAR_ROOT_CAP,
   planRescanTargets,
@@ -101,6 +102,32 @@ describe("compactDevArtifactSidecar / reportFromSidecar scaling", () => {
     };
     expectNearLinear("reportFromSidecar", run(PROJECTS), run(PROJECTS * 8), {
       maxTotal: PROJECTS * 8 * 2 * 160,
+    });
+  });
+});
+
+describe("carryWorktreeInfo scaling", () => {
+  it("carries each worktree's info in linear work", () => {
+    const withWorktrees = (projects: number): DevArtifactSidecar => {
+      const sidecar = sidecarWith(projects);
+      for (let i = 0; i < projects; i += 1) {
+        sidecar.roots.push({
+          path: join(join(projectPath(i), ".worktrees"), "feat"),
+          kind: "worktree",
+          size: 9_000 + i,
+          files: 90,
+          worktree: { project: projectPath(i), nestedSize: { "node-modules": 4_000, "rust-target": 1_000 } },
+        });
+      }
+      return sidecar;
+    };
+    const run = (projects: number) => {
+      const previous = withWorktrees(projects);
+      const next = withWorktrees(projects);
+      return measureOpsSync(() => carryWorktreeInfo(next, previous)).ops;
+    };
+    expectNearLinear("carryWorktreeInfo", run(PROJECTS), run(PROJECTS * 8), {
+      maxTotal: PROJECTS * 8 * 3 * 40,
     });
   });
 });

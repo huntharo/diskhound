@@ -1,10 +1,29 @@
-import type { DevArtifact } from "../../shared/contracts";
+import type { DevArtifact, DevArtifactKind } from "../../shared/contracts";
+import { DEV_KIND_LABEL, DEV_KIND_SHORT } from "../../shared/devArtifacts";
 import { basenameOf, dirnameOf } from "../../shared/pathUtils";
 import { formatBytes } from "./format";
 
 export function artifactDeltaLabel(deltaBytes: number): string {
   const sign = deltaBytes > 0 ? "+" : deltaBytes < 0 ? "−" : "";
   return `${sign}${formatBytes(Math.abs(deltaBytes))} since last scan`;
+}
+
+/**
+ * A worktree row's largest nested tree ("incl. 1.8 GB node_modules"), with
+ * every nested kind in `title`. Null when nothing is nested, or below
+ * 1% of the row, where it would only add noise.
+ */
+export function worktreeNestedNote(artifact: DevArtifact): { label: string; title: string } | null {
+  const nested = Object.entries(artifact.worktree?.nestedSize ?? {})
+    .filter((entry): entry is [DevArtifactKind, number] => (entry[1] ?? 0) > 0)
+    .sort((a, b) => b[1] - a[1]);
+  const largest = nested[0];
+  if (!largest || largest[1] < artifact.size * 0.01) return null;
+  const lines = nested.map(([kind, size]) => `${DEV_KIND_LABEL[kind]}: ${formatBytes(size)}`);
+  return {
+    label: `incl. ${formatBytes(largest[1])} ${DEV_KIND_SHORT[largest[0]]}`,
+    title: `Part of this worktree's size, not listed separately:\n${lines.join("\n")}`,
+  };
 }
 
 /** Folder names that do not identify a project on their own. */

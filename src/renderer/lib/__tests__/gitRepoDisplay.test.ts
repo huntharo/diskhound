@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { DevArtifact, DevGitRepoCheck } from "../../../shared/contracts";
+import type { DevArtifact, DevGitRepoCheck, DevWorktreeCheck } from "../../../shared/contracts";
 import {
   artifactsInsideCheckout,
   gitCheckLosesHistory,
@@ -8,6 +8,8 @@ import {
   gitRemovalConfirm,
   gitRepoManagedBy,
   gitRepoRemovalBlock,
+  worktreeBulkNote,
+  worktreeRisks,
 } from "../gitRepoDisplay";
 
 function row(path: string, kind: DevArtifact["kind"] = "git-repo", size = 1): DevArtifact {
@@ -143,5 +145,51 @@ describe("gitRemovalConfirm", () => {
     const unchecked = gitRemovalConfirm({ artifact: repo, check: noGit, inside: [], trash: "Trash" });
     expect(unchecked.first).toContain("git could not run here");
     expect(unchecked.second).toContain("Nothing was checked");
+  });
+});
+
+describe("worktree checks", () => {
+  const CLEAR: DevWorktreeCheck = {
+    checked: true,
+    problem: null,
+    branch: "feat",
+    changedFiles: 0,
+    commitsOnlyHere: 0,
+    lockReason: null,
+  };
+
+  it("clear only a worktree git checked and found nothing in", () => {
+    expect(worktreeRisks(CLEAR)).toEqual([]);
+    expect(worktreeRisks({ ...CLEAR, changedFiles: 3 })).toEqual(["3 files with uncommitted changes."]);
+    expect(worktreeRisks({ ...CLEAR, branch: null, commitsOnlyHere: 1 }))
+      .toEqual(["1 commit on its detached HEAD is on no branch."]);
+    expect(worktreeRisks({ ...CLEAR, lockReason: "" })).toEqual(["Locked with git worktree lock."]);
+    // Unknown is a risk, not a pass.
+    expect(worktreeRisks({ ...CLEAR, changedFiles: null })).toEqual(["Could not check for uncommitted changes."]);
+    expect(worktreeRisks({ ...CLEAR, checked: false, problem: "git could not run here.", changedFiles: null, commitsOnlyHere: null }))
+      .toEqual(["git could not run here."]);
+  });
+
+  it("say in the bulk confirm which worktrees stay and why", () => {
+    const kept = Array.from({ length: 7 }, (_, i) => ({
+      artifact: { path: `/Users/me/.codex/worktrees/a${i}/app` },
+      check: { ...CLEAR, changedFiles: i + 1 },
+    }));
+    const note = worktreeBulkNote(40, kept);
+    expect(note).toContain("Git checked 40 worktrees: no uncommitted changes, no commits outside a branch.");
+    expect(note).toContain("Not deleted: 7 worktrees that Git could not clear for removal:");
+    expect(note).toContain("    app — 1 file with uncommitted changes.");
+    expect(note).toContain("…and 2 more");
+    expect(worktreeBulkNote(3, [])).toContain("Git will permanently remove these worktrees and their registrations.");
+  });
+
+  it("explains a failed Git check without claiming the worktree has unique work", () => {
+    const note = worktreeBulkNote(0, [{
+      artifact: { path: "/Users/me/worktrees/feat" },
+      check: { ...CLEAR, checked: false, problem: "git could not run here." },
+    }]);
+    expect(note).toContain("git could not run here.");
+    expect(note).toContain("Save their work or resolve the Git checks before trying again.");
+    expect(note).not.toContain("work that exists only there");
   });
 });
