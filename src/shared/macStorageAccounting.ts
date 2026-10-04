@@ -116,11 +116,13 @@ export function parseTmutilSnapshotDates(stdout: string): number[] {
 /** `diskutil apfs listSnapshots -plist <mount>` → snapshot records. */
 export function parseApfsSnapshotsPlist(xml: string): LocalSnapshotInfo[] | null {
   const root = parsePlistDict(xml);
-  if (!root) return null;
+  if (!root || !Array.isArray(root.Snapshots)) return null;
   const out: LocalSnapshotInfo[] = [];
-  for (const snap of plistDicts(root, "Snapshots")) {
+  const rows = plistDicts(root, "Snapshots");
+  if (rows.length !== root.Snapshots.length) return null;
+  for (const snap of rows) {
     const name = plistString(snap, "SnapshotName");
-    if (!name) continue;
+    if (!name) return null;
     out.push({
       name,
       kind: snapshotKindForName(name),
@@ -301,6 +303,8 @@ export function buildStorageAccountingReport(input: StorageAccountingInputs): St
       }
       : null,
     snapshots,
+    snapshotStatus: input.apfsSnapshots !== null ? "complete"
+      : input.tmutilSnapshotNames !== null ? "incomplete" : "unavailable",
     notes,
   };
 }
@@ -327,6 +331,7 @@ export function unsupportedStorageAccountingReport(
     purgeableBytes: null,
     container: null,
     snapshots: [],
+    snapshotStatus: "unavailable",
     notes: [note],
   };
 }

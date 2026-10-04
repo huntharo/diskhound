@@ -38,6 +38,7 @@ import { DEV_ARTIFACTS_UPDATED_EVENT } from "../lib/uiEvents";
 import { DisclosureChevron } from "./Disclosure";
 import { FileIcon } from "./FileIcon";
 import { StorageAccountingCard } from "./StorageAccountingCard";
+import { MacSystemMetadataCard } from "./MacSystemMetadataCard";
 import { toast } from "./Toasts";
 import type { TreemapLayout } from "../lib/treemap";
 import { Treemap } from "./Treemap";
@@ -353,6 +354,7 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, onViewDev
       {otherDisks.length > 0 && onOpenDrive && <OtherDisksNote mounts={otherDisks} onOpenDrive={onOpenDrive} />}
       {latestDiff && <LatestScanSummary diff={latestDiff} onViewDetails={onViewChanges} />}
       <StorageAccountingCard snapshot={snapshot} onViewDev={onViewDev} />
+      <MacSystemMetadataCard snapshot={snapshot} />
 
 
       <div className={`overview-body ${extSidebarCollapsed ? "ext-collapsed" : ""}`}>
