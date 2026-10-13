@@ -404,7 +404,7 @@ export function MemoryView() {
             onClick={() => setViewMode("list")}
             title="CPU process list"
           >
-            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
               <path d="M2 3.5H12M2 7H12M2 10.5H12" />
             </svg>
             List
@@ -416,7 +416,7 @@ export function MemoryView() {
             onClick={() => setViewMode("heatmap")}
             title="CPU heatmap: scrolling waterfall of CPU usage over time"
           >
-            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
               <rect x="1.5" y="2" width="2" height="10" opacity="0.35" />
               <rect x="4" y="2" width="2" height="10" opacity="0.55" />
               <rect x="6.5" y="2" width="2" height="10" opacity="0.8" />
@@ -433,7 +433,7 @@ export function MemoryView() {
             onClick={() => setViewMode("treemap")}
             title="Memory treemap: tile area is proportional to RAM usage"
           >
-            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
               <rect x="1.5" y="1.5" width="7" height="7" />
               <rect x="9" y="1.5" width="3.5" height="4" />
               <rect x="9" y="6" width="3.5" height="6.5" />
@@ -458,7 +458,7 @@ export function MemoryView() {
                 {/* Stylised "GPU module" — a rounded rectangle card with
                     radiating heat lines, to distinguish from the Heatmap
                     icon and signal "hardware device" rather than "graph". */}
-                <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+                <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
                   <rect x="1.5" y="4" width="11" height="6" rx="1" />
                   <circle cx="5" cy="7" r="1.2" />
                   <path d="M4 1.5V3.5M7 1.5V3.5M10 1.5V3.5M4 10.5V12.5M7 10.5V12.5M10 10.5V12.5" opacity="0.6" />
@@ -472,7 +472,7 @@ export function MemoryView() {
                 onClick={() => setViewMode("rules")}
                 title="CPU affinity rules — pin processes to specific cores persistently"
               >
-                <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+                <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
                   <rect x="1.5" y="1.5" width="4" height="4" />
                   <rect x="8.5" y="1.5" width="4" height="4" />
                   <rect x="1.5" y="8.5" width="4" height="4" />
@@ -926,7 +926,7 @@ function AffinityRulePinIcon({ rule }: { rule: AffinityRule }) {
     (rule.appliedCount > 0 ? ` · applied ${rule.appliedCount}×` : "");
   return (
     <span className="memory-row-affinity-pin" title={tooltip} aria-label="Affinity rule active">
-      <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2">
+      <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.2">
         <rect x="0.5" y="0.5" width="3.5" height="3.5" />
         <rect x="6"   y="0.5" width="3.5" height="3.5" />
         <rect x="0.5" y="6"   width="3.5" height="3.5" />
@@ -1550,7 +1550,7 @@ function ProcessContextMenu(props: {
             role="menuitem"
             onClick={() => act(() => void nativeApi.revealPath(proc.exePath!))}
           >
-            <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+            <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
               <path d="M1.5 3.5V11.5C1.5 12.05 1.95 12.5 2.5 12.5H11.5C12.05 12.5 12.5 12.05 12.5 11.5V5.5C12.5 4.95 12.05 4.5 11.5 4.5H7L5.5 2.5H2.5C1.95 2.5 1.5 2.95 1.5 3.5Z" />
             </svg>
             Reveal executable
@@ -1567,7 +1567,7 @@ function ProcessContextMenu(props: {
               })
             }
           >
-            <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+            <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
               <rect x="4" y="4" width="8" height="9" rx="1" />
               <path d="M4 4V3C4 2.45 4.45 2 5 2H9C9.55 2 10 2.45 10 3V4" />
             </svg>
@@ -1597,7 +1597,7 @@ function ProcessContextMenu(props: {
                 })
               }
             >
-              <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+              <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
                 <rect x="4" y="4" width="8" height="9" rx="1" />
                 <path d="M4 4V3C4 2.45 4.45 2 5 2H9C9.55 2 10 2.45 10 3V4" />
               </svg>
@@ -1610,7 +1610,7 @@ function ProcessContextMenu(props: {
               role="menuitem"
               onClick={() => act(() => void nativeApi.revealPath(proc.workingDirectory!))}
             >
-              <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+              <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
                 <path d="M1.5 3.5V11.5C1.5 12.05 1.95 12.5 2.5 12.5H11.5C12.05 12.5 12.5 12.05 12.5 11.5V5.5C12.5 4.95 12.05 4.5 11.5 4.5H7L5.5 2.5H2.5C1.95 2.5 1.5 2.95 1.5 3.5Z" />
               </svg>
               Reveal inferred folder
@@ -1626,7 +1626,7 @@ function ProcessContextMenu(props: {
             role="menuitem"
             onClick={() => setAffinityOpen(true)}
           >
-            <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+            <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
               <rect x="2" y="2" width="4" height="4" />
               <rect x="8" y="2" width="4" height="4" />
               <rect x="2" y="8" width="4" height="4" />
@@ -1641,7 +1641,7 @@ function ProcessContextMenu(props: {
               onClick={() => setEditRuleOpen(true)}
               title={`Rule already exists: ${matchedRule.name || matchedRule.matchPattern}. Click to edit.`}
             >
-              <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+              <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
                 <path d="M2 10L2 12L4 12L11 5L9 3L2 10Z" />
                 <path d="M8.5 3.5L10.5 5.5" />
               </svg>
@@ -1654,7 +1654,7 @@ function ProcessContextMenu(props: {
               onClick={() => setPinRuleOpen(true)}
               title="Create a persistent rule that re-applies this affinity every time the process starts"
             >
-              <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+              <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
                 <path d="M7 2L7 9M7 9L4 6M7 9L10 6" />
                 <circle cx="7" cy="11.5" r="1" />
               </svg>
@@ -1669,7 +1669,7 @@ function ProcessContextMenu(props: {
         role="menuitem"
         onClick={() => act(() => onKill(proc, false))}
       >
-        <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+        <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
           <circle cx="7" cy="7" r="5.5" />
           <path d="M7 4V7.5" />
         </svg>
@@ -1680,7 +1680,7 @@ function ProcessContextMenu(props: {
         role="menuitem"
         onClick={() => act(() => onKill(proc, true))}
       >
-        <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+        <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
           <path d="M3.5 3.5L10.5 10.5M10.5 3.5L3.5 10.5" />
         </svg>
         Force kill
@@ -2130,7 +2130,7 @@ function RefreshIntervalChip(props: {
           title="Change interval"
           aria-label="Change refresh interval"
         >
-          <svg width="8" height="8" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5">
+          <svg width="8" height="8" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5">
             <path d="M2 4L5 7L8 4" />
           </svg>
         </button>

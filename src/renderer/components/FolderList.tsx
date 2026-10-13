@@ -323,7 +323,7 @@ export function FolderList({ snapshot, onStartScan, otherScannedRoots = [] }: Pr
             }}
             title="Go up"
           >
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5">
               <path d="M8.5 3L4.5 7L8.5 11" />
             </svg>
           </button>
@@ -355,7 +355,7 @@ export function FolderList({ snapshot, onStartScan, otherScannedRoots = [] }: Pr
           onClick={() => void runAction(currentPath, () => nativeApi.openPath(currentPath))}
           title={`Show in ${platformTerminology(nativeApi.platform).fileManager}`}
         >
-          <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+          <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3">
             <path d="M1.5 3.5V11.5C1.5 12.05 1.95 12.5 2.5 12.5H11.5C12.05 12.5 12.5 12.05 12.5 11.5V5.5C12.5 4.95 12.05 4.5 11.5 4.5H7L5.5 2.5H2.5C1.95 2.5 1.5 2.95 1.5 3.5Z" />
           </svg>
         </button>
@@ -543,7 +543,7 @@ function FolderRow(props: {
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
               <path
                 d="M2 4V13C2 13.55 2.45 14 3 14H13C13.55 14 14 13.55 14 13V6C14 5.45 13.55 5 13 5H8L6.5 3H3C2.45 3 2 3.45 2 4Z"
-                fill="currentColor" opacity="0.25" stroke="currentColor" strokeWidth="1"
+                fill="currentColor" opacity="0.25" stroke="currentColor" stroke-width="1"
               />
             </svg>
           }
@@ -554,7 +554,7 @@ function FolderRow(props: {
           {name}
           {protectionBlocker && <span className="protected-path-badge" title={protectionTitle}>Protected</span>}
           {canDrillIn && (
-            <svg className="folder-row-chevron" width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.3">
+            <svg className="folder-row-chevron" width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.3">
               <path d="M3.5 2L7 5L3.5 8" />
             </svg>
           )}
@@ -627,7 +627,7 @@ function LooseFileRow(props: {
           path={file.path}
           className="loose-file-icon-img"
           fallback={
-            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.1" opacity="0.5">
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.1" opacity="0.5">
               <path d="M3 1.5H8.5L11 4V12.5H3V1.5Z" />
               <path d="M8.5 1.5V4H11" />
             </svg>
