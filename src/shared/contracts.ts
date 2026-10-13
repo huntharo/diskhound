@@ -760,6 +760,15 @@ export interface DevWorktreeCheck {
   commitsOnlyHere: number | null;
   /** `git worktree lock` reason ("" for a lock without one), or null when not locked. */
   lockReason: string | null;
+  /**
+   * Git has no record of it: its `.git` file points at an admin folder
+   * that is gone (the main repo was deleted, the worktree pruned, or the
+   * repo's disk is not connected), or there is no `.git` at all. Nothing
+   * can be checked or removed through git, so the Dev tab offers to move
+   * it to the Trash on its own, after a confirm. A `.git` folder (a full
+   * clone) or a pointer that is not a worktree's is not orphaned.
+   */
+  orphaned: boolean;
 }
 
 export interface DevArtifactReport {

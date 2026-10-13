@@ -29,6 +29,7 @@ export async function checkWorktreesWithGit(
           changedFiles: null,
           commitsOnlyHere: null,
           lockReason: null,
+          orphaned: false,
         });
       }
       options.onProgress?.(checks.size, paths.length);

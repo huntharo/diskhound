@@ -190,6 +190,7 @@ const KEPT_SHOWN = 5;
 export function worktreeBulkNote(
   cleared: number,
   kept: ReadonlyArray<{ artifact: Pick<DevArtifact, "path">; check: DevWorktreeCheck }>,
+  trash = "Trash",
 ): string {
   const lines: string[] = [];
   if (cleared > 0) {
@@ -203,7 +204,43 @@ export function worktreeBulkNote(
       lines.push(`    ${basenameOf(artifact.path) || artifact.path} — ${worktreeRisks(check)[0] ?? ""}`);
     }
     if (kept.length > KEPT_SHOWN) lines.push(`    …and ${formatCount(kept.length - KEPT_SHOWN)} more`);
-    lines.push("Save their work or resolve the Git checks before trying again.");
+    const orphans = kept.filter(({ check }) => check.orphaned).length;
+    if (orphans < kept.length) lines.push("Save their work or resolve the Git checks before trying again.");
+    if (orphans > 0) {
+      const who = orphans === kept.length
+        ? `Git has no record of ${orphans === 1 ? "it" : "them"}`
+        : `${formatCount(orphans)} of them ${orphans === 1 ? "has" : "have"} no Git record`;
+      lines.push(`${who}: delete each one on its own to move it to the ${trash} after a confirm.`);
+    }
   }
   return lines.join("\n");
+}
+
+/**
+ * Confirm text for an orphaned worktree (see `DevWorktreeCheck.orphaned`).
+ * Git cannot check it or remove it, so it goes to the Trash, where it can
+ * be restored, and the text says what could not be checked.
+ */
+export function orphanedWorktreeConfirm(input: {
+  artifact: Pick<DevArtifact, "path" | "size" | "fileCount">;
+  check: DevWorktreeCheck;
+  trash: string;
+}): string {
+  const { artifact, check, trash } = input;
+  const name = basenameOf(artifact.path) || artifact.path;
+  const repoGone = check.problem?.startsWith("Its repository is gone") ?? false;
+  return [
+    `Move the orphaned worktree ${name} to the ${trash}?`,
+    "",
+    artifact.path,
+    `${formatBytes(artifact.size)} · ${plural(artifact.fileCount, "file")}`,
+    "",
+    `⚠ ${check.problem ?? "Git has no record of this worktree."}`,
+    "DiskHound cannot check it for uncommitted changes, so anything in it that is not saved elsewhere goes with it.",
+    ...(repoGone
+      ? ["If its repository is on a disk that is not connected, connect the disk and try again instead."]
+      : []),
+    "",
+    `The folder goes to the ${trash}, so you can restore it until the ${trash} is emptied.`,
+  ].join("\n");
 }

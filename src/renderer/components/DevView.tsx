@@ -49,6 +49,7 @@ import {
   gitCheckoutPath,
   gitRemoteBadge,
   gitRemovalConfirm,
+  orphanedWorktreeConfirm,
   worktreeBulkNote,
   worktreeRisks,
   gitRepoRemovalBlock,
@@ -592,17 +593,55 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     const kept = worktrees
       .map((artifact) => ({ artifact, check: checks.get(artifact.path)! }))
       .filter(({ check }) => worktreeRisks(check).length > 0);
+    // Git has no record of a lone orphan, so offer the Trash instead.
+    if (targets.length === 1 && kept.length === 1 && kept[0]!.check.orphaned) {
+      await trashOrphanedWorktree(kept[0]!.artifact, kept[0]!.check);
+      return null;
+    }
+    const trash = platformTerminology(nativeApi.platform).trash;
     const keptPaths = new Set(kept.map(({ artifact }) => artifact.path));
     const rest = targets.filter((artifact) => !keptPaths.has(artifact.path));
     if (rest.length === 0) {
       toast(
         "info",
         "Nothing deleted",
-        worktreeBulkNote(0, kept),
+        worktreeBulkNote(0, kept, trash),
       );
       return null;
     }
-    return { targets: rest, note: worktreeBulkNote(worktrees.length - kept.length, kept) };
+    return { targets: rest, note: worktreeBulkNote(worktrees.length - kept.length, kept, trash) };
+  };
+
+  /**
+   * An orphaned worktree goes to the Trash after a confirm that says git
+   * could not check it. Checked again after the confirm, so one that git
+   * knows about again (its disk was reconnected) is left for Delete.
+   */
+  const trashOrphanedWorktree = async (artifact: DevArtifact, check: DevWorktreeCheck) => {
+    if (!root) return;
+    const trash = platformTerminology(nativeApi.platform).trash;
+    if (!window.confirm(orphanedWorktreeConfirm({ artifact, check, trash }))) return;
+    setBusyPaths((prev) => new Set(prev).add(artifact.path));
+    try {
+      const recheck = await nativeApi.checkGitWorktree(artifact.path);
+      if (!recheck.orphaned) {
+        toast("info", "Not moved", "Git can check this worktree now. Use Delete again to have Git remove it.");
+        return;
+      }
+      const result = await nativeApi.trashPath(artifact.path);
+      if (!result?.ok) {
+        toast("error", `Could not move to the ${trash}`, result?.message ?? artifact.path);
+        return;
+      }
+      await forgetRemoved([artifact.path]);
+      toast("success", `Moved ${basenameOf(artifact.path)} to the ${trash}`, `Empty the ${trash} to free the space.`);
+    } finally {
+      setBusyPaths((prev) => {
+        const next = new Set(prev);
+        next.delete(artifact.path);
+        return next;
+      });
+    }
   };
 
   const deleteMany = async (paths: string[], label: string) => {
@@ -1371,7 +1410,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                         className="action-btn warn"
                         disabled={bulkBusy || busyPaths.has(artifact.path)}
                         title={artifact.kind === "worktree"
-                          ? "Check this worktree with git, then remove it permanently with git worktree remove. One with uncommitted work, commits on no branch or a lock is left in place."
+                          ? `Check this worktree with git, then remove it permanently with git worktree remove. One with uncommitted work, commits on no branch or a lock is left in place. One git has no record of can go to the ${platformTerminology(nativeApi.platform).trash} after you confirm.`
                           : `Permanently delete this tree. Cannot be undone. Skips ${platformTerminology(nativeApi.platform).trash}.`}
                         onClick={() => void deleteOne(artifact.path)}
                       >

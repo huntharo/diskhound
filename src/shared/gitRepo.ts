@@ -243,8 +243,18 @@ async function readSmallText(filePath: string): Promise<string | null> {
   }
 }
 
-function notChecked(problem: string): DevWorktreeCheck {
-  return { checked: false, problem, branch: null, changedFiles: null, commitsOnlyHere: null, lockReason: null };
+function notChecked(problem: string, orphaned = false): DevWorktreeCheck {
+  return { checked: false, problem, branch: null, changedFiles: null, commitsOnlyHere: null, lockReason: null, orphaned };
+}
+
+/** False only when nothing is at `filePath` (ENOENT). Any other error counts as there. */
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await FSP.lstat(filePath);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== "ENOENT";
+  }
 }
 
 /**
@@ -257,8 +267,9 @@ export async function checkGitWorktree(
   worktreePath: string,
   git: GitCommand = runGitCommand,
   readText: (filePath: string) => Promise<string | null> = readSmallText,
+  exists: (filePath: string) => Promise<boolean> = pathExists,
 ): Promise<DevWorktreeCheck> {
-  return (await inspectGitWorktree(worktreePath, git, readText)).check;
+  return (await inspectGitWorktree(worktreePath, git, readText, exists)).check;
 }
 
 /** `checkGitWorktree`, plus the admin folder it found (null when none). */
@@ -266,14 +277,26 @@ async function inspectGitWorktree(
   worktreePath: string,
   git: GitCommand,
   readText: (filePath: string) => Promise<string | null>,
+  exists: (filePath: string) => Promise<boolean> = pathExists,
 ): Promise<{ check: DevWorktreeCheck; adminDir: string | null }> {
-  const gitFile = await readText(Path.join(worktreePath, ".git"));
-  const adminDir = gitFile === null ? null : worktreeAdminDir(worktreePath, gitFile);
+  const gitPath = Path.join(worktreePath, ".git");
+  const gitFile = await readText(gitPath);
+  if (gitFile === null) {
+    // Unreadable, or a .git folder (a full clone): not ours to remove.
+    if (await exists(gitPath)) {
+      return { check: notChecked("Its .git is not a linked worktree's file, so git cannot check it."), adminDir: null };
+    }
+    if (!(await exists(worktreePath))) {
+      return { check: notChecked("It is no longer on disk. Rescan to update the list."), adminDir: null };
+    }
+    return { check: notChecked("It has no .git file, so git has no record of it.", true), adminDir: null };
+  }
+  const adminDir = worktreeAdminDir(worktreePath, gitFile);
   if (!adminDir) {
-    return { check: notChecked("It has no .git file pointing at a repository, so git cannot check it."), adminDir };
+    return { check: notChecked("Its .git file does not point at a linked worktree, so git cannot check it."), adminDir };
   }
   if (await readText(Path.join(adminDir, "HEAD")) === null) {
-    return { check: notChecked(`Its repository is gone (${adminDir}), so git cannot check it.`), adminDir };
+    return { check: notChecked(`Its repository is gone (${adminDir}), so git has no record of it.`, true), adminDir };
   }
   const lock = await readText(Path.join(adminDir, "locked"));
   const base = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
@@ -294,6 +317,7 @@ async function inspectGitWorktree(
       changedFiles: status === null ? null : lines(status).length,
       commitsOnlyHere: count(onlyHere),
       lockReason: lock === null ? null : lock.trim(),
+      orphaned: false,
     },
     adminDir,
   };

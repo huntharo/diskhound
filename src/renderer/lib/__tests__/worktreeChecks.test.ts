@@ -11,6 +11,7 @@ const CLEAR: DevWorktreeCheck = {
   changedFiles: 0,
   commitsOnlyHere: 0,
   lockReason: null,
+  orphaned: false,
 };
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));

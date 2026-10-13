@@ -194,15 +194,18 @@ test("lists Git repos with their remotes and moves one to the Trash only after t
   const after = await page.evaluate((r) => window.diskhound.getDevArtifacts(r, { sidecarOnly: true }), rootPath);
   expect(after?.artifacts.map((a) => a.kind)).toEqual(["git-repo", "worktree"]);
 
-  // The worktree's repo has no worktrees/openclaw-feat folder, so git
-  // cannot vouch for it: Delete leaves it in place and explains why.
+  // The worktree's repo has no worktrees/openclaw-feat folder, so git has
+  // no record of it: Delete offers the Trash after one confirm that says
+  // what could not be checked, instead of git worktree remove.
   dialogs.length = 0;
   await worktree.getByRole("button", { name: "Delete" }).click();
-  await expect(page.getByText("Nothing deleted", { exact: true })).toBeVisible();
-  await expect(page.getByText(/Its repository is gone/)).toBeVisible();
-  await expect(rows).toHaveCount(2);
-  expect(dialogs).toHaveLength(0);
+  await expect(rows).toHaveCount(1);
+  expect(dialogs).toHaveLength(1);
+  // "Recycle Bin" on Windows.
+  expect(dialogs[0]).toMatch(/^Move the orphaned worktree openclaw-feat to the (Trash|Recycle Bin)\?/);
+  expect(dialogs[0]).toContain("Its repository is gone");
+  expect(dialogs[0]).toContain("cannot check it for uncommitted changes");
   expect(await handle.app.evaluate(() => (globalThis as typeof globalThis & { trashed?: string[] }).trashed))
-    .toEqual([join(rootPath, "scratch")]);
+    .toEqual([join(rootPath, "scratch"), join(rootPath, "openclaw-feat")]);
 });
 import { execFileSync } from "node:child_process";

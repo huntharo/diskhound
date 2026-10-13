@@ -8,6 +8,7 @@ import {
   gitRemovalConfirm,
   gitRepoManagedBy,
   gitRepoRemovalBlock,
+  orphanedWorktreeConfirm,
   worktreeBulkNote,
   worktreeRisks,
 } from "../gitRepoDisplay";
@@ -156,6 +157,7 @@ describe("worktree checks", () => {
     changedFiles: 0,
     commitsOnlyHere: 0,
     lockReason: null,
+    orphaned: false,
   };
 
   it("clear only a worktree git checked and found nothing in", () => {
@@ -191,5 +193,45 @@ describe("worktree checks", () => {
     expect(note).toContain("git could not run here.");
     expect(note).toContain("Save their work or resolve the Git checks before trying again.");
     expect(note).not.toContain("work that exists only there");
+  });
+
+  const ORPHAN: DevWorktreeCheck = {
+    checked: false,
+    problem: "Its repository is gone (/Users/me/github/app/.git/worktrees/feat), so git has no record of it.",
+    branch: null,
+    changedFiles: null,
+    commitsOnlyHere: null,
+    lockReason: null,
+    orphaned: true,
+  };
+
+  it("point orphaned worktrees in a bulk delete to the one-at-a-time Trash path", () => {
+    const orphan = { artifact: { path: "/wt/gone" }, check: ORPHAN };
+    const dirty = { artifact: { path: "/wt/dirty" }, check: { ...CLEAR, changedFiles: 1 } };
+    expect(worktreeBulkNote(0, [orphan], "Recycle Bin"))
+      .toContain("Git has no record of it: delete each one on its own to move it to the Recycle Bin after a confirm.");
+    const mixed = worktreeBulkNote(0, [orphan, dirty]);
+    expect(mixed).toContain("Save their work or resolve the Git checks before trying again.");
+    expect(mixed).toContain("1 of them has no Git record: delete each one on its own");
+    expect(worktreeBulkNote(0, [dirty])).not.toContain("no Git record");
+  });
+
+  it("say what could not be checked before an orphaned worktree goes to the Trash", () => {
+    const text = orphanedWorktreeConfirm({
+      artifact: { path: "/Users/me/.codex/worktrees/ab12/app", size: 3_000_000_000, fileCount: 40_000 },
+      check: ORPHAN,
+      trash: "Trash",
+    });
+    expect(text).toMatch(/^Move the orphaned worktree app to the Trash\?/);
+    expect(text).toContain("⚠ Its repository is gone");
+    expect(text).toContain("cannot check it for uncommitted changes");
+    expect(text).toContain("connect the disk and try again");
+    expect(text).toContain("you can restore it");
+    const noGit = orphanedWorktreeConfirm({
+      artifact: { path: "/src/app/.worktrees/old", size: 1, fileCount: 1 },
+      check: { ...ORPHAN, problem: "It has no .git file, so git has no record of it." },
+      trash: "Trash",
+    });
+    expect(noGit).not.toContain("connect the disk");
   });
 });
