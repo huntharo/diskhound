@@ -336,17 +336,31 @@ impl CloneGroups {
     /// group a clone spread over many projects links each project to the
     /// first few seen; across thousands of groups every sharer still
     /// shows up, so the neighbour count is a close lower bound.
+    #[cfg(test)]
     pub fn attribute(&self, root_count: usize) -> Vec<RootCloneShare> {
+        self.attribute_remapped(root_count, &[])
+    }
+
+    /// `attribute`, after moving each root id `r` below `remap.len()` to
+    /// `remap[r]`. Dev Artifacts folds the trees inside a linked worktree
+    /// into it this way once the walk has found its `.git` file. A group
+    /// that filled its root slots before the fold stays non-internal, so
+    /// the fold can only under-report what a worktree owns outright.
+    pub fn attribute_remapped(&self, root_count: usize, remap: &[u32]) -> Vec<RootCloneShare> {
         let mut out = vec![RootCloneShare::default(); root_count];
         let mut edges: HashMap<(u32, u32), u64> = HashMap::new();
         for rec in self.groups.values() {
             crate::work::step();
-            let dev_roots: Vec<u32> = rec
-                .roots
-                .iter()
-                .copied()
-                .filter(|r| *r != EMPTY_SLOT && *r != OUTSIDE_ROOTS && (*r as usize) < root_count)
-                .collect();
+            let mut dev_roots: Vec<u32> = Vec::with_capacity(ROOT_SLOTS);
+            for r in rec.roots {
+                if r == EMPTY_SLOT || r == OUTSIDE_ROOTS {
+                    continue;
+                }
+                let r = remap.get(r as usize).copied().unwrap_or(r);
+                if (r as usize) < root_count && !dev_roots.contains(&r) {
+                    dev_roots.push(r);
+                }
+            }
             let only_dev_root =
                 dev_roots.len() == 1 && !rec.overflow && !rec.roots.contains(&OUTSIDE_ROOTS);
             if only_dev_root && rec.seen >= rec.refcnt {

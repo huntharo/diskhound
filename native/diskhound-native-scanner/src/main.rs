@@ -429,12 +429,26 @@ impl IndexWriter {
         Ok(())
     }
 
+    /// `finish_with_tree_totals` without folder rollups: a linked worktree
+    /// then counts only the Dev trees and clone files found inside it.
+    #[cfg(test)]
+    fn finish(self) -> (io::Result<()>, Option<CloneGroupSummary>) {
+        self.finish_with_tree_totals(&|_| None)
+    }
+
     /// Signal the writer thread to finish pending messages, close the
     /// gzip stream cleanly, and flush to disk. Blocks on the join so
     /// the caller knows the file is complete before returning. Also
     /// returns the clone-group summary, None when the writer thread
     /// panicked and its groups are lost.
-    fn finish(mut self) -> (io::Result<()>, Option<CloneGroupSummary>) {
+    ///
+    /// `tree_totals` gives a folder's recursive (bytes, files), from the
+    /// scan's `directory_totals`. The Dev sidecar sizes each linked
+    /// worktree from it; see `DevArtifactAcc::resolve_worktrees`.
+    fn finish_with_tree_totals(
+        mut self,
+        tree_totals: &dyn Fn(&str) -> Option<(u64, u64)>,
+    ) -> (io::Result<()>, Option<CloneGroupSummary>) {
         if let Some(tx) = self.tx.take() {
             let _ = tx.send(IndexWriteMsg::Finish);
             drop(tx);
@@ -451,12 +465,15 @@ impl IndexWriter {
         // Write the Dev sidecar even if gzip finish failed — classify
         // already ran on every file the writer accepted.
         if let (Some(out), Some(acc)) = (self.dev_output.take(), self.dev_acc.take()) {
-            let guard = acc.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = acc.lock().unwrap_or_else(|e| e.into_inner());
+            guard.resolve_worktrees(tree_totals);
             match dev_artifacts::write_sidecar(&out, &self.scan_root, &guard, clone_groups.as_ref()) {
                 Ok(()) => eprintln!(
-                    "[diskhound-native-scanner] dev-artifacts sidecar: wrote {} ({} roots)",
+                    "[diskhound-native-scanner] dev-artifacts sidecar: wrote {} ({} roots, {} worktrees, {} .git files read)",
                     out.display(),
-                    guard.root_count()
+                    guard.root_count(),
+                    guard.worktree_count(),
+                    guard.git_file_reads(),
                 ),
                 Err(err) => eprintln!(
                     "[diskhound-native-scanner] dev-artifacts sidecar: write failed ({err})"
@@ -1436,7 +1453,9 @@ fn run() -> Result<(), String> {
     // Dev sidecar after Done raced: the rename missed, and Dev Artifacts
     // fell through to a 1m+ folder-tree classify on a 7M-file C: scan.
     if let Some(writer) = state.index_writer.take() {
-        let (result, clone_summary) = writer.finish();
+        let totals = &state.directory_totals;
+        let (result, clone_summary) = writer
+            .finish_with_tree_totals(&|path| totals.get(path).map(|t| (t.size, t.file_count)));
         if let Err(err) = result {
             eprintln!("[diskhound-native-scanner] index writer finish failed ({err})");
         }

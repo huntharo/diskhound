@@ -2,7 +2,8 @@ import { execFile } from "node:child_process";
 import * as FSP from "node:fs/promises";
 import * as Path from "node:path";
 
-import type { DevArtifactReport, DevGitRepoCheck, DevGitRepoInfo } from "./contracts";
+import type { DevArtifactReport, DevGitRepoCheck, DevGitRepoInfo, DevWorktreeCheck, PathActionResult } from "./contracts";
+import { worktreeRisks } from "./worktreeRisks";
 
 /**
  * Remote names and URLs from the text of a `.git/config`. Only
@@ -123,13 +124,34 @@ export async function annotateGitRepos(
  */
 export type GitCommand = (cwd: string, args: string[]) => Promise<string | null>;
 
-const runGitCommand: GitCommand = (cwd, args) =>
+function executeGitCommand(cwd: string, args: string[], timeout: number): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile(
+      "git",
+      ["-C", cwd, ...args],
+      { encoding: "utf8", timeout, maxBuffer: 16 * 1024 * 1024, windowsHide: true },
+      (error, stdout) => resolve(error ? null : stdout),
+    );
+  });
+}
+
+const runGitCommand: GitCommand = (cwd, args) => executeGitCommand(cwd, args, 20_000);
+
+/**
+ * Runs `git -C cwd ...args` for a change. Resolves whether it succeeded and
+ * git's stderr, which says why when it did not ("working trees containing
+ * submodules cannot be moved or removed").
+ */
+export type GitRemovalCommand = (cwd: string, args: string[]) => Promise<{ ok: boolean; stderr: string }>;
+
+// Git may need minutes to remove a large checkout and its ignored build trees.
+const runGitRemovalCommand: GitRemovalCommand = (cwd, args) =>
   new Promise((resolve) => {
     execFile(
       "git",
       ["-C", cwd, ...args],
-      { encoding: "utf8", timeout: 20_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true },
-      (error, stdout) => resolve(error ? null : stdout),
+      { encoding: "utf8", timeout: 5 * 60_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true },
+      (error, _stdout, stderr) => resolve({ ok: !error, stderr: String(stderr ?? "") }),
     );
   });
 
@@ -192,4 +214,139 @@ export async function checkGitRepo(
     // The first entry is the main checkout itself.
     linkedWorktrees: worktreePaths.filter((path, i) => i > 0 && Path.resolve(path).toLowerCase() !== self),
   };
+}
+
+/**
+ * The admin folder a linked worktree's `.git` file points at
+ * (`<common dir>/worktrees/<name>`), or null when the file is not a
+ * worktree's: a submodule's points into `.git/modules`. A relative
+ * gitdir (`git worktree add --relative-paths`) resolves against the
+ * worktree. Same rule as `worktree_project` in the native scanner's
+ * dev_artifacts.rs.
+ */
+export function worktreeAdminDir(worktreePath: string, gitFile: string): string | null {
+  const line = gitFile.split(/\r?\n/, 1)[0]!.trim();
+  if (!line.startsWith("gitdir:")) return null;
+  const target = line.slice("gitdir:".length).trim();
+  if (!target) return null;
+  const resolved = Path.resolve(worktreePath, target);
+  const parts = resolved.split(/[\\/]+/).filter(Boolean);
+  if (parts.length < 3 || parts[parts.length - 2]!.toLowerCase() !== "worktrees") return null;
+  return resolved;
+}
+
+async function readSmallText(filePath: string): Promise<string | null> {
+  try {
+    return await FSP.readFile(filePath, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function notChecked(problem: string, orphaned = false): DevWorktreeCheck {
+  return { checked: false, problem, branch: null, changedFiles: null, commitsOnlyHere: null, lockReason: null, orphaned };
+}
+
+/** False only when nothing is at `filePath` (ENOENT). Any other error counts as there. */
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await FSP.lstat(filePath);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== "ENOENT";
+  }
+}
+
+/**
+ * What would be lost with this linked worktree. Reads its `.git` file,
+ * its admin folder's `HEAD` (gone when the main repo was deleted or the
+ * worktree pruned) and `locked`, then runs three read-only git commands:
+ * the branch, `status`, and the commits only its HEAD reaches.
+ */
+export async function checkGitWorktree(
+  worktreePath: string,
+  git: GitCommand = runGitCommand,
+  readText: (filePath: string) => Promise<string | null> = readSmallText,
+  exists: (filePath: string) => Promise<boolean> = pathExists,
+): Promise<DevWorktreeCheck> {
+  return (await inspectGitWorktree(worktreePath, git, readText, exists)).check;
+}
+
+/** `checkGitWorktree`, plus the admin folder it found (null when none). */
+async function inspectGitWorktree(
+  worktreePath: string,
+  git: GitCommand,
+  readText: (filePath: string) => Promise<string | null>,
+  exists: (filePath: string) => Promise<boolean> = pathExists,
+): Promise<{ check: DevWorktreeCheck; adminDir: string | null }> {
+  const gitPath = Path.join(worktreePath, ".git");
+  const gitFile = await readText(gitPath);
+  if (gitFile === null) {
+    // Unreadable, or a .git folder (a full clone): not ours to remove.
+    if (await exists(gitPath)) {
+      return { check: notChecked("Its .git is not a linked worktree's file, so git cannot check it."), adminDir: null };
+    }
+    if (!(await exists(worktreePath))) {
+      return { check: notChecked("It is no longer on disk. Rescan to update the list."), adminDir: null };
+    }
+    return { check: notChecked("It has no .git file, so git has no record of it.", true), adminDir: null };
+  }
+  const adminDir = worktreeAdminDir(worktreePath, gitFile);
+  if (!adminDir) {
+    return { check: notChecked("Its .git file does not point at a linked worktree, so git cannot check it."), adminDir };
+  }
+  if (await readText(Path.join(adminDir, "HEAD")) === null) {
+    return { check: notChecked(`Its repository is gone (${adminDir}), so git has no record of it.`, true), adminDir };
+  }
+  const lock = await readText(Path.join(adminDir, "locked"));
+  const base = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
+  const [head, status, onlyHere] = await Promise.all([
+    git(worktreePath, [...base, "rev-parse", "--abbrev-ref", "HEAD"]),
+    git(worktreePath, [...base, "status", "--porcelain", "--untracked-files=normal"]),
+    git(worktreePath, [...base, "rev-list", "--count", "HEAD", "--not", "--branches", "--remotes", "--tags"]),
+  ]);
+  if (head === null) {
+    return { check: { ...notChecked("git could not run here."), lockReason: lock === null ? null : lock.trim() }, adminDir };
+  }
+  const branch = head.trim();
+  return {
+    check: {
+      checked: true,
+      problem: null,
+      branch: branch && branch !== "HEAD" ? branch : null,
+      changedFiles: status === null ? null : lines(status).length,
+      commitsOnlyHere: count(onlyHere),
+      lockReason: lock === null ? null : lock.trim(),
+      orphaned: false,
+    },
+    adminDir,
+  };
+}
+
+/**
+ * Recheck immediately before removal, then let Git remove both the checkout
+ * and its registration. Never force or fall back to a filesystem delete.
+ * Run from the common Git directory so the child is not inside the folder
+ * being deleted (which also avoids a Windows directory handle blocking it).
+ */
+export async function removeGitWorktree(
+  worktreePath: string,
+  git: GitCommand = runGitCommand,
+  remove: GitRemovalCommand = runGitRemovalCommand,
+  readText: (filePath: string) => Promise<string | null> = readSmallText,
+): Promise<PathActionResult> {
+  const { check, adminDir } = await inspectGitWorktree(worktreePath, git, readText);
+  const risks = worktreeRisks(check);
+  if (risks.length > 0) return { ok: false, message: `Not removed: ${risks.join(" ")}` };
+  if (!adminDir) return { ok: false, message: "The worktree's .git file is no longer readable." };
+  const commonDir = Path.dirname(Path.dirname(adminDir));
+  const result = await remove(commonDir, [
+    "--git-dir", commonDir, "--no-optional-locks", "-c", "core.fsmonitor=false",
+    "worktree", "remove", "--", Path.resolve(worktreePath),
+  ]);
+  if (!result.ok) {
+    const reason = result.stderr.trim().replace(/^(fatal|error): /i, "");
+    return { ok: false, message: reason ? `Git could not remove this worktree: ${reason}` : "Git could not remove this worktree." };
+  }
+  return { ok: true, message: "Git permanently removed the worktree and its registration." };
 }

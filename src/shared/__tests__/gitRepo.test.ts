@@ -9,9 +9,11 @@ import type { DevArtifact, DevArtifactReport, DevGitRepoInfo } from "../contract
 import {
   annotateGitRepos,
   checkGitRepo,
+  checkGitWorktree,
   displayRemoteUrl,
   gitRepoInfoFromConfig,
   parseGitRemotes,
+  worktreeAdminDir,
   type GitCommand,
 } from "../gitRepo";
 
@@ -231,5 +233,160 @@ describe("checkGitRepo against real git", () => {
     });
     expect(check.linkedWorktrees.map((p) => Path.basename(p))).toEqual(["app-feat"]);
     expect(FS.statSync(Path.join(repo, ".git", "index")).mtimeMs).toBe(indexBefore);
+  });
+});
+
+describe("worktreeAdminDir", () => {
+  it("resolves a worktree's gitdir and rejects a submodule's", () => {
+    const wt = Path.resolve("/wt/app/feat");
+    expect(worktreeAdminDir(wt, `gitdir: ${Path.resolve("/src/app/.git/worktrees/feat")}\n`))
+      .toBe(Path.resolve("/src/app/.git/worktrees/feat"));
+    expect(worktreeAdminDir(wt, "gitdir: ../../../src/app/.git/worktrees/feat"))
+      .toBe(Path.resolve("/src/app/.git/worktrees/feat"));
+    expect(worktreeAdminDir(wt, "gitdir: ../.git/modules/lib")).toBeNull();
+    expect(worktreeAdminDir(wt, "ref: refs/heads/main")).toBeNull();
+    expect(worktreeAdminDir(wt, "gitdir:")).toBeNull();
+  });
+});
+
+describe("checkGitWorktree", () => {
+  const wt = Path.resolve("/wt/app/feat");
+  const admin = Path.resolve("/src/app/.git/worktrees/feat");
+  /** Files keyed by path; a missing key reads as absent. */
+  const files = (extra: Record<string, string> = {}) => async (filePath: string) => ({
+    [Path.join(wt, ".git")]: `gitdir: ${admin}\n`,
+    [Path.join(admin, "HEAD")]: "ref: refs/heads/feat\n",
+    ...extra,
+  })[filePath] ?? null;
+  function fakeGit(answers: Record<string, string | null>): { git: GitCommand; calls: string[][] } {
+    const calls: string[][] = [];
+    const git: GitCommand = async (_cwd, args) => {
+      calls.push(args);
+      const sub = args.find((arg, i) => i >= 3 && !arg.startsWith("-"))!;
+      return sub in answers ? answers[sub]! : null;
+    };
+    return { git, calls };
+  }
+
+  it("clears a clean worktree on a branch", async () => {
+    const { git, calls } = fakeGit({ "rev-parse": "feat\n", status: "", "rev-list": "0\n" });
+    expect(await checkGitWorktree(wt, git, files())).toEqual({
+      checked: true,
+      problem: null,
+      branch: "feat",
+      changedFiles: 0,
+      commitsOnlyHere: 0,
+      lockReason: null,
+      orphaned: false,
+    });
+    // Read-only: no optional index write, no fsmonitor hook.
+    expect(calls).toHaveLength(3);
+    for (const args of calls) expect(args.slice(0, 3)).toEqual(["--no-optional-locks", "-c", "core.fsmonitor=false"]);
+  });
+
+  it("counts uncommitted files and a detached HEAD's own commits, and reads a lock", async () => {
+    const { git } = fakeGit({ "rev-parse": "HEAD\n", status: " M a.ts\n?? b.ts\n", "rev-list": "2\n" });
+    expect(await checkGitWorktree(wt, git, files({ [Path.join(admin, "locked")]: "on a USB disk\n" }))).toEqual({
+      checked: true,
+      problem: null,
+      branch: null,
+      changedFiles: 2,
+      commitsOnlyHere: 2,
+      lockReason: "on a USB disk",
+      orphaned: false,
+    });
+  });
+
+  it("does not run git without a worktree .git file or when the repo is gone", async () => {
+    const { git, calls } = fakeGit({});
+    const present = async () => true;
+    const missing = async () => false;
+    // No .git at all: git has no record of it.
+    const noGit = await checkGitWorktree(wt, git, async () => null, async (p) => p === wt);
+    expect(noGit).toMatchObject({ checked: false, changedFiles: null, orphaned: true });
+    expect(noGit.problem).toMatch(/no \.git file/);
+    // The folder itself is gone since the scan: nothing to move.
+    expect(await checkGitWorktree(wt, git, async () => null, missing))
+      .toMatchObject({ checked: false, orphaned: false, problem: "It is no longer on disk. Rescan to update the list." });
+    // A .git folder (a full clone) or an unreadable file is not orphaned.
+    expect(await checkGitWorktree(wt, git, async () => null, present)).toMatchObject({ checked: false, orphaned: false });
+    // A submodule's pointer is not a worktree's.
+    expect(await checkGitWorktree(wt, git, async () => "gitdir: ../.git/modules/feat\n", present))
+      .toMatchObject({ checked: false, orphaned: false });
+    // The admin folder is gone: the main repo was deleted or the worktree pruned.
+    const gone = await checkGitWorktree(wt, git, async (p) => (p === Path.join(wt, ".git") ? `gitdir: ${admin}` : null), present);
+    expect(gone).toMatchObject({ checked: false, orphaned: true });
+    expect(gone.problem).toContain("repository is gone");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("reports a git that cannot run as not checked", async () => {
+    const { git } = fakeGit({});
+    expect(await checkGitWorktree(wt, git, files())).toMatchObject({ checked: false, problem: "git could not run here." });
+  });
+});
+
+describe("checkGitWorktree against real git", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) FS.rmSync(dir, { recursive: true, force: true });
+  });
+  const hasGit = (() => {
+    try {
+      execFileSync("git", ["--version"], { stdio: "ignore" });
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
+  it.skipIf(!hasGit)("tells a clean branch worktree from a detached one with its own work", async () => {
+    const base = FS.realpathSync(FS.mkdtempSync(Path.join(OS.tmpdir(), "diskhound-wt-check-")));
+    dirs.push(base);
+    const repo = Path.join(base, "app");
+    FS.mkdirSync(repo);
+    const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { stdio: "pipe" });
+    git(repo, "init", "-q", "-b", "main");
+    git(repo, "config", "user.email", "t@example.com");
+    git(repo, "config", "user.name", "t");
+    git(repo, "config", "commit.gpgsign", "false");
+    FS.writeFileSync(Path.join(repo, "a.txt"), "one\n");
+    git(repo, "add", "a.txt");
+    git(repo, "commit", "-q", "-m", "one");
+    const clean = Path.join(base, "wt", "clean");
+    const detached = Path.join(base, "wt", "detached");
+    git(repo, "worktree", "add", "-q", "-b", "feat", clean);
+    git(repo, "worktree", "add", "-q", "--detach", detached);
+    FS.writeFileSync(Path.join(detached, "a.txt"), "two\n");
+    git(detached, "commit", "-q", "-am", "two");
+    FS.writeFileSync(Path.join(detached, "scratch.txt"), "untracked\n");
+
+    expect(await checkGitWorktree(clean)).toEqual({
+      checked: true,
+      problem: null,
+      branch: "feat",
+      changedFiles: 0,
+      commitsOnlyHere: 0,
+      lockReason: null,
+      orphaned: false,
+    });
+    const indexBefore = FS.statSync(Path.join(repo, ".git", "worktrees", "detached", "index")).mtimeMs;
+    expect(await checkGitWorktree(detached)).toMatchObject({
+      checked: true,
+      branch: null,
+      changedFiles: 1,
+      commitsOnlyHere: 1,
+      lockReason: null,
+    });
+    expect(FS.statSync(Path.join(repo, ".git", "worktrees", "detached", "index")).mtimeMs).toBe(indexBefore);
+
+    git(repo, "worktree", "lock", "--reason", "keep", clean);
+    expect((await checkGitWorktree(clean)).lockReason).toBe("keep");
+
+    // Pruned by hand (or the main repo deleted): git has no record left.
+    FS.rmSync(Path.join(repo, ".git", "worktrees", "detached"), { recursive: true, force: true });
+    expect(await checkGitWorktree(detached)).toMatchObject({ checked: false, orphaned: true });
+    // A full clone's .git folder is not an orphaned worktree.
+    expect(await checkGitWorktree(repo)).toMatchObject({ checked: false, orphaned: false });
   });
 });
