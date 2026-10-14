@@ -26,6 +26,8 @@ mod usn_aggregate;
 
 #[cfg(windows)]
 mod mft;
+#[cfg(any(windows, test))]
+mod mft_runs;
 
 mod sample;
 mod clone_attrs;

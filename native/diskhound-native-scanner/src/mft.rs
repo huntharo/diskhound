@@ -31,10 +31,10 @@
 //!
 //! ## What this file is NOT
 //!
-//! - We don't support $ATTRIBUTE_LIST (0x20) expansion for records whose
-//!   attributes overflow a single record. These are rare (very fragmented
-//!   files, giant directories); we log and skip them. This is fine
-//!   because the goal is "fast common-case", not "archivally complete".
+//! - `$MFT`'s own run map follows `$ATTRIBUTE_LIST` (0x20) on record 0
+//!   when the table's `$DATA` extents do not all fit in that record.
+//!   Other files still do not expand `$ATTRIBUTE_LIST` for names; an
+//!   extension record is read only to recover `$DATA` size.
 //! - Encrypted files use the same $DATA allocated_size as compressed/
 //!   sparse files (cluster occupancy). We do not decrypt content.
 //! - We don't process $FILE_NAME entries with DOS-only namespace (we
@@ -251,13 +251,6 @@ fn volume_handle_to_file(volume: VolumeHandle) -> std::fs::File {
     unsafe { std::fs::File::from_raw_handle(raw as _) }
 }
 
-/// Parsed MFT record header + pointer offsets. `record_buf` contains the
-/// full record bytes after USA fixup.
-struct RecordHeader {
-    flags: u16,
-    first_attr_offset: u16,
-}
-
 /// Apply the Update Sequence Array fixup in-place. Each 512-byte sector's
 /// last 2 bytes get replaced with the corresponding USA entry.
 fn apply_usa_fixup(buf: &mut [u8], bytes_per_sector: u32) -> bool {
@@ -295,30 +288,6 @@ fn apply_usa_fixup(buf: &mut [u8], bytes_per_sector: u32) -> bool {
         buf[sector_end - 1] = buf[fixup_idx + 1];
     }
     true
-}
-
-fn parse_record_header(buf: &[u8]) -> Option<RecordHeader> {
-    if buf.len() < 48 || &buf[0..4] != FILE_RECORD_MAGIC {
-        return None;
-    }
-    let first_attr_offset = u16::from_le_bytes([buf[20], buf[21]]);
-    let flags = u16::from_le_bytes([buf[22], buf[23]]);
-    // BaseFileRecordSegment at offset 32 (u64). If non-zero this record
-    // is an extension of another record — we skip those for simplicity.
-    let base_frn = u64::from_le_bytes([
-        buf[32], buf[33], buf[34], buf[35], buf[36], buf[37], buf[38], buf[39],
-    ]) & 0x0000_FFFF_FFFF_FFFF;
-    if base_frn != 0 {
-        return None;
-    }
-    // We do not read the header's MFTRecordNumber field (offset 44) —
-    // it's only present on NTFS v3.0+ and some records carry zero here.
-    // Instead the caller computes the record number from the record's
-    // position within the logical MFT stream.
-    Some(RecordHeader {
-        flags,
-        first_attr_offset,
-    })
 }
 
 struct ParsedAttrs {
@@ -507,110 +476,136 @@ fn ntfs_time_to_unix_ms(ntfs_ticks: u64) -> u64 {
     (ntfs_ticks - WINDOWS_TO_UNIX_EPOCH_TICKS) / 10_000
 }
 
-/// A single (LCN, cluster_count) extent of a non-resident attribute's
-/// data. Returned by `parse_data_runs` when we follow $MFT's own $DATA
-/// attribute to discover where on disk each piece of the MFT lives.
-#[derive(Debug, Clone, Copy)]
-struct DataRun {
-    lcn: i64, // signed; relative accumulator can go negative for sparse runs
-    cluster_count: u64,
-}
+/// Record 0's unnamed `$DATA` runs, plus every extension record named by
+/// its `$ATTRIBUTE_LIST`. Extension records sit in the part of `$MFT` the
+/// base runs already cover; a later fragment can reveal the next one.
+fn resolve_mft_runs(
+    volume: &mut std::fs::File,
+    record_0: &[u8],
+    record_size: usize,
+    bytes_per_cluster: u64,
+    bytes_per_sector: u32,
+    valid_data_length: i64,
+) -> Result<Vec<crate::mft_runs::DataRun>, MftError> {
+    use crate::mft_runs::{
+        AttributeListRead, absorb_extension_records, attribute_list_read,
+        extension_records_from_attribute_list, join_run_segments, logical_byte_length,
+        read_logical, record_0_mft_map,
+    };
 
-/// Parse an NTFS data run list starting at `runs` and return the absolute
-/// extents. The stream ends on a zero header byte. Sparse runs (zero
-/// offset length) are represented with lcn=-1 and skipped by callers.
-fn parse_data_runs(mut runs: &[u8]) -> Vec<DataRun> {
-    let mut out = Vec::new();
-    let mut current_lcn: i64 = 0;
-    while !runs.is_empty() {
-        let header = runs[0];
-        if header == 0 {
-            break;
-        }
-        let offset_len = (header >> 4) as usize;
-        let count_len = (header & 0x0F) as usize;
-        if count_len == 0 || 1 + count_len + offset_len > runs.len() {
-            break;
-        }
-        // Read unsigned cluster count (little-endian, count_len bytes).
-        let mut count: u64 = 0;
-        for i in 0..count_len {
-            count |= (runs[1 + i] as u64) << (8 * i);
-        }
-        // Read signed offset delta (little-endian, offset_len bytes,
-        // sign-extended from the top byte). A length of 0 means SPARSE.
-        if offset_len == 0 {
-            out.push(DataRun {
-                lcn: -1,
-                cluster_count: count,
-            });
-        } else {
-            let mut offset_delta: i64 = 0;
-            let delta_bytes = &runs[1 + count_len..1 + count_len + offset_len];
-            for (i, byte) in delta_bytes.iter().enumerate() {
-                offset_delta |= (*byte as i64) << (8 * i);
+    let invalid = || {
+        MftError::VolumeQueryFailed(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "could not parse $MFT's $DATA run list from record 0",
+        ))
+    };
+    let map = record_0_mft_map(record_0).ok_or_else(invalid)?;
+    let mut segments = map.segments;
+    let mut pending = map.extension_records;
+    if let Some(external) = map.external_attribute_list {
+        let available = logical_byte_length(&external.runs, bytes_per_cluster).unwrap_or(0);
+        // Whole list only. A prefix drops every extension past the cut
+        // and the scan still looks successful. 32 MiB is far past a real
+        // $MFT attribute list. Above that, or when record 0's runs do not
+        // cover the initialized length, keep record 0 and warn.
+        const MAX_ATTRIBUTE_LIST_BYTES: u64 = 32 * 1024 * 1024;
+        match attribute_list_read(
+            external.byte_length,
+            bytes_per_sector as u64,
+            available,
+            MAX_ATTRIBUTE_LIST_BYTES,
+        ) {
+            AttributeListRead::Missing => {
+                eprintln!(
+                    "[diskhound-native-scanner] mft: warning: $ATTRIBUTE_LIST for $MFT could not be read; using record 0's run list only"
+                );
             }
-            // Sign-extend from offset_len bytes to 64 bits.
-            let sign_bit = 1_i64 << (8 * offset_len - 1);
-            if offset_delta & sign_bit != 0 {
-                offset_delta |= !((1_i64 << (8 * offset_len)) - 1);
+            AttributeListRead::Incomplete => {
+                eprintln!(
+                    "[diskhound-native-scanner] mft: warning: $ATTRIBUTE_LIST for $MFT is only partly in record 0; using record 0's run list only"
+                );
             }
-            current_lcn = current_lcn.wrapping_add(offset_delta);
-            out.push(DataRun {
-                lcn: current_lcn,
-                cluster_count: count,
-            });
-        }
-        runs = &runs[1 + count_len + offset_len..];
-    }
-    out
-}
-
-/// Find the non-resident $DATA attribute in $MFT's own record and return
-/// its run list. Record 0 is $MFT itself; its $DATA run list IS the map
-/// of "where on disk are the MFT records".
-fn extract_mft_data_runs(
-    mft_record_0: &[u8],
-) -> Option<Vec<DataRun>> {
-    let header = parse_record_header(mft_record_0)?;
-    if header.flags & FLAG_IN_USE == 0 {
-        return None;
-    }
-    let mut pos = header.first_attr_offset as usize;
-    while pos + 16 <= mft_record_0.len() {
-        let attr_type = u32::from_le_bytes([
-            mft_record_0[pos], mft_record_0[pos + 1],
-            mft_record_0[pos + 2], mft_record_0[pos + 3],
-        ]);
-        if attr_type == ATTR_END_MARKER {
-            break;
-        }
-        let attr_len = u32::from_le_bytes([
-            mft_record_0[pos + 4], mft_record_0[pos + 5],
-            mft_record_0[pos + 6], mft_record_0[pos + 7],
-        ]) as usize;
-        if attr_len < 16 || pos + attr_len > mft_record_0.len() {
-            break;
-        }
-        let non_resident = mft_record_0[pos + 8];
-        if attr_type == ATTR_DATA && non_resident != 0 {
-            // Non-resident attribute header: runlist offset at offset 32.
-            let runlist_offset = u16::from_le_bytes([
-                mft_record_0[pos + 32], mft_record_0[pos + 33],
-            ]) as usize;
-            let run_start = pos + runlist_offset;
-            let run_end = pos + attr_len;
-            if run_start < run_end && run_end <= mft_record_0.len() {
-                return Some(parse_data_runs(&mft_record_0[run_start..run_end]));
+            AttributeListRead::TooBig(bytes) => {
+                eprintln!(
+                    "[diskhound-native-scanner] mft: warning: $ATTRIBUTE_LIST for $MFT is {:.1} MB; using record 0's run list only",
+                    bytes as f64 / (1024.0 * 1024.0)
+                );
+            }
+            AttributeListRead::Ready(read_len) => {
+                let mut list = vec![0u8; read_len as usize];
+                match read_logical(volume, &external.runs, 0, &mut list, bytes_per_cluster) {
+                    Ok(true) => {
+                        let prefix = (external.byte_length as usize).min(list.len());
+                        pending = extension_records_from_attribute_list(&list[..prefix]);
+                    }
+                    Ok(false) => {
+                        eprintln!(
+                            "[diskhound-native-scanner] mft: warning: $ATTRIBUTE_LIST for $MFT could not be read; using record 0's run list only"
+                        );
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "[diskhound-native-scanner] mft: warning: $ATTRIBUTE_LIST for $MFT could not be read ({}); using record 0's run list only",
+                            err
+                        );
+                    }
+                }
             }
         }
-        pos += attr_len;
     }
-    None
+
+    let unresolved = absorb_extension_records(
+        &mut segments,
+        pending,
+        record_size,
+        |runs_now, logical, buf| {
+            // A bad sector in one extension must not drop the runs already
+            // in hand. The coverage warning reports what stayed unread.
+            let found = match read_logical(volume, runs_now, logical, buf, bytes_per_cluster) {
+                Ok(found) => found,
+                Err(_) => return Ok(false),
+            };
+            let readable = found
+                && buf.len() >= 4
+                && &buf[0..4] == FILE_RECORD_MAGIC
+                && apply_usa_fixup(buf, bytes_per_sector);
+            if found && !readable {
+                buf[..4].fill(0);
+            }
+            Ok(found)
+        },
+    )?;
+
+    let (runs, had_gap) = join_run_segments(&segments);
+    if runs.iter().all(|run| run.lcn < 0) {
+        return Err(invalid());
+    }
+    // Same total the "data runs" log prints: real clusters, not holes
+    // inserted where an extension fragment was missing.
+    let covered_clusters: u64 = runs
+        .iter()
+        .filter(|run| run.lcn >= 0)
+        .map(|run| run.cluster_count)
+        .sum();
+    let covered = covered_clusters.saturating_mul(bytes_per_cluster);
+    let valid = if valid_data_length > 0 {
+        valid_data_length as u64
+    } else {
+        0
+    };
+    if had_gap || !unresolved.is_empty() || (valid > 0 && covered < valid) {
+        eprintln!(
+            "[diskhound-native-scanner] mft: warning: $MFT run list covers {:.1} MB of {:.1} MB valid data ({} extension records unread)",
+            covered as f64 / (1024.0 * 1024.0),
+            valid as f64 / (1024.0 * 1024.0),
+            unresolved.len(),
+        );
+    }
+    Ok(runs)
 }
 
-/// Read the entire MFT into a FRN → MftRecordParsed map by following the
-/// data runs discovered in $MFT's own record 0.
+/// Read the entire MFT into a FRN → MftRecordParsed map by following
+/// `$MFT`'s data runs, including extents stored in extension records.
 ///
 /// Why not just seek to MftStartLcn and read MftValidDataLength bytes?
 /// Because the MFT is typically fragmented on any drive that's seen real
@@ -646,12 +641,14 @@ fn read_all_mft_records(
         return Err(MftError::InvalidMftRecord);
     }
     apply_usa_fixup(&mut record_0, bytes_per_sector);
-    let runs = extract_mft_data_runs(&record_0).ok_or_else(|| {
-        MftError::VolumeQueryFailed(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "could not parse $MFT's $DATA run list from record 0",
-        ))
-    })?;
+    let runs = resolve_mft_runs(
+        &mut volume,
+        &record_0,
+        record_size,
+        bytes_per_cluster,
+        bytes_per_sector,
+        volume_data.MftValidDataLength,
+    )?;
     let total_clusters: u64 = runs
         .iter()
         .filter(|r| r.lcn >= 0)
@@ -738,10 +735,8 @@ fn read_all_mft_records(
                     continue;
                 }
 
-                // Parse header WITHOUT skipping extension records — we
-                // need the size data they carry. parse_record_header
-                // used to return None for base_frn != 0; we pull that
-                // check inline here so we can see extensions.
+                // Keep extension records. Their $DATA size belongs to the
+                // base file; skipping a non-zero base reference would drop it.
                 if rec_buf.len() < 48 || &rec_buf[0..4] != FILE_RECORD_MAGIC {
                     continue;
                 }
