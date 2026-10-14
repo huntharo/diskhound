@@ -635,10 +635,10 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
         {!analysis && !isScanning && !scanStarting && chainPhase === null && (
           <div className="duplicates-empty">
             <div className="duplicates-empty-icon">
-              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" opacity="0.3">
+              <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.3">
                 <rect x="3" y="3" width="8" height="18" rx="1" />
                 <rect x="13" y="3" width="8" height="18" rx="1" />
-                <path d="M7 8H7.01M17 8H17.01M7 12H7.01M17 12H17.01" strokeWidth="2" strokeLinecap="round" />
+                <path d="M7 8H7.01M17 8H17.01M7 12H7.01M17 12H17.01" stroke-width="2" stroke-linecap="round" />
               </svg>
             </div>
             <div className="duplicates-empty-text">Find duplicate files</div>
@@ -812,7 +812,7 @@ function GroupCard({ group, isExpanded, busy, confirmDelete, selectedPaths, find
             path={group.files[0]?.path ?? name}
             className="duplicate-group-icon-img"
             fallback={
-              <svg width="16" height="16" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.1" opacity="0.5">
+              <svg width="16" height="16" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.1" opacity="0.5">
                 <path d="M3 1.5H8.5L11 4V12.5H3V1.5Z" />
                 <path d="M8.5 1.5V4H11" />
               </svg>

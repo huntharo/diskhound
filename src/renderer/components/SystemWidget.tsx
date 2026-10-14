@@ -953,7 +953,7 @@ function Titlebar(props: {
         >
           {isWide ? (
             // Inward arrows — currently wide, click to shrink
-            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
               <path d="M6 2v4H2" />
               <path d="M2.5 2.5L6 6" />
               <path d="M8 12v-4h4" />
@@ -961,7 +961,7 @@ function Titlebar(props: {
             </svg>
           ) : (
             // Outward arrows — currently compact, click to grow
-            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
               <path d="M2 6V2h4" />
               <path d="M2 2l4 4" />
               <path d="M12 8v4h-4" />
@@ -988,9 +988,9 @@ function Titlebar(props: {
           title="Open main window"
           onClick={() => void nativeApi.focusMainWindow()}
         >
-          <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.45" strokeLinejoin="round">
+          <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linejoin="round">
             <rect x="2" y="2.5" width="10" height="8.8" rx="1.4" />
-            <path d="M5 12h4" strokeLinecap="round" />
+            <path d="M5 12h4" stroke-linecap="round" />
           </svg>
         </button>
         <button
@@ -999,7 +999,7 @@ function Titlebar(props: {
           title="Close (Esc)"
           onClick={() => void nativeApi.closeSystemWidget()}
         >
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
             <path d="M3 3l6 6M9 3 3 9" />
           </svg>
         </button>
@@ -1083,7 +1083,7 @@ function LayoutButton(props: {
         {/* Three stacked rectangles, middle one filled — reads as
           * "configure which sections show" without overloading
           * the existing settings-gear convention. */}
-        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round">
+        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round">
           <rect x="2"   y="2"   width="10" height="2.4" />
           <rect x="2"   y="5.8" width="10" height="2.4" fill="currentColor" />
           <rect x="2"   y="9.6" width="10" height="2.4" />
@@ -1150,7 +1150,7 @@ function LayoutToggleRow(props: {
 function BrandMark() {
   return (
     <svg className="system-widget-brand-mark" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <rect x="1" y="1" width="14" height="14" rx="2" stroke="currentColor" strokeWidth="1.5" />
+      <rect x="1" y="1" width="14" height="14" rx="2" stroke="currentColor" stroke-width="1.5" />
       <rect x="4" y="4" width="4" height="4" fill="currentColor" opacity="0.85" />
       <rect x="9" y="4" width="3" height="8" fill="currentColor" opacity="0.55" />
       <rect x="4" y="9" width="4" height="3" fill="currentColor" opacity="0.35" />
@@ -1173,7 +1173,7 @@ function DragGrip() {
 
 function PinIcon({ active }: { active: boolean }) {
   return (
-    <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round">
+    <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round">
       <path d="M4.2 2h5.6" />
       <path
         d="M4.6 2v3.4L3.1 7.1h7.8L9.4 5.4V2"
@@ -1221,7 +1221,7 @@ function DetailPanel(props: {
           title="Close (Esc)"
           onClick={onClose}
         >
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
             <path d="M2.5 2.5l5 5M7.5 2.5l-5 5" />
           </svg>
         </button>
@@ -1352,7 +1352,7 @@ function Sparkline({ values, accent }: { values: number[]; accent: TileAccent })
       viewBox={`0 0 ${W} ${H}`}
       aria-hidden="true"
     >
-      <polyline points={points} fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+      <polyline points={points} fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" />
     </svg>
   );
 }
