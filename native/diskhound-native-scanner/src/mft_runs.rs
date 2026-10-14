@@ -213,10 +213,14 @@ pub fn sector_aligned_read_len(logical_len: u64, bytes_per_sector: u64, availabl
 /// A prefix would drop every extension record past the cut.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttributeListRead {
-    /// Sector-aligned byte count to read. Parse only the initialized prefix.
+    /// Sector-aligned byte count covering `byte_length`. Parse only
+    /// the initialized prefix; the tail is sector padding.
     Ready(u64),
     /// The list is on disk and larger than `max_bytes`.
     TooBig(u64),
+    /// Record 0's runs cover only a prefix of the initialized length.
+    /// Parsing that prefix would drop the rest of the extension records.
+    Incomplete,
     /// No sector-aligned bytes are available.
     Missing,
 }
@@ -230,6 +234,8 @@ pub fn attribute_list_read(
     let read_len = sector_aligned_read_len(byte_length, bytes_per_sector, available);
     if read_len == 0 {
         AttributeListRead::Missing
+    } else if read_len < byte_length {
+        AttributeListRead::Incomplete
     } else if read_len > max_bytes {
         AttributeListRead::TooBig(read_len)
     } else {
@@ -238,9 +244,10 @@ pub fn attribute_list_read(
 }
 
 /// Pull unnamed `$DATA` fragments out of each extension record.
-/// A record the current map cannot reach stays pending until a fragment
-/// just loaded covers it. Records that never become readable, or that
-/// are not FILE records, are returned unread.
+/// The run map is rebuilt before each attempt, so a record loaded
+/// earlier in this pass can cover the next one. A record the map still
+/// cannot reach stays pending. Records that never become readable, or
+/// that are not FILE records, are returned unread.
 pub fn absorb_extension_records(
     segments: &mut Vec<DataSegment>,
     mut pending: Vec<u64>,
@@ -249,10 +256,10 @@ pub fn absorb_extension_records(
 ) -> io::Result<Vec<u64>> {
     let mut unresolved = Vec::new();
     loop {
-        let (runs_now, _) = join_run_segments(segments);
         let mut still_out_of_range = Vec::new();
         let mut progress = false;
         for frn in pending {
+            let (runs_now, _) = join_run_segments(segments);
             let Some(logical) = frn.checked_mul(record_size as u64) else {
                 unresolved.push(frn);
                 continue;
@@ -701,9 +708,68 @@ mod tests {
             attribute_list_read(100, sector, 4096, 1024 * 1024),
             AttributeListRead::Ready(512)
         );
+        // Runs cover 4096 of an initialized 5000. Parsing that prefix
+        // would drop every extension record past the cut.
+        assert_eq!(
+            attribute_list_read(5_000, sector, 4096, 32 * 1024 * 1024),
+            AttributeListRead::Incomplete
+        );
         assert_eq!(
             attribute_list_read(0, sector, available, 1024 * 1024),
             AttributeListRead::Missing
+        );
+    }
+
+    #[test]
+    fn an_in_order_extension_chain_is_read_once_per_record() {
+        let bpc = 1024u64;
+        let record_size = 1024usize;
+        // Base covers records 0 and 1. Record 1 names the extent that
+        // holds record 2, and record 2 names the extent that holds record 3.
+        let mut image = vec![0u8; 21 * record_size];
+        let rec1 = file_record(&nonresident(ATTR_DATA, 2, 1, 10, 0));
+        image[record_size..record_size + rec1.len()].copy_from_slice(&rec1);
+        let rec2 = file_record(&nonresident(ATTR_DATA, 3, 1, 20, 0));
+        image[10 * record_size..10 * record_size + rec2.len()].copy_from_slice(&rec2);
+        let rec3 = file_record(&nonresident(ATTR_DATA, 4, 1, 30, 0));
+        image[20 * record_size..20 * record_size + rec3.len()].copy_from_slice(&rec3);
+
+        let mut segments = unnamed_data_segments(&file_record(&nonresident(ATTR_DATA, 0, 2, 0, 0)));
+        let mut reads = Vec::new();
+        let unresolved = absorb_extension_records(
+            &mut segments,
+            vec![1, 2, 3],
+            record_size,
+            |runs, logical, buf| {
+                reads.push(logical / record_size as u64);
+                read_logical(&mut Cursor::new(image.clone()), runs, logical, buf, bpc)
+            },
+        )
+        .unwrap();
+        assert!(unresolved.is_empty());
+        assert_eq!(reads, vec![1, 2, 3]);
+        let (runs, gap) = join_run_segments(&segments);
+        assert!(!gap);
+        assert_eq!(
+            runs,
+            vec![
+                DataRun {
+                    lcn: 0,
+                    cluster_count: 2
+                },
+                DataRun {
+                    lcn: 10,
+                    cluster_count: 1
+                },
+                DataRun {
+                    lcn: 20,
+                    cluster_count: 1
+                },
+                DataRun {
+                    lcn: 30,
+                    cluster_count: 1
+                },
+            ]
         );
     }
 

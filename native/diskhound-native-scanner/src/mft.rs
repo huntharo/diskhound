@@ -504,9 +504,10 @@ fn resolve_mft_runs(
     let mut pending = map.extension_records;
     if let Some(external) = map.external_attribute_list {
         let available = logical_byte_length(&external.runs, bytes_per_cluster).unwrap_or(0);
-        // Whole list only. A 1 MiB prefix used to drop every extension past
-        // the cut and the scan still looked successful. 32 MiB is far past
-        // a real $MFT attribute list; above that, keep record 0 and warn.
+        // Whole list only. A prefix drops every extension past the cut
+        // and the scan still looks successful. 32 MiB is far past a real
+        // $MFT attribute list. Above that, or when record 0's runs do not
+        // cover the initialized length, keep record 0 and warn.
         const MAX_ATTRIBUTE_LIST_BYTES: u64 = 32 * 1024 * 1024;
         match attribute_list_read(
             external.byte_length,
@@ -517,6 +518,11 @@ fn resolve_mft_runs(
             AttributeListRead::Missing => {
                 eprintln!(
                     "[diskhound-native-scanner] mft: warning: $ATTRIBUTE_LIST for $MFT could not be read; using record 0's run list only"
+                );
+            }
+            AttributeListRead::Incomplete => {
+                eprintln!(
+                    "[diskhound-native-scanner] mft: warning: $ATTRIBUTE_LIST for $MFT is only partly in record 0; using record 0's run list only"
                 );
             }
             AttributeListRead::TooBig(bytes) => {
