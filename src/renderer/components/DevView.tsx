@@ -6,6 +6,7 @@ import type {
   DevArtifactReport,
   DevArtifactsRescanProgress,
   DevGitRepoCheck,
+  DevWorktreeCheck,
   ScanSnapshot,
   StorageAccountingReport,
 } from "../../shared/contracts";
@@ -28,7 +29,7 @@ import {
   userDataSnapshots,
   type DevArtifactSharing,
 } from "../../shared/storageSharing";
-import { artifactDeltaLabel, artifactHeadline, artifactTail } from "../lib/devArtifactDisplay";
+import { artifactDeltaLabel, artifactHeadline, artifactTail, worktreeNestedNote } from "../lib/devArtifactDisplay";
 import { devReclaimDisplay } from "../lib/devReclaimDisplay";
 import {
   artifactsAtPaths,
@@ -49,9 +50,13 @@ import {
   gitCheckoutPath,
   gitRemoteBadge,
   gitRemovalConfirm,
+  orphanedWorktreeConfirm,
+  worktreeBulkNote,
+  worktreeRisks,
   gitRepoRemovalBlock,
 } from "../lib/gitRepoDisplay";
 import { dispatchDevArtifactsUpdated, STORAGE_ACCOUNTING_STALE_EVENT } from "../lib/uiEvents";
+import { checkWorktreesWithGit } from "../lib/worktreeChecks";
 import { nativeApi } from "../nativeApi";
 import { DEV_FOLDER_TREE_STAGES, DEV_RESCAN_STAGES, DEV_SIDECAR_STAGES, IndexLoadingPanel } from "./IndexLoadingPanel";
 import { toast } from "./Toasts";
@@ -112,7 +117,8 @@ type DeleteProgress = {
   itemsDeleted: number;
   itemsTotal: number | null;
   percent: number | null;
-  phase: "preparing" | "deleting";
+  /** "git": `git worktree remove` is running; it reports no progress. */
+  phase: "preparing" | "deleting" | "git";
   startedAt: number;
 };
 
@@ -221,6 +227,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
   const [modificationWindow, setModificationWindow] = useState<ModificationWindow>(0);
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
+  const [worktreeCheck, setWorktreeCheck] = useState<{ done: number; total: number; startedAt: number } | null>(null);
   const [deleteProgress, setDeleteProgress] = useState<DeleteProgress | null>(null);
   const [deleteElapsedSec, setDeleteElapsedSec] = useState(0);
   const [rescanning, setRescanning] = useState(false);
@@ -539,10 +546,113 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     setSelected(new Set());
   };
 
+  // Drop removed trees from the report, the sidecar and the selection.
+  const forgetRemoved = async (paths: string[]) => {
+    if (!root) return;
+    const scanKey = reportKey(root, snapshot.finishedAt);
+    noteForgotten(scanKey, paths);
+    let live = overlayForgotten(dropArtifactsFromReport(report ?? emptyDevReport(root), paths), scanKey);
+    setReport(live);
+    rememberReport(root, scanKey, live, live.artifacts.length === 0);
+    setSelected((prev) => {
+      const next = new Set(prev);
+      for (const path of paths) next.delete(path);
+      return next;
+    });
+    const persisted = await nativeApi.forgetDevArtifactPaths(root, paths);
+    if (persisted) {
+      live = overlayForgotten(persisted, scanKey);
+      setReport(live);
+      rememberReport(root, scanKey, live, live.artifacts.length === 0);
+    }
+    dispatchDevArtifactsUpdated(root);
+  };
+
+  /**
+   * Ask git about each worktree among `targets` first. Ones with work that
+   * exists only there (uncommitted files, commits on no branch, a lock, or
+   * no answer) are held back from a bulk delete. Returns the trees to
+   * delete and the confirm's worktree paragraph, or null when nothing is
+   * left to delete here.
+   */
+  const screenWorktrees = async (
+    targets: DevArtifact[],
+  ): Promise<{ targets: DevArtifact[]; note: string } | null> => {
+    const worktrees = targets.filter((artifact) => artifact.kind === "worktree");
+    if (worktrees.length === 0) return { targets, note: "" };
+    const startedAt = Date.now();
+    setBulkBusy(true);
+    setWorktreeCheck({ done: 0, total: worktrees.length, startedAt });
+    let checks: Map<string, DevWorktreeCheck>;
+    try {
+      checks = await checkWorktreesWithGit(
+        worktrees.map((artifact) => artifact.path),
+        (path) => nativeApi.checkGitWorktree(path),
+        { onProgress: (done, total) => setWorktreeCheck({ done, total, startedAt }) },
+      );
+    } finally {
+      setWorktreeCheck(null);
+      setBulkBusy(false);
+    }
+    const kept = worktrees
+      .map((artifact) => ({ artifact, check: checks.get(artifact.path)! }))
+      .filter(({ check }) => worktreeRisks(check).length > 0);
+    // Git has no record of a lone orphan, so offer the Trash instead.
+    if (targets.length === 1 && kept.length === 1 && kept[0]!.check.orphaned) {
+      await trashOrphanedWorktree(kept[0]!.artifact, kept[0]!.check);
+      return null;
+    }
+    const trash = platformTerminology(nativeApi.platform).trash;
+    const keptPaths = new Set(kept.map(({ artifact }) => artifact.path));
+    const rest = targets.filter((artifact) => !keptPaths.has(artifact.path));
+    if (rest.length === 0) {
+      toast(
+        "info",
+        "Nothing deleted",
+        worktreeBulkNote(0, kept, trash),
+      );
+      return null;
+    }
+    return { targets: rest, note: worktreeBulkNote(worktrees.length - kept.length, kept, trash) };
+  };
+
+  /**
+   * An orphaned worktree goes to the Trash after a confirm that says git
+   * could not check it. Checked again after the confirm, so one that git
+   * knows about again (its disk was reconnected) is left for Delete.
+   */
+  const trashOrphanedWorktree = async (artifact: DevArtifact, check: DevWorktreeCheck) => {
+    if (!root) return;
+    const trash = platformTerminology(nativeApi.platform).trash;
+    if (!window.confirm(orphanedWorktreeConfirm({ artifact, check, trash }))) return;
+    setBusyPaths((prev) => new Set(prev).add(artifact.path));
+    try {
+      const recheck = await nativeApi.checkGitWorktree(artifact.path);
+      if (!recheck.orphaned) {
+        toast("info", "Not moved", "Git can check this worktree now. Use Delete again to have Git remove it.");
+        return;
+      }
+      const result = await nativeApi.trashPath(artifact.path);
+      if (!result?.ok) {
+        toast("error", `Could not move to the ${trash}`, result?.message ?? artifact.path);
+        return;
+      }
+      await forgetRemoved([artifact.path]);
+      toast("success", `Moved ${basenameOf(artifact.path)} to the ${trash}`, `Empty the ${trash} to free the space.`);
+    } finally {
+      setBusyPaths((prev) => {
+        const next = new Set(prev);
+        next.delete(artifact.path);
+        return next;
+      });
+    }
+  };
+
   const deleteMany = async (paths: string[], label: string) => {
-    if (paths.length === 0 || !root) return;
-    const targets = artifactsAtPaths(selectableRows, paths);
-    if (targets.length === 0) return;
+    if (paths.length === 0 || !root || bulkBusy) return;
+    const screened = await screenWorktrees(artifactsAtPaths(selectableRows, paths));
+    if (!screened || screened.targets.length === 0) return;
+    const targets = screened.targets;
     const totalBytes = targets.reduce((sum, artifact) => sum + artifact.size, 0);
     const targetSharing = summarizeDevSharing(targets);
     const ok = window.confirm(permanentDeleteConfirm(
@@ -552,7 +662,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
       targetSharing.measuredTrees > 0
         ? { low: targetSharing.freesBytes, high: targetSharing.freesAtMostBytes }
         : null,
-    ));
+    ) + (screened.note ? `\n\n${screened.note}` : ""));
     if (!ok) return;
     // Freeze protection controls before the first asynchronous pre-delete check.
     setBulkBusy(true);
@@ -582,14 +692,16 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
           itemsDeleted: 0,
           itemsTotal: null,
           percent: null,
-          phase: "preparing",
+          phase: artifact.kind === "worktree" ? "git" : "preparing",
           startedAt,
         });
         setBusyPaths((prev) => new Set(prev).add(artifact.path));
         await yieldToUi();
         try {
-          let result = await nativeApi.permanentlyDeletePath(artifact.path, artifact.fileCount);
-          if (result?.requiresElevation) {
+          let result = artifact.kind === "worktree"
+            ? await nativeApi.removeGitWorktree(artifact.path)
+            : await nativeApi.permanentlyDeletePath(artifact.path, artifact.fileCount);
+          if (artifact.kind !== "worktree" && result?.requiresElevation) {
             if (!askedElevate) {
               askedElevate = true;
               elevateRemaining = window.confirm(
@@ -703,24 +815,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
         toast("error", `Could not move to the ${trash}`, result?.message ?? checkout);
         return;
       }
-      const paths = [artifact.path, ...inside.map((a) => a.path)];
-      const scanKey = reportKey(root, snapshot.finishedAt);
-      noteForgotten(scanKey, paths);
-      let live = overlayForgotten(dropArtifactsFromReport(report ?? emptyDevReport(root), paths), scanKey);
-      setReport(live);
-      rememberReport(root, scanKey, live, live.artifacts.length === 0);
-      setSelected((prev) => {
-        const next = new Set(prev);
-        for (const path of paths) next.delete(path);
-        return next;
-      });
-      const persisted = await nativeApi.forgetDevArtifactPaths(root, paths);
-      if (persisted) {
-        live = overlayForgotten(persisted, scanKey);
-        setReport(live);
-        rememberReport(root, scanKey, live, live.artifacts.length === 0);
-      }
-      dispatchDevArtifactsUpdated(root);
+      await forgetRemoved([artifact.path, ...inside.map((a) => a.path)]);
       toast("success", `Moved ${basenameOf(checkout)} to the ${trash}`, `Empty the ${trash} to free the space.`);
     } finally {
       setGitBusy(null);
@@ -1005,6 +1100,16 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
         />
       )}
 
+      {worktreeCheck && (
+        <div className="dev-rescan-banner" role="status" aria-live="polite">
+          <div>
+            Checking worktrees with git before deleting · {formatCount(worktreeCheck.done)} of {formatCount(worktreeCheck.total)}
+          </div>
+          <div className="dev-rescan-banner-detail">
+            Looking for uncommitted changes and commits on no branch
+          </div>
+        </div>
+      )}
       {deleteProgress && (
         <div className="dev-rescan-banner" role="status" aria-live="polite">
           <div>
@@ -1015,6 +1120,8 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
             {truncatePath(deleteProgress.path)}
             {deleteProgress.phase === "preparing"
               ? " · Starting deletion"
+              : deleteProgress.phase === "git"
+              ? " · Git is removing the worktree"
               : <>
                   {deleteProgress.percent !== null && (
                     <> · {deleteProgress.percent < 100 ? "≈ " : ""}{deleteProgress.percent.toFixed(1)}%</>
@@ -1244,6 +1351,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                 const repo = artifact.kind === "git-repo";
                 const remote = repo ? gitRemoteBadge(artifact.git) : null;
                 const removalBlock = repo ? gitRepoRemovalBlock(artifact, root) : null;
+                const nested = worktreeNestedNote(artifact);
                 return (
                 <div
                   key={artifact.path}
@@ -1269,6 +1377,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                       <span className="dev-row-tail" title={artifact.path}>{artifactTail(artifact)}</span>
                       {groupBy !== "kind" ? ` · ${DEV_KIND_SHORT[artifact.kind]}` : ""}
                       {` · ${formatCount(artifact.fileCount)} files`}
+                      {nested && <span title={nested.title}>{` · ${nested.label}`}</span>}
                       {artifact.deltaBytes != null && artifact.deltaBytes !== 0 ? (
                         <span className={artifact.deltaBytes > 0 ? "dev-delta-up" : "dev-delta-down"}>
                           {` · ${artifactDeltaLabel(artifact.deltaBytes)}`}
@@ -1334,7 +1443,9 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
                       <button
                         className="action-btn warn"
                         disabled={bulkBusy || busyPaths.has(artifact.path)}
-                        title={`Permanently delete this tree. Cannot be undone. Skips ${platformTerminology(nativeApi.platform).trash}.`}
+                        title={artifact.kind === "worktree"
+                          ? `Check this worktree with git, then remove it permanently with git worktree remove. One with uncommitted work, commits on no branch or a lock is left in place. One git has no record of can go to the ${platformTerminology(nativeApi.platform).trash} after you confirm.`
+                          : `Permanently delete this tree. Cannot be undone. Skips ${platformTerminology(nativeApi.platform).trash}.`}
                         onClick={() => void deleteOne(artifact.path)}
                       >
                         {busyPaths.has(artifact.path) ? "Deleting…" : "Delete"}

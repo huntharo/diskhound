@@ -72,7 +72,7 @@ export function ShortcutHelp({ open, onClose }: Props) {
         <div className="shortcut-help-header">
           <div className="shortcut-help-title">Keyboard shortcuts</div>
           <button className="shortcut-help-close" onClick={onClose} aria-label="Close">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5">
               <path d="M3 3L9 9M9 3L3 9" />
             </svg>
           </button>
