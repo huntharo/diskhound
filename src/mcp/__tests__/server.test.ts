@@ -311,12 +311,10 @@ describe("read tools", () => {
     expect(text(result)).toContain("walked the macOS Data volume twice");
   });
 
-  // SDK 1.30.0's McpServer parses tools/call `arguments` as given, so
-  // omitting it (optional in the spec) fails here. The HTTP layer
-  // defaults it to {} (withDefaultArguments, covered in
-  // agentAccessServer.test.ts); this pins the SDK behavior so we notice
-  // when an upgrade makes that shim unnecessary.
-  it.fails("the bare SDK rejects a tools/call without `arguments`", async () => {
+  // SDK 1.32 accepts a tools/call that omits `arguments`. The HTTP
+  // layer still fills {} (withDefaultArguments) so refusal logging
+  // sees one shape.
+  it("the SDK accepts a tools/call without `arguments`", async () => {
     const { client } = await connect({ roleId: "builtin.reader" });
     const result = (await client.callTool({ name: "diskhound_status" })) as CallToolResult;
     expect(result.isError).not.toBe(true);
@@ -510,6 +508,16 @@ describe("diskhound_move_to_trash", () => {
     const result = await call(client, "diskhound_move_to_trash", { paths: [`${ROOT}/Downloads/ubuntu.iso`, `${ROOT}/Downloads/installer.dmg`] });
     // 200 MiB is 210 MB in decimal units (macOS Finder's default).
     expect(text(result)).toContain("Moved 2 of 2 items (210 MB)");
+  });
+
+  it("refuses a tool call with more argument elements than the cap", async () => {
+    const { client, backend } = await connect({ roleId: "builtin.operator" });
+    const result = await call(client, "diskhound_move_to_trash", {
+      paths: Array.from({ length: 3000 }, (_, index) => `/tmp/file-${index}`),
+    });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain("2048");
+    expect(backend.confirmAndTrash).not.toHaveBeenCalled();
   });
 
   it("reports a declined confirmation without claiming anything moved", async () => {
@@ -909,8 +917,7 @@ describe("prompts", () => {
     expect(resource.resource.text).toContain("name: diskhound-investigate-growth");
   });
 
-  // Same SDK behavior as tools/call above; the HTTP layer defaults it.
-  it.fails("the bare SDK rejects a prompts/get without `arguments`", async () => {
+  it("the SDK accepts a prompts/get without `arguments`", async () => {
     const { client } = await connect();
     const result = await client.getPrompt({ name: "free-up-space" });
     expect(result.messages).toHaveLength(2);

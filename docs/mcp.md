@@ -310,7 +310,10 @@ The source lives in [`skills/`](../skills).
   DNS rebinding and cross-site requests from web pages.
 - OAuth 2.1 with dynamic client registration, PKCE (S256), and a resource
   indicator pinned to the MCP URL. Clients are public; there are no client
-  secrets.
+  secrets. A registration's redirect URIs have to be `http://127.0.0.1`,
+  `http://localhost`, or `http://[::1]` with an explicit port. An unapproved
+  registration stays in memory and is gone after a restart; DiskHound writes
+  the client record when you approve it.
 - Approval happens only in DiskHound's own window. Browser pages and URL
   parameters can't approve a request.
 - Tokens are stored as SHA-256 hashes in `mcp-policy.json` in DiskHound's

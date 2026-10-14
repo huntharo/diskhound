@@ -38,6 +38,14 @@ export const INVESTIGATE_GROWTH_SKILL = "skill://diskhound-investigate-growth/SK
 const MAX_TRASH_PATHS = 20;
 
 /**
+ * Array elements plus object members allowed in one tools/call.
+ * `diskhound_measure_removal` takes up to 1000 paths, which is about
+ * 1002 elements with its other fields. Past this the SDK refuses the
+ * call before the handler runs.
+ */
+const MAX_TOOL_INPUT_ELEMENTS = 2048;
+
+/**
  * What each tool needs, before its arguments add anything (showInApp
  * adds app.navigate). A session that lacks any of these doesn't see the
  * tool, and agentAccessServer refuses and logs a call to it.
@@ -207,6 +215,7 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
       // listChanged: the stdio helper announces role changes.
       capabilities: { tools: { listChanged: true } },
       instructions: serverInstructions(backend.platform, granted),
+      maxToolInputElements: MAX_TOOL_INPUT_ELEMENTS,
     },
   );
 

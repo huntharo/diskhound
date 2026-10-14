@@ -348,9 +348,9 @@ function hiddenTool(
 
 /**
  * `arguments` is optional on tools/call and prompts/get, and rmcp-based
- * clients (Codex) leave it out for tools that take none. SDK 1.30
- * validates it as given, so a missing object fails even when every
- * field is optional. Default it to {} (per message, batches included).
+ * clients (Codex) leave it out for tools that take none. SDK 1.32
+ * accepts that omission. Fill {} anyway so a batch and the refusal
+ * log see one shape.
  */
 export function withDefaultArguments(body: unknown): unknown {
   if (Array.isArray(body)) return body.map(withDefaultArguments);

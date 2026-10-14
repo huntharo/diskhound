@@ -40,6 +40,26 @@ import { findRole, isCapability, type McpAuthorization, type McpPolicyStore } fr
 
 const TTL_MS = 5 * 60_000;
 const PENDING_LIMIT = 64;
+
+/**
+ * A redirect an agent may register. Native clients listen on an
+ * ephemeral loopback port (RFC 8252). Anything else would let a
+ * registration send the authorization code to another host.
+ */
+export function isLoopbackRedirectUri(uri: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(uri);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "http:") return false;
+  if (url.username !== "" || url.password !== "") return false;
+  if (url.hash !== "") return false;
+  if (url.port === "") return false;
+  const host = url.hostname;
+  return host === "127.0.0.1" || host === "localhost" || host === "[::1]";
+}
 /**
  * The waiting client checks /authorize/status every 0.5–1 s (the stdio
  * helper and the browser page). Silence this long means it gave up,
@@ -77,15 +97,31 @@ export type RequestConsent = (request: ConsentRequest) => Promise<ConsentDecisio
 
 class Clients implements OAuthRegisteredClientsStore {
   private readonly clients = new Map<string, OAuthClientInformationFull>();
+  /** Client ids that already have a Session. Only these are written to disk. */
+  private readonly durable = new Set<string>();
+  private persisted = "";
 
   constructor(private readonly file: string, private readonly policy: McpPolicyStore) {
     try {
       const saved: unknown = JSON.parse(readFileSync(file, "utf8"));
       if (!Array.isArray(saved) || saved.length > CLIENT_LIMIT) throw new Error("Invalid OAuth client store");
+      const approved = new Set(
+        this.policy.sessions().map((session) => session.oauth?.clientId).filter((id): id is string => Boolean(id)),
+      );
+      let dropped = false;
       for (const value of saved) {
         const client = OAuthClientInformationFullSchema.parse(value);
+        if (!approved.has(client.client_id) || !client.redirect_uris?.every(isLoopbackRedirectUri)) {
+          dropped = true;
+          continue;
+        }
         this.clients.set(client.client_id, client);
+        this.durable.add(client.client_id);
       }
+      const body = this.serialize();
+      // Drop unapproved rows and public redirects left by older builds.
+      if (dropped) this.write(body);
+      else this.persisted = body;
     } catch (cause) {
       // A corrupt store only costs agents a re-registration; don't let it
       // stop the listener from starting.
@@ -97,7 +133,18 @@ class Clients implements OAuthRegisteredClientsStore {
     return this.clients.get(id);
   }
 
+  /** Remember a client once its Session exists, so the next launch can find it. */
+  retain(clientId: string) {
+    if (!this.clients.has(clientId)) return;
+    this.durable.add(clientId);
+    this.write(this.serialize());
+  }
+
   registerClient: NonNullable<OAuthRegisteredClientsStore["registerClient"]> = async (input) => {
+    const redirects = input.redirect_uris ?? [];
+    if (redirects.length === 0 || !redirects.every(isLoopbackRedirectUri)) {
+      throw new InvalidRequestError("redirect_uris must be http loopback URLs with an explicit port");
+    }
     const client: OAuthClientInformationFull = {
       ...input,
       client_id: opaque(),
@@ -109,20 +156,29 @@ class Clients implements OAuthRegisteredClientsStore {
     delete client.client_secret;
     delete client.client_secret_expires_at;
     if (this.clients.size >= CLIENT_LIMIT) {
-      const approved = new Set(
-        this.policy.sessions().filter((s) => s.revokedAt === null).map((s) => s.oauth?.clientId),
-      );
-      const evict = [...this.clients.keys()].find((id) => !approved.has(id));
+      const evict = [...this.clients.keys()].find((id) => !this.durable.has(id));
       if (evict === undefined) throw new InvalidRequestError("OAuth client limit reached");
       this.clients.delete(evict);
     }
     this.clients.set(client.client_id, client);
-    mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 });
-    const temporary = `${this.file}.tmp`;
-    writeFileSync(temporary, JSON.stringify([...this.clients.values()]), { mode: 0o600 });
-    renameSync(temporary, this.file);
+    // Unapproved registrations stay in memory. A restart drops them,
+    // and the agent registers again. The file is written in retain().
     return client;
   };
+
+  private serialize(): string {
+    const kept = [...this.clients.values()].filter((client) => this.durable.has(client.client_id));
+    return JSON.stringify(kept);
+  }
+
+  private write(body: string) {
+    if (body === this.persisted) return;
+    mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 });
+    const temporary = `${this.file}.tmp`;
+    writeFileSync(temporary, body, { mode: 0o600 });
+    renameSync(temporary, this.file);
+    this.persisted = body;
+  }
 }
 
 interface IssuedCode {
@@ -157,6 +213,7 @@ function escapeHtml(text: string): string {
 
 export class AgentOAuth implements OAuthServerProvider {
   readonly clientsStore: OAuthRegisteredClientsStore;
+  private readonly clients: Clients;
   private readonly codes = new Map<string, IssuedCode>();
   private readonly approvals = new Map<string, BrowserApproval>();
 
@@ -167,12 +224,16 @@ export class AgentOAuth implements OAuthServerProvider {
     requestConsent: RequestConsent;
     onChanged: () => void;
   }) {
-    this.clientsStore = new Clients(options.clientsFile, options.policy);
+    this.clients = new Clients(options.clientsFile, options.policy);
+    this.clientsStore = this.clients;
   }
 
   async authorize(client: OAuthClientInformationFull, params: AuthorizationParams, response: Response): Promise<void> {
     this.prune();
     this.validateResource(params.resource);
+    if (!isLoopbackRedirectUri(params.redirectUri) || !client.redirect_uris?.includes(params.redirectUri)) {
+      throw new InvalidRequestError("redirect_uri must be a registered http loopback URL");
+    }
     if (!/^[A-Za-z0-9_-]{43}$/.test(params.codeChallenge)) {
       throw new InvalidRequestError("A valid S256 code challenge is required");
     }
@@ -324,6 +385,7 @@ export class AgentOAuth implements OAuthServerProvider {
       { clientId: client.client_id, scopes: record.scopes },
       { name: clientLabel(client), via: clientVia(client) },
     );
+    this.clients.retain(client.client_id);
     this.options.onChanged();
     return { access_token: issued.token, token_type: "bearer", scope: record.scopes.join(" ") };
   }
