@@ -489,7 +489,7 @@ fn resolve_mft_runs(
 ) -> Result<Vec<crate::mft_runs::DataRun>, MftError> {
     use crate::mft_runs::{
         absorb_extension_records, extension_records_from_attribute_list, join_run_segments,
-        logical_byte_length, read_logical, record_0_mft_map,
+        logical_byte_length, read_logical, record_0_mft_map, sector_aligned_read_len,
     };
 
     let invalid = || {
@@ -503,21 +503,33 @@ fn resolve_mft_runs(
     let mut pending = map.extension_records;
     if let Some(external) = map.external_attribute_list {
         let available = logical_byte_length(&external.runs, bytes_per_cluster).unwrap_or(0);
-        let capped = (external.byte_length.min(available).min(1_u64 << 20)) as usize;
-        let mut list = vec![0u8; capped];
-        let read = if capped == 0 {
+        // Initialized size is rarely a whole sector. `\\.\X:` rejects that
+        // read, which used to fail the scan instead of keeping record 0.
+        let want = external.byte_length.min(1_u64 << 20);
+        let read_len =
+            sector_aligned_read_len(want, bytes_per_sector as u64, available) as usize;
+        let mut list = vec![0u8; read_len];
+        let read = if read_len == 0 {
             Ok(false)
         } else {
             read_logical(volume, &external.runs, 0, &mut list, bytes_per_cluster)
         };
         match read {
-            Ok(true) => pending = extension_records_from_attribute_list(&list),
+            Ok(true) => {
+                let prefix = (external.byte_length as usize).min(list.len());
+                pending = extension_records_from_attribute_list(&list[..prefix]);
+            }
             Ok(false) => {
                 eprintln!(
                     "[diskhound-native-scanner] mft: warning: $ATTRIBUTE_LIST for $MFT could not be read; using record 0's run list only"
                 );
             }
-            Err(err) => return Err(err.into()),
+            Err(err) => {
+                eprintln!(
+                    "[diskhound-native-scanner] mft: warning: $ATTRIBUTE_LIST for $MFT could not be read ({}); using record 0's run list only",
+                    err
+                );
+            }
         }
     }
 
@@ -526,7 +538,12 @@ fn resolve_mft_runs(
         pending,
         record_size,
         |runs_now, logical, buf| {
-            let found = read_logical(volume, runs_now, logical, buf, bytes_per_cluster)?;
+            // A bad sector in one extension must not drop the runs already
+            // in hand. The coverage warning reports what stayed unread.
+            let found = match read_logical(volume, runs_now, logical, buf, bytes_per_cluster) {
+                Ok(found) => found,
+                Err(_) => return Ok(false),
+            };
             let readable = found
                 && buf.len() >= 4
                 && &buf[0..4] == FILE_RECORD_MAGIC

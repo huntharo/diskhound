@@ -192,6 +192,23 @@ pub fn logical_byte_length(runs: &[DataRun], bytes_per_cluster: u64) -> Option<u
     Some(total)
 }
 
+/// Bytes to read from `\\.\X:` for an initialized length of `logical_len`.
+///
+/// A volume handle rejects a transfer that is not a whole number of
+/// sectors. The result is the next sector boundary, and it never passes
+/// the sector-aligned prefix of `available`. Bytes past `logical_len`
+/// are padding and must not be parsed.
+pub fn sector_aligned_read_len(logical_len: u64, bytes_per_sector: u64, available: u64) -> u64 {
+    let sector = bytes_per_sector.max(1);
+    let room = available / sector * sector;
+    let want = logical_len.min(room);
+    if want == 0 {
+        return 0;
+    }
+    let aligned = want.saturating_add(sector - 1) / sector * sector;
+    aligned.min(room)
+}
+
 /// Pull unnamed `$DATA` fragments out of each extension record.
 /// A record the current map cannot reach stays pending until a fragment
 /// just loaded covers it. Records that never become readable, or that
@@ -636,6 +653,28 @@ mod tests {
                     cluster_count: 4
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn attribute_list_read_rounds_up_to_a_whole_sector_and_stops_at_the_runs() {
+        assert_eq!(sector_aligned_read_len(100, 512, 4096), 512);
+        assert_eq!(sector_aligned_read_len(512, 512, 4096), 512);
+        assert_eq!(sector_aligned_read_len(513, 512, 4096), 1024);
+        assert_eq!(sector_aligned_read_len(5_000, 512, 4096), 4096);
+        assert_eq!(sector_aligned_read_len(0, 512, 4096), 0);
+        // Shorter than one sector: refuse an unaligned transfer.
+        assert_eq!(sector_aligned_read_len(100, 512, 200), 0);
+    }
+
+    #[test]
+    fn stale_bytes_past_the_initialized_list_are_not_entries() {
+        let entry = list_entry(ATTR_DATA, 16, 0);
+        let mut padded = entry.clone();
+        padded.extend(list_entry(ATTR_DATA, 99, 0));
+        assert_eq!(
+            extension_records_from_attribute_list(&padded[..entry.len()]),
+            vec![16]
         );
     }
 
