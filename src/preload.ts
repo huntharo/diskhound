@@ -122,6 +122,10 @@ const api: DiskhoundNativeApi = {
     ipcRenderer.invoke("diskhound:forget-dev-artifact-paths", rootPath, paths),
   checkGitRepo: (checkoutPath) =>
     ipcRenderer.invoke("diskhound:check-git-repo", checkoutPath),
+  checkGitWorktree: (worktreePath) =>
+    ipcRenderer.invoke("diskhound:check-git-worktree", worktreePath),
+  removeGitWorktree: (worktreePath) =>
+    ipcRenderer.invoke("diskhound:remove-git-worktree", worktreePath),
 
   // Duplicate Detection
   startDuplicateScan: (rootPath, options) => ipcRenderer.invoke("diskhound:start-duplicate-scan", rootPath, options),

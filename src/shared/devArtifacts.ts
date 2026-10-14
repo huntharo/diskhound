@@ -122,6 +122,12 @@ function joinSegments(original: string, count: number): string {
  * `isDirectory` says `filePath` itself is a folder. Only `.git` needs it:
  * a repo's `.git` is a folder, while a linked worktree's or a submodule's
  * is a one-line file pointing at the real one.
+ *
+ * Paths alone find only `.worktrees/<name>` worktrees. The native scanner
+ * also reads each `.git` file outside every tree and lists the linked
+ * worktree it belongs to, wherever it is (`DevArtifactAcc` in
+ * native/diskhound-native-scanner/src/dev_artifacts.rs). This fallback
+ * cannot, so worktrees elsewhere show up only as their nested trees.
  */
 export function classifyArtifactPath(
   filePath: string,
