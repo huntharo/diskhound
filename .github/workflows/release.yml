@@ -100,6 +100,25 @@ jobs:
             cp native/diskhound-native-scanner/target/${{ matrix.rust-target }}/release/diskhound-native-scanner native/diskhound-native-scanner/target/release/diskhound-native-scanner
           fi
 
+      - name: Build and stage MCP stdio bridge
+        shell: bash
+        run: |
+          crate=native/diskhound-mcp
+          mkdir -p "$crate/target/release"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            cargo build --locked --release --target aarch64-apple-darwin --manifest-path "$crate/Cargo.toml"
+            cargo build --locked --release --target x86_64-apple-darwin --manifest-path "$crate/Cargo.toml"
+            lipo -create -output "$crate/target/release/diskhound-mcp" \
+              "$crate/target/aarch64-apple-darwin/release/diskhound-mcp" \
+              "$crate/target/x86_64-apple-darwin/release/diskhound-mcp"
+            lipo -info "$crate/target/release/diskhound-mcp"
+          else
+            cargo build --locked --release --target ${{ matrix.rust-target }} --manifest-path "$crate/Cargo.toml"
+            suffix=""
+            if [ "${{ runner.os }}" = "Windows" ]; then suffix=".exe"; fi
+            cp "$crate/target/${{ matrix.rust-target }}/release/diskhound-mcp$suffix" "$crate/target/release/"
+          fi
+
       - name: Verify native binary exists
         shell: bash
         run: |

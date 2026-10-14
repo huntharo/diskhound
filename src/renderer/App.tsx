@@ -20,7 +20,8 @@ import { formatScanRoot } from "../shared/pathUtils";
 import { formatDriveSpace, driveSpaceLabel, driveUsedPercent } from "./lib/driveSpace";
 import { formatBytes } from "./lib/format";
 import { useSizeUnitBase } from "./lib/sizeUnitSettings";
-import { clearDeletedPaths } from "./lib/deletedPaths";
+import { focusAgentSettings, type AgentSettingsTarget } from "./lib/agentAccessStore";
+import { clearDeletedPaths, markDeletedPaths } from "./lib/deletedPaths";
 import { appendDuplicateProgress } from "./lib/duplicateStream";
 import { useLiveDiskSpace } from "./lib/hooks";
 import { setColorBlindPalette } from "./lib/treemap";
@@ -29,6 +30,7 @@ import { dispatchSettingsUpdated, SETTINGS_UPDATED_EVENT } from "./lib/uiEvents"
 import { nativeApi } from "./nativeApi";
 
 import { ChangesView } from "./components/ChangesView";
+import { AgentButton } from "./components/AgentButton";
 import { DiskPicker } from "./components/DiskPicker";
 import { DevBranchChip } from "./components/DevBranchChip";
 import { DevView } from "./components/DevView";
@@ -173,10 +175,18 @@ export function App() {
 
   const [scanOptions, setScanOptions] = useState<ScanOptions>(defaultScanOptions());
   const [view, setView] = useState<AppView>("overview");
+  /** Folder an agent asked the Folders tab to open (MCP navigation). */
+  const [folderFocus, setFolderFocus] = useState<{ path: string; nonce: number } | null>(null);
+  const folderFocusNonce = useRef(0);
   const [devTabMounted, setDevTabMounted] = useState(false);
   useEffect(() => {
     if (view === "dev") setDevTabMounted(true);
   }, [view]);
+  // Tell main what this window shows, so an agent's diskhound_status
+  // knows which tab and drive the user is looking at.
+  useEffect(() => {
+    nativeApi.reportViewState({ view, rootPath: snapshot.rootPath ?? (currentRoot || null) });
+  }, [view, snapshot.rootPath, currentRoot]);
   const { drives, refresh: refreshDiskSpace } = useLiveDiskSpace();
   const [filterExt, setFilterExt] = useState<string | undefined>();
   // null = still loading the initial snapshot; prevents a flash of the picker
@@ -556,12 +566,35 @@ export function App() {
     // the widget's "C:" drive row drops the user into Overview pre-pointed
     // at C:; then switch the tab. Skip the picker — user's intent was to
     // see this view immediately, not pick a drive.
-    const unsubNavigate = nativeApi.onNavigateView(({ view, scanRoot }) => {
+    const unsubNavigate = nativeApi.onNavigateView(({ view, scanRoot, folderPath, section }) => {
       if (scanRoot) {
         setCurrentRoot(scanRoot);
+        // A root this window hasn't shown yet (an agent asking for an
+        // older scan): load its latest saved snapshot, never clobbering
+        // a live one that's already here.
+        const key = rootKey(scanRoot);
+        void nativeApi.getLatestSnapshotForRoot(scanRoot).then((latest) => {
+          if (!latest) return;
+          setSnapshotsByRoot((prev) => (prev.has(key) ? prev : new Map(prev).set(key, latest)));
+        });
+      }
+      if (folderPath) {
+        folderFocusNonce.current += 1;
+        setFolderFocus({ path: folderPath, nonce: folderFocusNonce.current });
       }
       setShowPicker(false);
       setView(view);
+      // App menu "Connect an AI Agent…" and the tray's "AI Agents…".
+      if (section === "ai-agents") focusAgentSettings("section");
+    });
+
+    // Paths an agent moved to the Trash or deleted (the user confirmed
+    // each batch in a native dialog): strike them through like in-app ones.
+    const unsubPathsTrashed = nativeApi.onPathsTrashed((paths) => {
+      markDeletedPaths(paths, "trash");
+    });
+    const unsubPathsDeleted = nativeApi.onPathsDeleted((paths) => {
+      markDeletedPaths(paths, "delete");
     });
 
     // ── Duplicate scan IPC wiring ──
@@ -658,6 +691,8 @@ export function App() {
       unsub();
       unsubUpdate();
       unsubNavigate();
+      unsubPathsTrashed();
+      unsubPathsDeleted();
       unsubDupProgress();
       unsubDupResult();
       unsubEasyMoveProgress();
@@ -786,6 +821,16 @@ export function App() {
    * drive click, which wiped running state and triggered duplicate
    * scan-complete toasts when users switched around.
    */
+  /**
+   * Settings → AI Agents, from the header agent button, the drive picker
+   * and the menus. The picker stays wanted: leaving Settings without a
+   * scan goes back to it.
+   */
+  const openAgentSettings = (target: AgentSettingsTarget) => {
+    setView("settings");
+    focusAgentSettings(target);
+  };
+
   const handleScanDrive = async (drivePath: string) => {
     // Normalize "C:" → "C:\\" so Path.resolve doesn't use CWD
     const normalized = /^[A-Za-z]:$/.test(drivePath) ? drivePath + "\\" : drivePath;
@@ -1162,6 +1207,9 @@ export function App() {
            *  weight without stealing horizontal real estate from
            *  the pills next to them. */}
           <div className="header-utilities">
+            {/* AI agents (MCP): the way in, and which agent is driving. */}
+            <AgentButton onOpenSettings={openAgentSettings} />
+
             {/* Search toggle */}
             <button
               className={`header-icon-btn ${searchOpen ? "active" : ""}`}
@@ -1291,6 +1339,7 @@ export function App() {
             <DiskPicker
               onScanDrive={handleScanDrive}
               onScanFolder={handleScanFolder}
+              onConnectAgent={() => openAgentSettings("connect")}
             />
           ) : (
             <>
@@ -1304,6 +1353,8 @@ export function App() {
                       if (snapshot.rootPath) void doScan(snapshot.rootPath);
                     }}
                     otherScannedRoots={otherScannedRoots}
+                    focusRequest={folderFocus}
+                    onFocusApplied={(nonce) => setFolderFocus((prev) => (prev?.nonce === nonce ? null : prev))}
                   />
                 </ErrorBoundary>
               )}
