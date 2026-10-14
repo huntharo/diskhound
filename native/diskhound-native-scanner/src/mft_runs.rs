@@ -209,6 +209,34 @@ pub fn sector_aligned_read_len(logical_len: u64, bytes_per_sector: u64, availabl
     aligned.min(room)
 }
 
+/// A non-resident `$ATTRIBUTE_LIST` is read whole, or not at all.
+/// A prefix would drop every extension record past the cut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttributeListRead {
+    /// Sector-aligned byte count to read. Parse only the initialized prefix.
+    Ready(u64),
+    /// The list is on disk and larger than `max_bytes`.
+    TooBig(u64),
+    /// No sector-aligned bytes are available.
+    Missing,
+}
+
+pub fn attribute_list_read(
+    byte_length: u64,
+    bytes_per_sector: u64,
+    available: u64,
+    max_bytes: u64,
+) -> AttributeListRead {
+    let read_len = sector_aligned_read_len(byte_length, bytes_per_sector, available);
+    if read_len == 0 {
+        AttributeListRead::Missing
+    } else if read_len > max_bytes {
+        AttributeListRead::TooBig(read_len)
+    } else {
+        AttributeListRead::Ready(read_len)
+    }
+}
+
 /// Pull unnamed `$DATA` fragments out of each extension record.
 /// A record the current map cannot reach stays pending until a fragment
 /// just loaded covers it. Records that never become readable, or that
@@ -653,6 +681,29 @@ mod tests {
                     cluster_count: 4
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn a_long_attribute_list_is_read_whole_or_refused() {
+        let sector = 512u64;
+        let available = 3 * 1024 * 1024;
+        let two_mb = 2 * 1024 * 1024;
+        assert_eq!(
+            attribute_list_read(two_mb, sector, available, 32 * 1024 * 1024),
+            AttributeListRead::Ready(two_mb)
+        );
+        assert_eq!(
+            attribute_list_read(two_mb, sector, available, 1024 * 1024),
+            AttributeListRead::TooBig(two_mb)
+        );
+        assert_eq!(
+            attribute_list_read(100, sector, 4096, 1024 * 1024),
+            AttributeListRead::Ready(512)
+        );
+        assert_eq!(
+            attribute_list_read(0, sector, available, 1024 * 1024),
+            AttributeListRead::Missing
         );
     }
 
