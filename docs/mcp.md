@@ -313,7 +313,8 @@ The source lives in [`skills/`](../skills).
   secrets. A registration's redirect URIs have to be `http://127.0.0.1`,
   `http://localhost`, or `http://[::1]` with an explicit port. An unapproved
   registration stays in memory and is gone after a restart; DiskHound writes
-  the client record when you approve it.
+  the client record when you approve it. Forgetting revoked sessions frees
+  those client slots, so a new agent can register without a restart.
 - Approval happens only in DiskHound's own window. Browser pages and URL
   parameters can't approve a request.
 - Tokens are stored as SHA-256 hashes in `mcp-policy.json` in DiskHound's

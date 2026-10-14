@@ -105,9 +105,7 @@ class Clients implements OAuthRegisteredClientsStore {
     try {
       const saved: unknown = JSON.parse(readFileSync(file, "utf8"));
       if (!Array.isArray(saved) || saved.length > CLIENT_LIMIT) throw new Error("Invalid OAuth client store");
-      const approved = new Set(
-        this.policy.sessions().map((session) => session.oauth?.clientId).filter((id): id is string => Boolean(id)),
-      );
+      const approved = this.liveClientIds();
       let dropped = false;
       for (const value of saved) {
         const client = OAuthClientInformationFullSchema.parse(value);
@@ -156,15 +154,52 @@ class Clients implements OAuthRegisteredClientsStore {
     delete client.client_secret;
     delete client.client_secret_expires_at;
     if (this.clients.size >= CLIENT_LIMIT) {
-      const evict = [...this.clients.keys()].find((id) => !this.durable.has(id));
-      if (evict === undefined) throw new InvalidRequestError("OAuth client limit reached");
-      this.clients.delete(evict);
+      // Pending registrations go first. Approved records stay until their
+      // sessions are gone: Settings can forget revoked sessions without
+      // restarting the listener, and `durable` would otherwise hold those
+      // slots until the next launch.
+      let evict = this.evictableClientId();
+      if (evict === undefined) {
+        this.releaseForgotten();
+        evict = this.evictableClientId();
+      }
+      if (this.clients.size >= CLIENT_LIMIT) {
+        if (evict === undefined) throw new InvalidRequestError("OAuth client limit reached");
+        this.clients.delete(evict);
+      }
     }
     this.clients.set(client.client_id, client);
     // Unapproved registrations stay in memory. A restart drops them,
     // and the agent registers again. The file is written in retain().
     return client;
   };
+
+  /** Client ids that still have a session, including a revoked one. */
+  private liveClientIds(): Set<string> {
+    return new Set(
+      this.policy.sessions().map((session) => session.oauth?.clientId).filter((id): id is string => Boolean(id)),
+    );
+  }
+
+  /**
+   * Drop client records whose sessions were forgotten. Revoked sessions
+   * still count; Forget revoked is what removes them.
+   */
+  private releaseForgotten() {
+    const live = this.liveClientIds();
+    let released = false;
+    for (const id of this.durable) {
+      if (live.has(id)) continue;
+      this.durable.delete(id);
+      this.clients.delete(id);
+      released = true;
+    }
+    if (released) this.write(this.serialize());
+  }
+
+  private evictableClientId(): string | undefined {
+    return [...this.clients.keys()].find((id) => !this.durable.has(id));
+  }
 
   private serialize(): string {
     const kept = [...this.clients.values()].filter((client) => this.durable.has(client.client_id));

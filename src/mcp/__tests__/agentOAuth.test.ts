@@ -331,4 +331,34 @@ describe("AgentOAuth", () => {
       reloaded.close();
     }
   });
+
+  it("frees forgotten client slots without a restart and keeps a session that is still there", async () => {
+    // Matches CLIENT_LIMIT in agentOAuth.ts. Revoked sessions still hold a
+    // slot; Forget revoked is what gives it back.
+    const file = Path.join(tempDir, "clients.json");
+    const approved: OAuthClientInformationFull[] = [];
+    for (let index = 0; index < 256; index += 1) {
+      const client = await registerClient(`Agent ${index}`);
+      const id = await begin(client, pkce().challenge);
+      await flush();
+      const code = new URL(poll(id).location!).searchParams.get("code")!;
+      await oauth.exchangeAuthorizationCode(client, code, undefined, REDIRECT_URI, RESOURCE);
+      approved.push(client);
+    }
+
+    const kept = approved[255]!;
+    for (const session of policy.sessions()) {
+      if (session.oauth?.clientId === kept.client_id) continue;
+      policy.revokeSession(session.id);
+    }
+    await expect(registerClient("Still full")).rejects.toThrow(/OAuth client limit reached/);
+
+    expect(policy.forgetRevoked()).toBe(255);
+    const fresh = await registerClient("After forget");
+    expect(await oauth.clientsStore.getClient(fresh.client_id)).toMatchObject({ client_name: "After forget" });
+    expect((await oauth.clientsStore.getClient(kept.client_id))?.client_name).toBe("Agent 255");
+    expect(await oauth.clientsStore.getClient(approved[0]!.client_id)).toBeUndefined();
+    const saved = JSON.parse(FS.readFileSync(file, "utf8")) as { client_id: string }[];
+    expect(saved.map((entry) => entry.client_id)).toEqual([kept.client_id]);
+  }, 30_000);
 });
