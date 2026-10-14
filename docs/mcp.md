@@ -224,18 +224,73 @@ waiting first (Codex waits 60 seconds by default), DiskHound finishes the
 walk anyway, and the same call made again within 5 minutes gets that result
 without walking again.
 
-**You confirm every removal.** Both removal tools show a DiskHound
-confirmation listing every item, its size, and the agent's reason; the
-default button is Cancel. Nothing moves unless you click **Move to Trash**,
-and nothing is deleted unless you click **Delete Permanently**. Protected
-folders are always skipped, and so are drive roots, your home folder, its
-standard folders (Documents, Downloads, Desktop, Library or AppData, and so
-on), DiskHound itself, and any folder that contains one of these. The
-confirmation lists what it left out and why. DiskHound checks the real
-location on disk, so a different spelling or a symlink doesn't get around
-this.
+**You approve every removal in DiskHound.** The removal tools don't remove
+anything. They add items to DiskHound's review list and return at once, so
+the agent can tell you what is waiting and carry on. DiskHound doesn't pop
+up a dialog or take focus. The header shows an amber count, and the tray
+menu shows **Review agent requests (N)…**. Open the list when you're ready.
+A request waits there even if the agent disconnects or DiskHound restarts.
 
-![Trash confirmation](screenshots/agent-trash-confirm.png)
+![Review list](screenshots/agent-review-list.png)
+
+The list groups items by agent and by the reason the agent gave. Each item
+shows its size from your last scan, and you can:
+
+- **Untick it** to skip it. The agent is told you skipped it.
+- **Switch a permanent delete to the Trash**, where the Trash can take the
+  item. Trash requests can't be switched to a delete.
+- **Measure what the ticked items free together** (macOS and Linux). This
+  counts clones and hardlinks shared with files outside the list once.
+
+Nothing moves until you click the button. Its label says what it will do,
+for example **Move 3 to Trash · Delete 1**. The list then shows each item's
+result in place: moved, deleted, skipped, already gone, not allowed, or the
+error. The agent reads the same results from `diskhound_status`. Items
+DiskHound has decided stay readable there for a week.
+
+DiskHound tells you when the Trash can't take an item, and doesn't show it
+as moving to the Trash:
+
+- **Volumes without a Trash**, such as network shares and read-only volumes.
+  On Linux, DiskHound follows the rules the desktop Trash uses (`gio trash`).
+  An item on another device needs a `.Trash/<uid>` or `.Trash-<uid>` folder
+  at the top of its volume, or a volume where one can be made. On Windows,
+  removable and network drives have no Recycle Bin, and an item bigger than
+  the drive's Recycle Bin can hold would be deleted instead. When DiskHound
+  can't tell, it says so.
+- **A folder with another volume mounted inside it.** Neither the Trash nor
+  a permanent delete takes the folder as a whole, and DiskHound never
+  removes a volume. Such an item starts unticked and names the volume
+  inside. If you tick it, DiskHound removes everything around the volume
+  and leaves the volume alone.
+
+The agent's request lists the same facts, so it can tell you before you open
+the list.
+
+When you approve, DiskHound checks everything again. Items fail that check
+and are not removed when:
+
+- the agent's session was revoked;
+- its role no longer allows the action;
+- the path now resolves somewhere else;
+- the path is now in a protected folder.
+
+If an item's volume changed since you looked, it stays on the list with the
+new facts for you to review again.
+
+Protected folders are always refused. So are drive roots, your home folder,
+its standard folders (Documents, Downloads, Desktop, Library or AppData, and
+so on), DiskHound itself, and any folder that contains one of these. The
+agent hears what was left out and why. DiskHound checks the real location
+on disk, so a different spelling or a symlink doesn't get around this.
+
+The list is kept in `agent-removals.json` in DiskHound's data folder (mode
+0600). DiskHound writes it only when an agent asks or you decide, never on
+a timer. It holds at most 500 waiting items; past that, agents are asked to
+let you catch up.
+
+Settings → AI Agents → **Confirm agents' removals** is set to **In
+DiskHound**. Confirming in the agent's chat is planned.
 
 ## Blocked requests and the security log
 
@@ -328,10 +383,10 @@ The source lives in [`skills/`](../skills).
 - Every tool call checks the session against the policy file, so revoking a
   session or changing its role applies immediately.
 - Moving items to the Trash needs the Cleanup Operator or Admin role, and
-  deleting permanently needs Cleanup Admin. Either needs your confirmation in
-  a native dialog every time. If you revoke the session, change its role, or
-  turn AI Agents off while a request waits for its dialog, DiskHound drops
-  the request.
+  deleting permanently needs Cleanup Admin. Either only adds items to
+  DiskHound's review list; nothing is removed until you approve the list in
+  DiskHound. If you revoke the session or lower its role before you
+  approve, DiskHound refuses its waiting items when you approve them.
 - A tool the session's role doesn't grant is left out of its tool list and
   refused before it runs, and the attempt is logged.
 

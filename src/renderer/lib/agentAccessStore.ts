@@ -39,6 +39,45 @@ function subscribe(): void {
       security: [event, ...current.security.filter((e) => e.id !== event.id)].slice(0, 200),
     });
   });
+  // The review list: an agent asked, the user decided, an item ran.
+  nativeApi.onAgentRemovalsChanged((removals) => {
+    if (!current) return;
+    publish({ ...current, removals });
+  });
+  nativeApi.onAgentReviewOpen(() => openRemovalReview());
+}
+
+// ── The review sheet ─────────────────────────────────────
+
+let reviewOpen = false;
+const reviewListeners = new Set<(open: boolean) => void>();
+
+function setReviewOpen(open: boolean): void {
+  reviewOpen = open;
+  for (const listener of [...reviewListeners]) listener(open);
+}
+
+/** Open the review list of agents' removal requests (header, Settings, tray). */
+export function openRemovalReview(): void {
+  setReviewOpen(true);
+}
+
+export function closeRemovalReview(): void {
+  setReviewOpen(false);
+}
+
+/** Whether the review sheet is open. App subscribes before anything opens it. */
+export function useRemovalReviewOpen(): boolean {
+  const [open, setOpen] = useState(reviewOpen);
+  useEffect(() => {
+    subscribe();
+    reviewListeners.add(setOpen);
+    setOpen(reviewOpen);
+    return () => {
+      reviewListeners.delete(setOpen);
+    };
+  }, []);
+  return open;
 }
 
 /** Load once; later callers share the same request. */

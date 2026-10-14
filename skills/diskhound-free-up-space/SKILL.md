@@ -21,8 +21,11 @@ and load the relevant tools as needed. Start with `diskhound_status`.
 ## Ground rules
 
 - **Never delete on your own.** The only delete path is
-  `diskhound_move_to_trash`. DiskHound shows the user a confirmation dialog
-  for every call, and items go to the Trash / Recycle Bin, not away forever.
+  `diskhound_move_to_trash`. It adds the items to DiskHound's review list
+  and returns at once; nothing moves until the user approves the list in
+  DiskHound, and items go to the Trash / Recycle Bin, not away forever.
+  Tell the user the items are waiting there, and never say they were
+  removed until `diskhound_status` says so.
 - **Prefer the owning tool.** Package caches, containers, simulators, and
   snapshots have their own cleanup commands (`pnpm store prune`,
   `docker system prune`, `xcrun simctl delete unavailable`, `tmutil`, …).
@@ -159,13 +162,21 @@ applies, say so plainly.
 2. For items the user approves:
    - Run the owning tool's command, if they asked you to.
    - Otherwise call `diskhound_move_to_trash` with a one-line `reason`,
-     batching related paths into one call.
-3. Remind the user to empty the Trash. On macOS, mention that Time Machine
+     batching related paths into one call. Pass on what it says about each
+     item: one the Trash can't take (no Trash on that volume, too big for
+     the Recycle Bin) or a folder with another volume mounted inside it.
+   - Tell the user the items are waiting on DiskHound's review list (the
+     amber count in DiskHound's header), and that they can untick any of
+     them there.
+3. When the user says they have reviewed it, call `diskhound_status`. It
+   lists what was moved, what they skipped, and anything DiskHound didn't
+   do and why. Report that; don't assume every item went.
+4. Remind the user to empty the Trash. On macOS, mention that Time Machine
    snapshots may hold the space for up to a day.
-4. Call `diskhound_status` again and report the change in free space. If it
-   is much smaller than expected, go back to step 7. Snapshots and clones are
-   the usual reasons.
-5. Offer a follow-up `diskhound_start_scan`. The Changes tab
+5. Report the change in free space from `diskhound_status`. If it is much
+   smaller than expected, go back to step 7. Snapshots and clones are the
+   usual reasons.
+6. Offer a follow-up `diskhound_start_scan`. The Changes tab
    (`diskhound_changes`) then shows exactly what went away.
 
 ## When the user asks "what filled my disk?"

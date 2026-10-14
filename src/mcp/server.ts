@@ -9,6 +9,7 @@ import { duplicateGroupReclaimable, entryReclaimable } from "../shared/duplicate
 import { devArtifactSharing, summarizeDevSharing } from "../shared/storageSharing";
 import type { AppView, ScanHistoryEntry, ScanSnapshot } from "../shared/contracts";
 import { MCP_SERVER_NAME, type McpAgentCapability } from "../shared/agentAccess";
+import { mountLabel, type RemovalAction, type RemovalItem, type RemovalRequest } from "../shared/agentRemovals";
 import { normPath } from "../shared/pathUtils";
 import type { McpAccessError, McpAuthorization, McpAuthorizer } from "./accessPolicy";
 import type { AgentActivitySink, DiskhoundAgentBackend } from "./backend";
@@ -19,8 +20,9 @@ import { readSkillDirectory, registerSkills, type SkillCatalog } from "./skills"
 /**
  * DiskHound's MCP surface: tools that read the same scan data the
  * window shows, a few that start work or steer the window, two that
- * ask the user to move items to the Trash or delete them, the SEP-2640
- * skills, and prompt fallbacks for hosts that don't load MCP skills yet.
+ * add items to DiskHound's review list for the user to approve or skip,
+ * the SEP-2640 skills, and prompt fallbacks for hosts that don't load
+ * MCP skills yet.
  *
  * One server is built per HTTP request (stateless Streamable HTTP, as
  * in PwrSnap), bound to that request's bearer token and to what that
@@ -34,7 +36,7 @@ import { readSkillDirectory, registerSkills, type SkillCatalog } from "./skills"
 export const FREE_UP_SPACE_SKILL = "skill://diskhound-free-up-space/SKILL.md";
 export const INVESTIGATE_GROWTH_SKILL = "skill://diskhound-investigate-growth/SKILL.md";
 
-/** Items per trash request. The dialog lists every one, so keep it readable. */
+/** Items per removal request. The review sheet lists every one under its reason, so keep it readable. */
 const MAX_TRASH_PATHS = 20;
 
 /**
@@ -169,10 +171,11 @@ export function serverInstructions(
 ): string {
   const os = platform === "darwin" ? "macOS" : platform === "win32" ? "Windows" : "Linux";
   const can = (capability: McpAgentCapability) => granted.includes(capability);
+  const review = "nothing is removed until the user approves the list in DiskHound, so tell the user the items are waiting there. diskhound_status shows what the user decided.";
   const removal = can("files.delete")
-    ? "Never remove anything on your own. diskhound_move_to_trash and diskhound_delete_permanently ask the user to confirm in DiskHound; prefer the Trash, and delete permanently only when the user asks for it."
+    ? `Never remove anything on your own. diskhound_move_to_trash and diskhound_delete_permanently add items to DiskHound's review list and return at once; ${review} Prefer the Trash, and ask for a permanent delete only when the user wants one.`
     : can("files.trash")
-      ? "Never remove anything on your own. diskhound_move_to_trash asks the user to confirm in DiskHound; this session can't delete permanently."
+      ? `Never remove anything on your own. diskhound_move_to_trash adds items to DiskHound's review list and returns at once; ${review} This session can't delete permanently.`
       : "This session can't move or delete files. Recommend what to remove and let the user do it, or ask them to give this session a bigger role in DiskHound → Settings → AI Agents.";
   return [
     `DiskHound is a disk-space analyzer running on the user's ${os} computer. Use DiskHound for disk usage, full drives, large files, duplicates, caches, cleanup, or disk growth. If tools are deferred, search your host's tool catalog for DiskHound and the task before calling them.`,
@@ -201,6 +204,69 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
     if (known.length === 0) return "size unknown";
     const total = known.reduce((sum, result) => sum + (result.sizeBytes ?? 0), 0);
     return `${known.length < results.length ? "at least " : ""}${bytesText(total)}`;
+  };
+  const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`;
+  const bin = backend.platform === "win32" ? "Recycle Bin" : "Trash";
+
+  /** What became of this session's removal requests, for diskhound_status. */
+  const removalReport = (requests: readonly RemovalRequest[], nowMs: number) => {
+    if (requests.length === 0) return null;
+    const pending = (item: RemovalItem) => item.status === "waiting" || item.status === "running";
+    const waiting = requests.flatMap((request) => request.items.filter(pending));
+    const waitingSince = Math.min(...requests.filter((request) => request.items.some(pending)).map((request) => request.requestedAt));
+    // When the newest of a request's items was decided (a request holds at most 20).
+    const lastDecided = new Map(requests.map((request) => [request, Math.max(0, ...request.items.map((item) => item.outcome?.at ?? 0))]));
+    const decidedAt = (request: RemovalRequest) => lastDecided.get(request) ?? 0;
+    const recent = requests
+      .filter((request) => request.items.some((item) => !pending(item)))
+      .sort((a, b) => decidedAt(b) - decidedAt(a))
+      .slice(0, 10);
+    const pathsOf = (items: readonly RemovalItem[]) => items.map((item) => item.path).join(", ");
+    const withWhy = (items: readonly RemovalItem[]) => items.map((item) => `${item.path} (${item.outcome?.message ?? ""})`).join("; ");
+    const decidedText = (request: RemovalRequest) => {
+      const by = (status: RemovalItem["status"]) => request.items.filter((item) => item.status === status);
+      const moved = by("moved").filter((item) => item.asked === "trash");
+      const switched = by("moved").filter((item) => item.asked === "delete");
+      const deleted = by("deleted");
+      return [
+        moved.length ? `Moved ${plural(moved.length, "item")} to the ${bin} (${removedText(moved)}). They free that space once the ${bin} is emptied.` : null,
+        switched.length ? `The user moved ${plural(switched.length, "item")} to the ${bin} instead of deleting ${switched.length === 1 ? "it" : "them"} (${removedText(switched)}): ${pathsOf(switched)}.` : null,
+        deleted.length ? `Deleted ${plural(deleted.length, "item")} permanently (${removedText(deleted)}).` : null,
+        by("partial").length ? `Partly removed: ${withWhy(by("partial"))}.` : null,
+        by("failed").length ? `Not ${request.asked === "trash" ? "moved" : "deleted"}: ${withWhy(by("failed"))}.` : null,
+        by("skipped").length ? `Skipped by the user: ${pathsOf(by("skipped"))}.` : null,
+        by("gone").length ? `Already gone: ${pathsOf(by("gone"))}.` : null,
+        by("refused").length ? `Not done: ${withWhy(by("refused"))}.` : null,
+      ].filter(Boolean).join(" ");
+    };
+    const lines = [
+      waiting.length
+        ? `Removal requests: ${plural(waiting.length, "item")} (${removedText(waiting)}) waiting for the user to review in DiskHound (you asked ${ageText(waitingSince, nowMs)}).`
+        : null,
+      ...recent.slice(0, 3).map((request) =>
+        `Removal request decided ${ageText(decidedAt(request), nowMs)} (you asked ${ageText(request.requestedAt, nowMs)}): ${decidedText(request)}`),
+    ].filter((line): line is string => line !== null);
+    const value = {
+      waiting: waiting.length
+        ? { items: waiting.length, sizeBytes: waiting.reduce((sum, item) => sum + (item.sizeBytes ?? 0), 0), size: removedText(waiting), since: new Date(waitingSince).toISOString() }
+        : null,
+      recent: recent.map((request) => ({
+        requestId: request.id,
+        action: request.asked,
+        reason: request.reason,
+        requestedAt: new Date(request.requestedAt).toISOString(),
+        decidedAt: request.decidedAt === null ? null : new Date(request.decidedAt).toISOString(),
+        items: request.items.map((item) => ({
+          path: item.path,
+          status: item.status === "running" ? "waiting" : item.status,
+          done: item.outcome?.action ?? null,
+          message: item.outcome?.message ?? null,
+          sizeBytes: item.sizeBytes,
+          ...(item.outcome?.left?.length ? { leftOnDisk: item.outcome.left } : {}),
+        })),
+      })),
+    };
+    return { value, lines };
   };
   const granted = options.granted;
   const allows = (capability: McpAgentCapability) => !granted || granted.includes(capability);
@@ -354,6 +420,7 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
       ]);
       const roots = backend.scannedRoots();
       const nowMs = now();
+      const removals = removalReport(backend.removalRequests?.(auth.sessionId) ?? [], nowMs);
       const value = {
         app: { name: "DiskHound", version: backend.appVersion, platform: backend.platform },
         session: { name: auth.sessionName, role: auth.roleName, capabilities: [...auth.capabilities] },
@@ -386,6 +453,7 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
         currentRoot: current,
         window: backend.windowView?.() ?? null,
         skills: [FREE_UP_SPACE_SKILL, INVESTIGATE_GROWTH_SKILL],
+        ...(removals ? { removalRequests: removals.value } : {}),
         note: platformSpaceNote(backend.platform),
       };
       const driveLine = drives
@@ -402,6 +470,7 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
           ? `The DiskHound window shows the ${value.window.view} tab${value.window.rootPath ? ` for ${value.window.rootPath}` : ""}.`
           : null,
         `Session "${auth.sessionName}" (${auth.roleName}) may: ${auth.capabilities.join(", ")}.`,
+        ...(removals?.lines ?? []),
         skills.skills.length ? `Before recommending cleanup, read ${FREE_UP_SPACE_SKILL} with diskhound_read_skill.` : null,
       ].filter(Boolean).join("\n");
       return { value, summary, activity: "Checked drives and scan status" };
@@ -1263,120 +1332,113 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
     },
   );
 
-  // ── Trash and delete (user-confirmed) ───────────────────
+  // ── Trash and delete (the review list) ──────────────────
 
-  const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`;
-  const bin = backend.platform === "win32" ? "Recycle Bin" : "Trash";
+  /** One bullet per queued item, saying when the Trash can't take all of it. */
+  const queuedLine = (item: RemovalItem, canDelete: boolean): string => {
+    const size = item.sizeBytes === null ? "size unknown" : bytesText(item.sizeBytes);
+    const notes: string[] = [];
+    if (item.check.mountsInside.length > 0) {
+      const labels = item.check.mountsInside.map((mount) => `${mountLabel(item.path, mount.path)} (${mount.volume})`).join(", ");
+      notes.push(`${labels} inside it is another volume, which DiskHound leaves alone; the user decides about the rest`);
+    }
+    if (item.asked === "trash" && item.check.trash === "no") {
+      notes.push(`${(item.check.trashWhy ?? `It can't go to the ${bin}.`).replace(/\.$/, "")}, so the user can only skip it${canDelete ? " or delete it permanently" : ""}`);
+    } else if (item.asked === "trash" && item.check.trash === "unknown" && item.check.trashWhy) {
+      notes.push(item.check.trashWhy.replace(/\.$/, ""));
+    }
+    return `• ${item.path} (${size})${notes.length ? `: ${notes.join(". ")}.` : ""}`;
+  };
+
+  const queueRemoval = async (
+    asked: RemovalAction,
+    input: { paths: string[]; reason?: string },
+    auth: McpAuthorization,
+  ): Promise<ToolOutcome> => {
+    const paths = [...new Set(input.paths.map((p) => agentPath(p, backend.platform)))];
+    const outcome = await backend.queueRemoval({
+      sessionId: auth.sessionId,
+      sessionName: auth.sessionName,
+      roleName: auth.roleName,
+      asked,
+      paths,
+      reason: input.reason,
+    });
+    const { items } = outcome.request;
+    const canDelete = auth.capabilities.includes("files.delete");
+    const total = removedText(items);
+    const first = asked === "trash"
+      ? `Added ${plural(items.length, "item")} (${total}) to DiskHound's review list. Nothing has moved yet.`
+      : `Added ${plural(items.length, "item")} (${total}) to DiskHound's review list to delete permanently. Nothing has been deleted yet.`;
+    const summary = [
+      `${first} The user reviews the list in DiskHound when they're ready, so tell them it's waiting.`,
+      ...items.map((item) => queuedLine(item, canDelete)),
+      ...(outcome.refused.length
+        ? ["Not added:", ...outcome.refused.map((refusal) => `• ${refusal.path}: ${refusal.message.replace(/^Refused: /, "")}`)]
+        : []),
+      outcome.replaced > 0
+        ? `${plural(outcome.replaced, "item")} you had already asked for ${outcome.replaced === 1 ? "is" : "are"} listed once, in this request.`
+        : null,
+      "diskhound_status shows what the user decided.",
+    ].filter(Boolean).join("\n");
+    return {
+      value: {
+        queued: true,
+        waitingForUser: true,
+        requestId: outcome.request.id,
+        action: asked,
+        items: items.map((item) => ({
+          path: item.path,
+          sizeBytes: item.sizeBytes,
+          size: item.sizeBytes === null ? null : bytesText(item.sizeBytes),
+          trash: item.check.mountsInside.length > 0 && item.check.trash !== "no" ? "partly" : item.check.trash,
+          ...(item.check.trashWhy ? { trashNote: item.check.trashWhy } : {}),
+          ...(item.check.mountsInside.length ? { otherVolumesInside: item.check.mountsInside } : {}),
+        })),
+        notAdded: outcome.refused.map((refusal) => ({ path: refusal.path, reason: refusal.message })),
+        replaced: outcome.replaced,
+      },
+      summary,
+      activity: asked === "trash"
+        ? `Asked to move ${plural(items.length, "item")} to the ${bin}`
+        : `Asked to delete ${plural(items.length, "item")} permanently`,
+    };
+  };
+
+  const removalSchema = (verb: string) => ({
+    paths: z.array(z.string().min(1).max(4096)).min(1).max(MAX_TRASH_PATHS).describe(`Absolute paths to ${verb}.`),
+    reason: z.string().max(500).optional().describe("One sentence the user sees with the items, saying why."),
+  });
 
   tool(
     "diskhound_move_to_trash",
     {
-      title: "Move to Trash (asks the user)",
+      title: "Move to Trash (the user reviews)",
       description:
-        "Ask the user to move files or folders to the Trash / Recycle Bin. DiskHound shows a confirmation dialog listing every item and its size; nothing moves unless the user clicks Move to Trash, and the user can restore items until the Trash is emptied. Protected folders from DiskHound settings are always refused, and so are drive roots, the home folder and its standard folders (Documents, Downloads, Library, AppData…), and anything containing them. Explain to the user what you are proposing and why before calling this.",
-      inputSchema: {
-        paths: z.array(z.string().min(1).max(4096)).min(1).max(MAX_TRASH_PATHS).describe("Absolute paths to move to the Trash."),
-        reason: z.string().max(500).optional().describe("One sentence shown in the dialog explaining why."),
-      },
+        `Add files or folders to DiskHound's review list, to move to the ${bin}. Returns at once: nothing moves until the user approves the list in DiskHound, which they do when they're ready, so tell them the items are waiting there. ` +
+        `The user can skip any item. The result lists each item's size and whether the ${bin} can take it (network and read-only volumes${backend.platform === "win32" ? ", removable drives and items bigger than the Recycle Bin" : ""} can't, and another volume mounted inside a folder is always left alone). ` +
+        "Protected folders from DiskHound settings are always refused, and so are drive roots, the home folder and its standard folders (Documents, Downloads, Library, AppData…), and anything containing them. " +
+        "diskhound_status shows what the user decided. Explain to the user what you are proposing and why before calling this.",
+      inputSchema: removalSchema(`move to the ${bin}`),
       annotations: trashes,
     },
     () => ["files.trash"],
-    async (input, auth) => {
-      const paths = [...new Set(input.paths.map((p) => agentPath(p, backend.platform)))];
-      const outcome = await backend.confirmAndTrash({
-        sessionId: auth.sessionId,
-        sessionName: auth.sessionName,
-        roleName: auth.roleName,
-        paths,
-        reason: input.reason,
-        recheck: async () => {
-          await authorizer.authorize(["files.trash"]);
-        },
-        signal: options.signal,
-      });
-      if (!outcome.confirmed) {
-        return {
-          value: { confirmed: false, results: [] },
-          summary: "The user declined. Nothing was moved.",
-          activity: `Asked to move ${plural(paths.length, "item")} to the ${bin}; declined`,
-        };
-      }
-      const moved = outcome.results.filter((result) => result.ok);
-      const movedBytes = moved.reduce((sum, result) => sum + (result.sizeBytes ?? 0), 0);
-      return {
-        value: {
-          confirmed: true,
-          movedCount: moved.length,
-          movedBytes,
-          moved: removedText(moved),
-          results: outcome.results,
-          note: platformSpaceNote(backend.platform),
-        },
-        summary:
-          `Moved ${moved.length} of ${plural(outcome.results.length, "item")} (${removedText(moved)}) to the ${bin}.` +
-          (moved.length < outcome.results.length
-            ? `\nNot moved: ${outcome.results.filter((r) => !r.ok).map((r) => `${r.path} (${r.message})`).join("; ")}`
-            : "") +
-          `\n${platformSpaceNote(backend.platform)}`,
-        activity: `Moved ${plural(moved.length, "item")} (${removedText(moved)}) to the ${bin}`,
-      };
-    },
+    (input, auth) => queueRemoval("trash", input, auth),
   );
 
   tool(
     "diskhound_delete_permanently",
     {
-      title: "Delete permanently (asks the user)",
+      title: "Delete permanently (the user reviews)",
       description:
-        `Ask the user to delete files or folders permanently, without the ${bin}. DiskHound shows a confirmation dialog listing every item and its size; nothing is deleted unless the user clicks Delete Permanently, and deleted items can't be restored. Use diskhound_move_to_trash instead unless the user asked for a permanent delete (for example to free space right away, or for items too large for the ${bin}). The same folders are refused as for the ${bin}. Explain to the user what you are proposing and why before calling this.`,
-      inputSchema: {
-        paths: z.array(z.string().min(1).max(4096)).min(1).max(MAX_TRASH_PATHS).describe("Absolute paths to delete permanently."),
-        reason: z.string().max(500).optional().describe("One sentence shown in the dialog explaining why."),
-      },
+        `Add files or folders to DiskHound's review list, to delete permanently without the ${bin}. Returns at once: nothing is deleted until the user approves the list in DiskHound, so tell them the items are waiting there. ` +
+        `The user can skip any item or move it to the ${bin} instead; deleted items can't be restored. Use diskhound_move_to_trash instead unless the user asked for a permanent delete (for example to free space right away, or for items the ${bin} can't take). ` +
+        "Another volume mounted inside a folder is always left alone. The same folders are refused as for the Trash. diskhound_status shows what the user decided. Explain to the user what you are proposing and why before calling this.",
+      inputSchema: removalSchema("delete permanently"),
       annotations: deletes,
     },
     () => ["files.delete"],
-    async (input, auth) => {
-      const paths = [...new Set(input.paths.map((p) => agentPath(p, backend.platform)))];
-      const outcome = await backend.confirmAndDelete({
-        sessionId: auth.sessionId,
-        sessionName: auth.sessionName,
-        roleName: auth.roleName,
-        paths,
-        reason: input.reason,
-        recheck: async () => {
-          await authorizer.authorize(["files.delete"]);
-        },
-        signal: options.signal,
-      });
-      if (!outcome.confirmed) {
-        return {
-          value: { confirmed: false, results: [] },
-          summary: "The user declined. Nothing was deleted.",
-          activity: `Asked to delete ${plural(paths.length, "item")} permanently; declined`,
-        };
-      }
-      const deleted = outcome.results.filter((result) => result.ok);
-      const deletedBytes = deleted.reduce((sum, result) => sum + (result.sizeBytes ?? 0), 0);
-      return {
-        value: {
-          confirmed: true,
-          deletedCount: deleted.length,
-          deletedBytes,
-          deleted: removedText(deleted),
-          results: outcome.results,
-        },
-        summary:
-          `Deleted ${deleted.length} of ${plural(outcome.results.length, "item")} (${removedText(deleted)}) permanently.` +
-          (deleted.length < outcome.results.length
-            ? `\nNot deleted: ${outcome.results.filter((r) => !r.ok).map((r) => `${r.path} (${r.message})`).join("; ")}`
-            : "") +
-          (backend.platform === "darwin"
-            ? "\nOn APFS, cloned files and Time Machine local snapshots can keep some of this space in use."
-            : ""),
-        activity: `Deleted ${plural(deleted.length, "item")} (${removedText(deleted)}) permanently`,
-      };
-    },
+    (input, auth) => queueRemoval("delete", input, auth),
   );
 
   // ── Skills (SEP-2640) + prompt fallbacks ─────────────────

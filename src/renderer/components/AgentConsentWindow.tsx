@@ -237,7 +237,7 @@ function Delta({ role, base }: { role: McpAgentRole; base: McpAgentRole | undefi
         More than the default <strong>{base.name}</strong>: this session can {destructive ? "ask to " : ""}
         {verbs.join(" and ")}.
         {deletes ? " Deleted items can't be restored." : ""}
-        {destructive ? " You confirm every request." : ""}
+        {destructive ? " Requests wait in DiskHound until you review them." : ""}
       </span>
     </div>
   );

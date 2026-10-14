@@ -3,7 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { Page } from "@playwright/test";
+import type { Locator, Page } from "@playwright/test";
 
 import { BUILT_IN_MCP_ROLES, MCP_AGENT_CAPABILITIES } from "../../src/shared/agentAccess";
 import { expect, type AppHandle } from "./electron-app";
@@ -231,42 +231,38 @@ export async function mcpStatus(handle: AppHandle, token: string): Promise<numbe
   return response.status;
 }
 
-export type TrashPrompt = { message: string; detail: string };
-
 export type TrashStub = {
   /**
-   * The button the next confirmations answer with. Starts as Cancel.
-   * "move" is the first button: Move to Trash, or Delete Permanently.
+   * Every native message box main showed since the stub went in. Agents'
+   * removals wait on DiskHound's review list instead, so specs expect
+   * none.
    */
-  answer: (button: "move" | "cancel") => Promise<void>;
-  /** Every confirmation shown so far, oldest first. */
-  prompts: () => Promise<TrashPrompt[]>;
+  dialogs: () => Promise<string[]>;
 };
 
 type StubbedDialog = {
-  __e2ePrompts: TrashPrompt[];
-  __e2eResponse: number;
+  __e2eDialogs: string[];
   showMessageBox: (...args: unknown[]) => Promise<{ response: number; checkboxChecked: boolean }>;
 };
 
 /**
- * Stub the agent's Trash confirmation and the Trash itself in main.
+ * Stub the Trash in main: `shell.trashItem` moves the item into
+ * `trashDir` instead of the developer's real Trash or Recycle Bin.
  * `dialog.showMessageBox` records what it was asked and answers with
- * the button the spec picked. `shell.trashItem` moves the item into
- * `trashDir` instead of the developer's real Trash.
+ * the last button (Cancel), so a dialog that shouldn't appear can't
+ * remove anything.
  */
 export async function stubTrash(handle: AppHandle, trashDir: string): Promise<TrashStub> {
   await handle.app.evaluate(({ dialog, shell }, dir) => {
     const fs = process.getBuiltinModule("node:fs");
     const path = process.getBuiltinModule("node:path");
     const stub = dialog as unknown as StubbedDialog;
-    stub.__e2ePrompts = [];
-    stub.__e2eResponse = 1;
+    stub.__e2eDialogs = [];
     stub.showMessageBox = async (...args) => {
       // showMessageBox([window,] options)
-      const options = args.at(-1) as { message?: string; detail?: string };
-      stub.__e2ePrompts.push({ message: options.message ?? "", detail: options.detail ?? "" });
-      return { response: stub.__e2eResponse, checkboxChecked: false };
+      const options = args.at(-1) as { message?: string; buttons?: string[] };
+      stub.__e2eDialogs.push(options.message ?? "");
+      return { response: Math.max(0, (options.buttons?.length ?? 1) - 1), checkboxChecked: false };
     };
     (shell as unknown as { trashItem: (target: string) => Promise<void> }).trashItem = async (target) => {
       fs.mkdirSync(dir, { recursive: true });
@@ -275,12 +271,31 @@ export async function stubTrash(handle: AppHandle, trashDir: string): Promise<Tr
   }, trashDir);
 
   return {
-    answer: async (button) => {
-      // Button 0 is "Move to Trash" (or "Delete Permanently"), 1 is "Cancel".
-      await handle.app.evaluate(({ dialog }, response) => {
-        (dialog as unknown as StubbedDialog).__e2eResponse = response;
-      }, button === "move" ? 0 : 1);
-    },
-    prompts: () => handle.app.evaluate(({ dialog }) => (dialog as unknown as StubbedDialog).__e2ePrompts),
+    dialogs: () => handle.app.evaluate(({ dialog }) => (dialog as unknown as StubbedDialog).__e2eDialogs),
   };
+}
+
+/** The Trash's name in DiskHound's text on this OS. */
+export const BIN = process.platform === "win32" ? "Recycle Bin" : "Trash";
+
+/** Open the review list from the header pill, as the user does. */
+export async function openReview(page: Page): Promise<Locator> {
+  await page.locator(".agent-pill.review").click();
+  await page.locator(".agent-pop").getByRole("button", { name: "Review…" }).click();
+  const sheet = page.locator(".rv-sheet");
+  await expect(sheet).toBeVisible();
+  return sheet;
+}
+
+/** One item's row on the review sheet. */
+export function reviewRow(sheet: Locator, path: string): Locator {
+  return sheet.locator(".rv-row").filter({ has: sheet.page().getByTitle(path, { exact: true }) });
+}
+
+/** Switch an item between the Trash and a permanent delete. */
+export async function chooseAction(row: Locator, action: "trash" | "delete"): Promise<void> {
+  const label = action === "delete" ? "Delete" : process.platform === "win32" ? "Recycle" : "Trash";
+  const button = row.getByRole("radio", { name: label });
+  await button.click();
+  await expect(button).toHaveAttribute("aria-checked", "true");
 }

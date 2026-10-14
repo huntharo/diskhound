@@ -1,3 +1,4 @@
+import { waitingItems, type AgentRemovalList } from "../../shared/agentRemovals";
 import {
   MCP_AGENT_CAPABILITY_DETAILS,
   type AgentAccessSnapshot,
@@ -65,4 +66,18 @@ export function pendingText(pending: AgentPendingApproval, now: number): string 
 export function capabilityChip(permission: McpAgentCapability, platform: string): string {
   const short = MCP_AGENT_CAPABILITY_DETAILS[permission].short;
   return platform === "win32" ? short.replace("Trash", "Recycle Bin") : short;
+}
+
+/** Items waiting in the review list, and who asked: "From Codex (4) and Claude Code (3)". */
+export function reviewSummary(list: AgentRemovalList): { items: number; from: string } {
+  const counts = new Map<string, number>();
+  for (const request of list.requests) {
+    const waiting = request.items.filter((item) => item.status === "waiting").length;
+    if (waiting > 0) counts.set(request.sessionName, (counts.get(request.sessionName) ?? 0) + waiting);
+  }
+  const parts = [...counts].map(([name, count]) => `${name} (${count})`);
+  const from = parts.length <= 2
+    ? parts.join(" and ")
+    : `${parts.slice(0, 2).join(", ")} and ${parts.length - 2} more`;
+  return { items: waitingItems(list).length, from: from ? `From ${from}` : "" };
 }

@@ -5,6 +5,8 @@
 // pill). Keep this module free of Node imports — Vite bundles it into
 // the renderer.
 
+import type { AgentRemovalList } from "./agentRemovals";
+
 /**
  * The endpoint is a fixed loopback port, not a discovery file: Claude
  * Code and Codex store the URL once (`claude mcp add … <url>`), so it
@@ -202,7 +204,7 @@ export type McpAgentCapability = (typeof MCP_AGENT_CAPABILITIES)[number];
 /**
  * - standard: can't expose or change anything the user hasn't seen.
  * - sensitive: exposes private data (every file name on the disk).
- * - destructive: removes files (after the user confirms each request).
+ * - destructive: removes files (once the user approves them in the review list).
  */
 export type McpAgentPermissionDanger = "standard" | "sensitive" | "destructive";
 
@@ -243,14 +245,14 @@ export const MCP_AGENT_CAPABILITY_DETAILS: Record<
     label: "Ask to move items to the Trash",
     short: "Trash · asks you",
     verb: "move items to the Trash",
-    detail: "Request that files or folders go to the Trash / Recycle Bin. DiskHound asks you to confirm every request, and you can restore items until the Trash is emptied.",
+    detail: "Request that files or folders go to the Trash / Recycle Bin. Requests wait in DiskHound until you review them, and you can restore items until the Trash is emptied.",
     danger: "destructive",
   },
   "files.delete": {
     label: "Ask to delete items permanently",
     short: "Delete · asks you",
     verb: "delete items permanently",
-    detail: "Request that files or folders be deleted without going to the Trash. DiskHound asks you to confirm every request. Deleted items can't be restored.",
+    detail: "Request that files or folders be deleted without going to the Trash. Requests wait in DiskHound until you review them, and you can send any of them to the Trash instead. Deleted items can't be restored.",
     danger: "destructive",
   },
 };
@@ -282,13 +284,13 @@ export const BUILT_IN_MCP_ROLES: readonly McpAgentRole[] = [
   {
     id: "builtin.operator",
     name: "Cleanup Operator",
-    description: "Everything the Cleanup Guide can do, plus ask to move items to the Trash. You confirm every request in DiskHound.",
+    description: "Everything the Cleanup Guide can do, plus ask to move items to the Trash. Requests wait in DiskHound until you review them.",
     permissions: ["disk.read", "scan.run", "app.navigate", "files.trash"],
   },
   {
     id: "builtin.admin",
     name: "Cleanup Admin",
-    description: "Everything the Cleanup Operator can do, plus ask to delete items permanently. You confirm every request in DiskHound.",
+    description: "Everything the Cleanup Operator can do, plus ask to delete items permanently. Requests wait in DiskHound until you review them.",
     permissions: ["disk.read", "scan.run", "app.navigate", "files.trash", "files.delete"],
   },
 ];
@@ -366,6 +368,8 @@ export interface AgentAccessSnapshot {
   sessions: McpAgentSession[];
   activity: AgentActivityEntry[];
   pending: AgentPendingApproval[];
+  /** Agents' removal requests: waiting for the user, and decided this week. */
+  removals: AgentRemovalList;
   security: AgentSecurityEvent[];
   policyFile: string;
   securityLogFile: string;
