@@ -61,13 +61,13 @@ function budget(scenario: string, io: Awaited<ReturnType<typeof measureFsIo>>["i
 
 it("budgets one client registration in a used profile", async () => {
   const { io } = await measureFsIo(() => register("Claude Code — new project"));
-  budget("mcp-client-registration", io, "Registration with 32 saved clients; one complete client-store replacement.");
+  budget("mcp-client-registration", io, "Unapproved registration with 32 in-memory clients; the client file is written only after approval.");
 });
 
 it("budgets registration at the 256-client cap", async () => {
   for (let i = 32; i < 256; i++) await register(`Local development agent ${i.toString().padStart(3, "0")}`);
   const { io } = await measureFsIo(() => register("Claude Code — new project"));
-  budget("mcp-client-registration-at-cap", io, "256 saved clients; evicts one unapproved client and replaces the bounded store once.");
+  budget("mcp-client-registration-at-cap", io, "256 in-memory clients; evicts one unapproved client and does not touch the client file.");
 });
 
 it("budgets OAuth approval, role change, and revocation", async () => {
@@ -85,7 +85,7 @@ it("budgets OAuth approval, role change, and revocation", async () => {
     await oauth.revokeToken(client, { token: tokens.access_token });
     await expect(oauth.verifyAccessToken(tokens.access_token)).rejects.toThrow();
   });
-  budget("mcp-session-lifecycle", io, "32 existing sessions; approval, role change and revocation replace the policy three times per lifecycle.");
+  budget("mcp-session-lifecycle", io, "32 existing sessions; approval writes the client record and the policy, then role change and revocation replace the policy.");
 });
 
 it("does not persist repeated role assignments or revocations", async () => {
@@ -142,6 +142,6 @@ it("budgets a stdio approval followed by reused connections", async () => {
     }
   });
   budget("mcp-stdio-approval-and-reuse", io,
-    "One stdio registration and approval with 32 saved clients/sessions, then 24 reconnects and 1,440 requests. "
+    "One stdio registration (memory only) and approval, which writes that client and its session, then 24 reconnects and 1,440 requests. "
     + "The helper's separate OS-store budget is in native/diskhound-mcp/io-budgets.json; no token is written to a file.");
 });

@@ -37,6 +37,7 @@ import { normPath } from "../shared/pathUtils";
 import { powerEfficiencyWorkers } from "../shared/powerEfficiency";
 import { formatSizeBytes, resolveSizeUnitBase } from "../shared/sizeUnits";
 import { McpPolicyStore } from "./accessPolicy";
+import { listenerKeyPath } from "./listenerProof";
 import type { AgentAccessService } from "./agentAccessService";
 import { AgentActivityLog } from "./activityLog";
 import type { DiskhoundAgentBackend, FolderChildren, NavigateRequest, TrashOutcome, TrashRequest } from "./backend";
@@ -630,6 +631,7 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
         skills,
         policy,
         clientsFile,
+        listenerKeyFile: listenerKeyPath(),
         requestConsent: broker.request,
         onChanged: broadcast,
         port,

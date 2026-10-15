@@ -308,9 +308,19 @@ The source lives in [`skills/`](../skills).
 - The server binds `127.0.0.1` only. It rejects any other `Host` header,
   non-loopback peers, and browser `Origin`s other than loopback. That blocks
   DNS rebinding and cross-site requests from web pages.
+- The stdio helper sends a saved token only on the connection that just
+  proved it holds the listener key in your private data folder
+  (`mcp-listener-key`, mode 0600), and it asks again for every request.
+  Another account can bind port 51735 and copy DiskHound's public name, but
+  it cannot answer that check. A program running as you can, because it can
+  already open your credential store.
 - OAuth 2.1 with dynamic client registration, PKCE (S256), and a resource
   indicator pinned to the MCP URL. Clients are public; there are no client
-  secrets.
+  secrets. A registration's redirect URIs have to be `http://127.0.0.1`,
+  `http://localhost`, or `http://[::1]` with an explicit port. An unapproved
+  registration stays in memory and is gone after a restart; DiskHound writes
+  the client record when you approve it. Forgetting revoked sessions frees
+  those client slots, so a new agent can register without a restart.
 - Approval happens only in DiskHound's own window. Browser pages and URL
   parameters can't approve a request.
 - Tokens are stored as SHA-256 hashes in `mcp-policy.json` in DiskHound's

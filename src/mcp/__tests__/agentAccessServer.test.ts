@@ -21,6 +21,7 @@ import { AgentAccessServer, allowedOrigin, isLoopbackAddress, withDefaultArgumen
 import { AgentAccessService } from "../agentAccessService";
 import type { TrashRequest } from "../backend";
 import { ConsentBroker, type ConsentSender, type ConsentWindow } from "../consentBroker";
+import { listenerProof } from "../listenerProof";
 import { loadSkillCatalog } from "../skills";
 import { createFakeBackend, RecordingActivity, RecordingSecurity, SKILLS_DIR, type FakeBackend } from "./fakeBackend";
 
@@ -91,6 +92,7 @@ beforeEach(async () => {
     skills: SKILLS,
     policy,
     clientsFile: Path.join(tempDir, "mcp-oauth-clients.json"),
+    listenerKeyFile: Path.join(tempDir, "mcp-listener-key"),
     requestConsent: broker.request,
     onChanged,
     port: 0,
@@ -286,14 +288,19 @@ describe("AgentAccessServer basics", () => {
     await server.stop();
   });
 
-  it("restarts on the same port and keeps registered clients across instances", async () => {
+  it("drops an unapproved registration when the listener stops", async () => {
     const { client_id: clientId } = await register();
     const port = server.port;
     await server.stop();
     await server.start();
     expect(server.port).toBe(port);
+    const forgotten = await fetch(authorizeUrl(clientId, pkce().challenge), { redirect: "manual" });
+    expect(forgotten.status).toBe(400);
+    expect(FS.existsSync(Path.join(tempDir, "mcp-oauth-clients.json"))).toBe(false);
+  });
 
-    // A fresh instance (an app relaunch) reads the persisted client store.
+  it("reloads an approved client after a relaunch", async () => {
+    const { clientId } = await login();
     await server.stop();
     server = new AgentAccessServer({
       backend,
@@ -301,6 +308,7 @@ describe("AgentAccessServer basics", () => {
       skills: SKILLS,
       policy,
       clientsFile: Path.join(tempDir, "mcp-oauth-clients.json"),
+      listenerKeyFile: Path.join(tempDir, "mcp-listener-key"),
       requestConsent: broker.request,
       onChanged,
       port: 0,
@@ -322,6 +330,7 @@ describe("AgentAccessService", () => {
         skills: SKILLS,
         policy,
         clientsFile: Path.join(tempDir, "mcp-oauth-clients.json"),
+        listenerKeyFile: Path.join(tempDir, "mcp-listener-key"),
         requestConsent: broker.request,
         onChanged,
         port,
@@ -467,6 +476,20 @@ describe("OAuth metadata", () => {
     });
   });
 
+  it("proves it holds the listener key without returning the key", async () => {
+    const nonce = "a".repeat(43);
+    const missing = await fetch(`${base}/diskhound/listener-proof`);
+    expect(missing.status).toBe(400);
+    const response = await fetch(`${base}/diskhound/listener-proof?nonce=${nonce}`);
+    expect(response.status).toBe(200);
+    const key = FS.readFileSync(Path.join(tempDir, "mcp-listener-key"));
+    expect(key).toHaveLength(32);
+    expect(await response.json()).toEqual({ proof: listenerProof(key, nonce) });
+    if (process.platform !== "win32") {
+      expect(FS.statSync(Path.join(tempDir, "mcp-listener-key")).mode & 0o777).toBe(0o600);
+    }
+  });
+
   it("serves authorization server metadata for a public-client, PKCE-only server", async () => {
     const response = await fetch(`${base}/.well-known/oauth-authorization-server`);
     expect(response.status).toBe(200);
@@ -486,7 +509,7 @@ describe("OAuth metadata", () => {
 });
 
 describe("OAuth flow", () => {
-  it("registers public clients only and persists them 0600", async () => {
+  it("registers public clients only and keeps an unapproved registration off disk", async () => {
     const response = await fetch(`${base}/register`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -498,12 +521,16 @@ describe("OAuth flow", () => {
     expect(client.client_secret).toBeUndefined();
     expect(client.token_endpoint_auth_method).toBe("none");
     expect(client.grant_types).toEqual(["authorization_code"]);
+    expect(FS.existsSync(Path.join(tempDir, "mcp-oauth-clients.json"))).toBe(false);
+  });
 
-    const file = Path.join(tempDir, "mcp-oauth-clients.json");
-    const saved = JSON.parse(FS.readFileSync(file, "utf8")) as { client_id: string }[];
-    expect(saved.map((entry) => entry.client_id)).toEqual([client.client_id]);
-    expect(FS.readFileSync(file, "utf8")).not.toContain("client_secret\"");
-    if (process.platform !== "win32") expect(FS.statSync(file).mode & 0o777).toBe(0o600);
+  it("rejects a redirect URI that is not loopback http", async () => {
+    const response = await fetch(`${base}/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ client_name: "Elsewhere", redirect_uris: ["https://example.com/callback"] }),
+    });
+    expect(response.status).toBe(400);
   });
 
   it("walks DCR → authorize → native approval → token → MCP tools", async () => {
@@ -556,6 +583,12 @@ describe("OAuth flow", () => {
     expect(tokens.token_type.toLowerCase()).toBe("bearer");
     expect(tokens.refresh_token).toBeUndefined();
     expect(onChanged).toHaveBeenCalled();
+
+    const file = Path.join(tempDir, "mcp-oauth-clients.json");
+    const saved = JSON.parse(FS.readFileSync(file, "utf8")) as { client_id: string }[];
+    expect(saved.map((entry) => entry.client_id)).toEqual([clientId]);
+    expect(FS.readFileSync(file, "utf8")).not.toContain("client_secret");
+    if (process.platform !== "win32") expect(FS.statSync(file).mode & 0o777).toBe(0o600);
 
     // Codes are single-use.
     const replay = await exchange(tokenParams);
