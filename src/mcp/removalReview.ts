@@ -4,6 +4,7 @@ import type { McpAgentCapability } from "../shared/agentAccess";
 import {
   removalChoice,
   mountLabel,
+  sameVolumeFacts,
   trashName,
   type RemovalAction,
   type RemovalApprovalResult,
@@ -19,7 +20,8 @@ import type { RemovalQueue } from "./removalQueue";
 /**
  * Runs what the user approved in the review sheet. Items can wait for
  * days, so everything is checked again first: the session's current
- * role, the path on disk, the protected folders, and the volume. An
+ * role, the path on disk and the object at it, the protected folders,
+ * and the volume. An
  * item whose volume changed since the user looked stays in the list
  * with the new facts instead of running. Results come from the disk
  * after each action, through main's own Trash and delete, which report
@@ -36,8 +38,8 @@ export interface RemovalReviewDeps {
   queue: RemovalQueue;
   /** The volume check, run again for the items about to go. */
   check(items: readonly { path: string; sizeBytes: number | null }[]): Promise<RemovalVolumeCheck[]>;
-  /** On-disk spelling; throws when nothing is there. */
-  canonicalPath(path: string): Promise<string>;
+  /** On-disk spelling and the identity of what is there (trashGuard's canonicalTarget); throws when nothing is. */
+  canonicalTarget(path: string): Promise<{ path: string; fileId: string }>;
   /** Why an agent may not remove this path now (protected folders, home, drive roots), or null. */
   protection(): Promise<(requested: string, target: string) => string | null>;
   /** Read the sessions once per approval: id → the session as it is now, null once revoked or forgotten. */
@@ -104,12 +106,6 @@ export async function removalUnits(
     }
   }
   return { units: units.sort(), holders };
-}
-
-function sameCheck(a: RemovalVolumeCheck, b: RemovalVolumeCheck): boolean {
-  return a.trash === b.trash &&
-    a.readOnly === b.readOnly &&
-    a.mountsInside.map((mount) => mount.path).join("\0") === b.mountsInside.map((mount) => mount.path).join("\0");
 }
 
 const emptyCount = () => ({ items: 0, bytes: 0, unsized: 0 });
@@ -194,15 +190,23 @@ export class RemovalReview {
           });
           continue;
         }
-        let now: string;
+        let now: { path: string; fileId: string };
         try {
-          now = await this.deps.canonicalPath(item.path);
+          now = await this.deps.canonicalTarget(item.path);
         } catch {
           decide(item, request.sessionId, "gone", { action: null, message: "Already gone." });
           continue;
         }
-        if (now !== item.path) {
+        if (now.path !== item.path) {
           decide(item, request.sessionId, "refused", { action: null, message: "This path changed after the agent asked, so DiskHound left it alone." });
+          continue;
+        }
+        if (item.fileId !== undefined && now.fileId !== item.fileId) {
+          // Deleted and made again: not what the agent asked about.
+          decide(item, request.sessionId, "gone", {
+            action: null,
+            message: "Already gone. Something else is at this path now, and DiskHound left it alone.",
+          });
           continue;
         }
         const blocked = protection(item.path, item.path);
@@ -211,7 +215,7 @@ export class RemovalReview {
           continue;
         }
         const check = checks[index]!;
-        if (!sameCheck(item.check, check)) {
+        if (!sameVolumeFacts(item.check, check)) {
           // What the user saw is no longer true. Show them the new facts.
           queue.updateCheck(item.id, check);
           queue.setRunning([item.id], false);

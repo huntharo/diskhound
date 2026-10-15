@@ -78,7 +78,7 @@ describe("review list scaling", () => {
       const review = new RemovalReview({
         queue,
         check: async (items) => items.map(() => OK),
-        canonicalPath: async (path) => path,
+        canonicalTarget: async (path) => ({ path, fileId: "1:1" }),
         protection: async () => () => null,
         sessions: () => (id) => ({ name: id, roleName: "Cleanup Admin", capabilities }),
         trashPath: async () => ({ ok: true, message: "ok" }),

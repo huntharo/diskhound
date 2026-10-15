@@ -91,6 +91,48 @@ describe("RemovalQueue", () => {
     expect(changes).toBe(2);
   });
 
+  it("treats a repeat with new volume facts or another file at a path as a change", () => {
+    const q = queue();
+    const items = (check: RemovalVolumeCheck, fileId: string) => [{ path: "/a", sizeBytes: 1024, check, fileId }];
+    const base = { sessionId: "s1", sessionName: "Codex", roleName: "Cleanup Operator", asked: "trash" as const, reason: "r" };
+    const first = q.add({ ...base, items: items({ ...OK, trash: "unknown", volumesUnknown: true }, "1:2:3") }).request;
+    // Only the time differs: still a repeat.
+    expect(q.add({ ...base, items: items({ ...OK, trash: "unknown", volumesUnknown: true, checkedAt: NOW + 5 }, "1:2:3") }).request.id).toBe(first.id);
+    // The volumes can be read now: the item takes the new facts.
+    const known = q.add({ ...base, items: items(OK, "1:2:3") }).request;
+    expect(known.id).not.toBe(first.id);
+    expect(known.items[0]!.check.volumesUnknown).toBeUndefined();
+    // Something else at the path: the item takes its identity.
+    const remade = q.add({ ...base, items: items(OK, "1:9:9") }).request;
+    expect(remade.id).not.toBe(known.id);
+    expect(remade.items[0]!.fileId).toBe("1:9:9");
+    expect(q.waitingCount()).toBe(1);
+  });
+
+  it("decides a request whose last waiting item moves to a newer request, so it ages out", async () => {
+    const q = queue();
+    const { request } = ask(q, "s1", ["/a", "/b"]);
+    q.decide(request.items[0]!.id, "moved", { action: "trash", message: "Moved to the Trash.", at: now });
+    // /b waits (its volume changed when the user approved), then the agent asks again.
+    now += 1000;
+    ask(q, "s1", ["/b"], "delete");
+    const old = q.list().requests.find((candidate) => candidate.id === request.id)!;
+    expect(old).toMatchObject({ decidedAt: NOW, items: [{ path: "/a", status: "moved" }] });
+    // A week on, the next write drops it.
+    now += 8 * DAY;
+    ask(q, "s2", ["/c"]);
+    await q.flush();
+    expect(onDisk().requests.map((candidate: { id: string }) => candidate.id)).not.toContain(request.id);
+  });
+
+  it("writes a pending change before quit returns", () => {
+    const q = queue();
+    ask(q, "s1", ["/a"]);
+    expect(FS.existsSync(file)).toBe(false);
+    q.flushSync();
+    expect(onDisk().requests[0].items[0].path).toBe("/a");
+  });
+
   it("compares paths without case on macOS and Windows", () => {
     const q = queue({ platform: "darwin" });
     ask(q, "s1", ["/Users/Me/Build"]);

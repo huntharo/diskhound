@@ -8,6 +8,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import { McpPolicyStore } from "../mcp/accessPolicy";
 import { RemovalQueue } from "../mcp/removalQueue";
+import { fileIdentity } from "../mcp/trashGuard";
 import { AgentButton } from "../renderer/components/AgentButton";
 import { RemovalReviewSheet } from "../renderer/components/RemovalReviewSheet";
 import { useRemovalReviewOpen } from "../renderer/lib/agentAccessStore";
@@ -123,7 +124,13 @@ beforeAll(async () => {
       policy.revokeSession(old.session.id);
 
       const queue = new RemovalQueue(Path.join(userData, "agent-removals.json"));
-      const at = (path: string, sizeBytes: number) => ({ path: Path.join(files, path), sizeBytes, check: path.startsWith("no-trash") ? NO_TRASH : OK });
+      // With what is at each path, as the host records it when an agent asks.
+      const at = (path: string, sizeBytes: number) => ({
+        path: Path.join(files, path),
+        sizeBytes,
+        check: path.startsWith("no-trash") ? NO_TRASH : OK,
+        fileId: fileIdentity(FS.lstatSync(Path.join(files, path), { bigint: true })),
+      });
       queue.add({
         sessionId: codex.session.id, sessionName: "Codex", roleName: "Cleanup Operator", asked: "trash",
         reason: "Build output from old-app, untouched since March.",

@@ -1,4 +1,5 @@
 import * as FS from "node:fs";
+import * as FSP from "node:fs/promises";
 import * as OS from "node:os";
 import * as Path from "node:path";
 
@@ -39,12 +40,14 @@ function request(queue: RemovalQueue, label: string, count = 20) {
       path: `/Users/sam/github/project-${label}-${i}/node_modules/.pnpm/some-package@1.2.3/node_modules`,
       sizeBytes: 123_456_789,
       check: OK,
+      // Device, inode and creation time, as the host records them.
+      fileId: `16777232:${48_000_000 + i}:1760000000123456789`,
     })),
   }).request;
 }
 
 beforeEach(async () => {
-  dir = FS.mkdtempSync(Path.join(OS.tmpdir(), "diskhound-removals-io-"));
+  dir = await FSP.mkdtemp(Path.join(OS.tmpdir(), "diskhound-removals-io-"));
   file = Path.join(dir, "agent-removals.json");
   // A week of history: 50 decided requests of 20 items, and 2 waiting.
   const seed = open();
@@ -57,8 +60,8 @@ beforeEach(async () => {
   await seed.flush();
 });
 
-afterEach(() => {
-  FS.rmSync(dir, { recursive: true, force: true });
+afterEach(async () => {
+  await FSP.rm(dir, { recursive: true, force: true });
 });
 
 function budget(scenario: string, io: Awaited<ReturnType<typeof measureFsIo>>["io"], detail: string, perDay: number) {
@@ -66,7 +69,7 @@ function budget(scenario: string, io: Awaited<ReturnType<typeof measureFsIo>>["i
   const projection = io.writeFile === 0
     ? `No writes, at the default or the 1-minute monitoring interval (the file is ${size} with a week of a busy agent's history).`
     : `Written only when an agent asks or the user decides, never on a timer, so the default and the 1-minute monitoring `
-      + `interval cost the same. At ${perDay} a day: ${perDay * io.writeFile} writes/day, `
+      + `interval cost the same. At ${perDay} a day: ${perDay * io.writeFile} write${perDay * io.writeFile === 1 ? "" : "s"}/day, `
       + `${((perDay * io.bytesWritten) / 1e6).toFixed(1)} MB/day of rewritten content with a week of a busy agent's history `
       + `(a ${size} file; a light week is a tenth of that). Each write is a temp file and a rename.`;
   expectIoBudget({ scenario, io, note: `${detail} ${projection}` });
@@ -116,7 +119,7 @@ it("writes nothing when an agent repeats a request", async () => {
         roleName: waiting.roleName,
         asked: waiting.asked,
         reason: waiting.reason,
-        items: waiting.items.map((item) => ({ path: item.path, sizeBytes: item.sizeBytes, check: OK })),
+        items: waiting.items.map((item) => ({ path: item.path, sizeBytes: item.sizeBytes, check: OK, fileId: item.fileId })),
       });
     }
     await settle();
@@ -136,6 +139,19 @@ it("writes an approval once, however many items it decides", async () => {
   }));
   expect(queue.waitingCount()).toBe(0);
   budget("agent-removals-approve", io, "The user approves 40 waiting items: decisions are held during the run and written once at its end. Projected as 5 approvals a day.", 5);
+});
+
+it("writes a request still in its debounce once at quit, before quit returns", async () => {
+  const queue = open();
+  queue.list();
+  const { io } = await measureFsIo(() => {
+    request(queue, "last");
+    // Electron's before-quit is synchronous: the write finishes here.
+    queue.flushSync();
+  });
+  const written = JSON.parse(FS.readFileSync(file, "utf8")) as { requests: { items: { path: string }[] }[] };
+  expect(written.requests.some((r) => r.items.some((item) => item.path.includes("project-last-")))).toBe(true);
+  budget("agent-removals-quit-pending", io, "An agent asks, and the user quits inside the 500 ms debounce: one synchronous replacement in before-quit. At most once per quit; projected as 1 a day.", 1);
 });
 
 it("writes nothing at quit when nothing changed", async () => {

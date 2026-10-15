@@ -69,6 +69,8 @@ export interface ProbeFs {
   access(path: string, mode: number): Promise<void>;
 }
 
+type ProbeStat = Awaited<ReturnType<ProbeFs["lstat"]>>;
+
 const realFs: ProbeFs = {
   lstat: (path) => FS.lstat(path),
   stat: (path) => FS.stat(path),
@@ -225,20 +227,38 @@ async function loadLinuxTable(fs: ProbeFs): Promise<VolumeTable> {
 
 /**
  * Whether gio can trash on the volume mounted at `top`: a `.Trash/<uid>`
- * under a sticky `.Trash`, or a `.Trash-<uid>` it owns, or a writable
- * top folder where it can make one.
+ * under a sticky `.Trash` (gio makes it if the shared folder lets it),
+ * or a `.Trash-<uid>` it owns, or a writable top folder where it can
+ * make one.
  */
 async function linuxTrashFolder(top: string, uid: number | null, fs: ProbeFs): Promise<string | null> {
   const id = uid ?? 0;
+  const sharedPath = Path.posix.join(top, ".Trash");
+  let shared: ProbeStat | null = null;
   try {
-    const shared = await fs.lstat(Path.posix.join(top, ".Trash"));
-    // gio wants it sticky and not a link.
-    if (!shared.isSymbolicLink() && shared.isDirectory() && (shared.mode & 0o1000) !== 0) {
-      const own = await fs.lstat(Path.posix.join(top, ".Trash", String(id)));
-      if (own.isDirectory() && !own.isSymbolicLink() && own.uid === id) return null;
-    }
+    shared = await fs.lstat(sharedPath);
   } catch {
     /* none */
+  }
+  // gio wants it sticky and not a link.
+  if (shared && !shared.isSymbolicLink() && shared.isDirectory() && (shared.mode & 0o1000) !== 0) {
+    let own: ProbeStat | null = null;
+    try {
+      own = await fs.lstat(Path.posix.join(sharedPath, String(id)));
+    } catch {
+      /* not made yet */
+    }
+    if (own) {
+      if (own.isDirectory() && !own.isSymbolicLink() && own.uid === id) return null;
+      // Someone else's: gio falls back to .Trash-<uid>.
+    } else {
+      try {
+        await fs.access(sharedPath, 3 /* W_OK | X_OK */);
+        return null;
+      } catch {
+        /* can't make it there */
+      }
+    }
   }
   try {
     const own = await fs.lstat(Path.posix.join(top, `.Trash-${id}`));
@@ -428,8 +448,9 @@ export class TrashProbe {
     try {
       table = await this.table();
     } catch (error) {
-      const why = `DiskHound couldn't read the list of volumes (${error instanceof Error ? error.message : String(error)}), so it can't tell whether the ${trashName(this.platform)} can take this.`;
-      return items.map(() => ({ volume: null, trash: "unknown", trashWhy: why, readOnly: false, mountsInside: [], checkedAt: this.now() }));
+      // Fail closed: without the table, a folder could hold another volume that a delete would walk into.
+      const why = `DiskHound couldn't read the list of volumes (${error instanceof Error ? error.message : String(error)}), so it can't tell whether another volume is mounted inside or whether the ${trashName(this.platform)} can take it.`;
+      return items.map(() => ({ volume: null, trash: "unknown", trashWhy: why, readOnly: false, mountsInside: [], volumesUnknown: true, checkedAt: this.now() }));
     }
     const linuxTrash = new Map<string, Promise<string | null>>();
     return Promise.all(items.map((item) => this.checkOne(item.path, item.sizeBytes, table, linuxTrash)));

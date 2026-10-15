@@ -54,11 +54,11 @@ import { ConsentBroker, type ConsentWindow } from "./consentBroker";
 import { resolveNativeScannerBinary } from "../nativeScanner";
 import { isInside } from "./paths";
 import { nativeRemovalMeasurer, RemovalMeasurements } from "./removalMeasure";
-import { RemovalQueue } from "./removalQueue";
+import { RemovalQueue, type QueueInput } from "./removalQueue";
 import { RemovalReview, type SessionAccess } from "./removalReview";
 import { AgentSecurityLog } from "./securityLog";
 import type { SkillCatalog } from "./skills";
-import { agentTrashRefusal, canonicalPath, configuredTrashGuard, outermostPaths } from "./trashGuard";
+import { agentTrashRefusal, canonicalPath, canonicalTarget, configuredTrashGuard, outermostPaths } from "./trashGuard";
 import { systemVolumeLoader, TrashProbe } from "./trashSupport";
 
 const NAVIGATE_VIEW_CHANNEL = "diskhound:navigate-view";
@@ -121,6 +121,8 @@ export interface AgentHost {
   showRemovalReview(): Promise<void>;
   /** Files were removed from the UI: removal measurements are stale. */
   pathsRemoved(): void;
+  /** Write the review list now if it changed (quit; before-quit is synchronous). */
+  flushRemovals(): void;
   dispose(): Promise<void>;
 }
 
@@ -367,10 +369,14 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
     const protect = await protection();
     const refused: RemovalQueueOutcome["refused"] = [];
     const offered: string[] = [];
+    // What is at each path now; approval leaves alone anything made there later.
+    const fileIds = new Map<string, string>();
     for (const requested of request.paths) {
       let target: string;
       try {
-        target = await canonicalPath(requested);
+        const found = await canonicalTarget(requested);
+        target = found.path;
+        fileIds.set(target, found.fileId);
       } catch {
         refused.push({ path: requested, message: "Nothing exists at this path." });
         continue;
@@ -398,12 +404,12 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
     const targets = outermostPaths(offered);
     const sizes = await Promise.all(targets.map((path) => recordedSize(path)));
     const checks = await probe.check(targets.map((path, index) => ({ path, sizeBytes: sizes[index] ?? null })));
-    const items: { path: string; sizeBytes: number | null; check: (typeof checks)[number] }[] = [];
+    const items: QueueInput["items"] = [];
     for (const [index, path] of targets.entries()) {
       const check = checks[index]!;
       // Nothing could ever remove it; don't make the user look at it.
       if (check.readOnly) refused.push({ path, message: `Refused: ${check.volume ?? "its volume"} is read-only.` });
-      else items.push({ path, sizeBytes: sizes[index] ?? null, check });
+      else items.push({ path, sizeBytes: sizes[index] ?? null, check, fileId: fileIds.get(path) });
     }
     if (items.length === 0) {
       throw new Error(`Nothing was added to DiskHound's review list. ${refused.map((r) => `${r.path}: ${r.message}`).join(" ")}`);
@@ -437,7 +443,7 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
       probe.invalidate();
       return probe.check(items);
     },
-    canonicalPath,
+    canonicalTarget,
     protection,
     sessions: sessionsNow,
     trashPath: (path) => deps.trashPath(path),
@@ -856,6 +862,7 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
     showSettings,
     showRemovalReview,
     pathsRemoved: () => measurements?.invalidate(),
+    flushRemovals: () => queue.flushSync(),
     dispose: async () => {
       broker.close();
       measurements?.dispose();

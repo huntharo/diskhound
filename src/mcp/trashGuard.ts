@@ -20,13 +20,31 @@ import { findExcludedFolderActionBlocker } from "../shared/pathProtection";
  * listing. Throws if nothing exists at `target`.
  */
 export async function canonicalPath(target: string): Promise<string> {
-  const stat = await FS.lstat(target);
-  if (!stat.isSymbolicLink()) return FS.realpath(target);
+  return (await canonicalTarget(target)).path;
+}
+
+/**
+ * Which file system object this is: device, inode (the file ID on
+ * Windows) and creation time. A file deleted and made again at the same
+ * path differs, even where the file system reuses the inode number at
+ * once (ext4). Where Linux can't report a creation time, Node falls back
+ * to the change time, so a changed file reads as another one: DiskHound
+ * then leaves it alone, the safe way to be wrong.
+ */
+export function fileIdentity(stat: { dev: bigint; ino: bigint; birthtimeNs: bigint }): string {
+  return `${stat.dev}:${stat.ino}:${stat.birthtimeNs}`;
+}
+
+/** {@link canonicalPath}, plus the {@link fileIdentity} of what is there now, from the same lstat. */
+export async function canonicalTarget(target: string): Promise<{ path: string; fileId: string }> {
+  const stat = await FS.lstat(target, { bigint: true });
+  const fileId = fileIdentity(stat);
+  if (!stat.isSymbolicLink()) return { path: await FS.realpath(target), fileId };
   const parent = await FS.realpath(Path.dirname(target));
   const name = Path.basename(target);
   const entries = await FS.readdir(parent);
   const onDisk = entries.includes(name) ? name : entries.find((entry) => entry.toLowerCase() === name.toLowerCase());
-  return Path.join(parent, onDisk ?? name);
+  return { path: Path.join(parent, onDisk ?? name), fileId };
 }
 
 function key(path: string, platform: NodeJS.Platform): string {

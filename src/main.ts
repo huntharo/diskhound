@@ -5021,6 +5021,9 @@ void (async () => {
     // snapshot and its cursor wait for quit.
     scanStore.flush();
     flushUsnCursorStore();
+    // An agent's request queued in the last half second: write it
+    // before quit can cut an async write off, so it survives a restart.
+    agentHost?.flushRemovals();
     void agentHost?.dispose();
   });
 })().catch((err: unknown) => {

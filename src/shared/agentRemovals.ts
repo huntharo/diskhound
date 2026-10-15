@@ -38,7 +38,20 @@ export interface RemovalVolumeCheck {
   readOnly: boolean;
   /** Other volumes mounted inside a folder. Both actions leave them alone. */
   mountsInside: RemovalMountInside[];
+  /**
+   * DiskHound couldn't read the list of volumes, so it can't tell
+   * whether another volume is mounted inside. Nothing removes it then.
+   */
+  volumesUnknown?: boolean;
   checkedAt: number;
+}
+
+/** Whether two checks say the same about removing the item (the time aside). */
+export function sameVolumeFacts(a: RemovalVolumeCheck, b: RemovalVolumeCheck): boolean {
+  return a.trash === b.trash &&
+    a.readOnly === b.readOnly &&
+    Boolean(a.volumesUnknown) === Boolean(b.volumesUnknown) &&
+    a.mountsInside.map((mount) => mount.path).join("\0") === b.mountsInside.map((mount) => mount.path).join("\0");
 }
 
 /**
@@ -82,6 +95,8 @@ export interface RemovalItem {
   /** From the newest scan that covers it, or the file's own size; null for an unscanned folder. */
   sizeBytes: number | null;
   check: RemovalVolumeCheck;
+  /** Device and inode (file ID on Windows) of what the agent asked about. Something else at the path later is left alone. */
+  fileId?: string;
   status: RemovalItemStatus;
   /** Set once the item is decided. */
   outcome?: RemovalOutcome;
@@ -184,6 +199,9 @@ export function removalChoice(
   if (!granted) return lock(`${sessionName} was revoked, so its requests can't be approved.`);
   const { check } = item;
   if (check.readOnly) return lock(`${check.volume ?? "This volume"} is read-only, so nothing can remove it.`);
+  if (check.volumesUnknown) {
+    return lock(`${check.trashWhy ?? "DiskHound couldn't read the list of volumes."} It removes nothing it can't check, so this can only be skipped; the agent can ask again.`);
+  }
   const trash = check.trash !== "no" && granted.includes("files.trash");
   const del = granted.includes("files.delete") && (item.asked === "delete" || check.trash === "no");
   if (!trash && !del) {

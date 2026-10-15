@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { removalChoice } from "../../shared/agentRemovals";
 import {
   linuxVolumes,
   macVolumes,
@@ -140,7 +141,13 @@ describe("TrashProbe on macOS", () => {
       throw new Error("mount failed");
     }, { platform: "darwin", now: () => NOW });
     const [check] = await probe.check([{ path: "/a", sizeBytes: 1 }]);
-    expect(check).toMatchObject({ trash: "unknown", trashWhy: expect.stringContaining("mount failed") });
+    // Fail closed: it can't tell whether a volume is mounted inside.
+    expect(check).toMatchObject({ trash: "unknown", volumesUnknown: true, trashWhy: expect.stringContaining("mount failed") });
+    expect(removalChoice({ asked: "delete", check: check! }, ["files.trash", "files.delete"], "Claude Code", "darwin")).toMatchObject({
+      trash: false,
+      delete: false,
+      locked: expect.stringContaining("It removes nothing it can't check"),
+    });
   });
 });
 
@@ -219,6 +226,15 @@ describe("TrashProbe on Linux (gio's rules)", () => {
 
     const none = await linuxProbe({ writable: () => false }).check([{ path: "/mnt/scratch/old", sizeBytes: 1 }]);
     expect(none[0]).toMatchObject({ trash: "no", trashWhy: "/mnt/scratch has no Trash folder, and DiskHound can't make one there." });
+  });
+
+  it("counts a shared .Trash where gio can still make the user's folder", async () => {
+    const trashDirs = { "/mnt/scratch/.Trash": { mode: 0o41777, uid: 0 } };
+    const [creatable] = await linuxProbe({ writable: (path) => path === "/mnt/scratch/.Trash", trashDirs })
+      .check([{ path: "/mnt/scratch/old", sizeBytes: 1 }]);
+    expect(creatable!.trash).toBe("yes");
+    const [closed] = await linuxProbe({ writable: () => false, trashDirs }).check([{ path: "/mnt/scratch/old", sizeBytes: 1 }]);
+    expect(closed!.trash).toBe("no");
   });
 
   it("ignores a shared .Trash that isn't sticky", async () => {

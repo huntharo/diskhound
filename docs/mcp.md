@@ -257,7 +257,9 @@ as moving to the Trash:
   at the top of its volume, or a volume where one can be made. On Windows,
   removable and network drives have no Recycle Bin, and an item bigger than
   the drive's Recycle Bin can hold would be deleted instead. When DiskHound
-  can't tell, it says so.
+  can't tell, it says so. If it can't read the list of volumes at all, it
+  can't tell whether another volume is mounted inside either, so it removes
+  nothing: the item can only be skipped, and the agent can ask again.
 - **A folder with another volume mounted inside it.** Neither the Trash nor
   a permanent delete takes the folder as a whole, and DiskHound never
   removes a volume. Such an item starts unticked and names the volume
@@ -273,6 +275,8 @@ and are not removed when:
 - the agent's session was revoked;
 - its role no longer allows the action;
 - the path now resolves somewhere else;
+- something else is at the path now (the file or folder was deleted and
+  made again);
 - the path is now in a protected folder.
 
 If an item's volume changed since you looked, it stays on the list with the

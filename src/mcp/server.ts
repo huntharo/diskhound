@@ -1338,6 +1338,10 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
   const queuedLine = (item: RemovalItem, canDelete: boolean): string => {
     const size = item.sizeBytes === null ? "size unknown" : bytesText(item.sizeBytes);
     const notes: string[] = [];
+    if (item.check.volumesUnknown) {
+      const why = item.check.trashWhy ?? "DiskHound couldn't read the list of volumes.";
+      return `• ${item.path} (${size}): ${why.replace(/\.$/, "")}. DiskHound removes nothing it can't check, so the user can only skip it; ask again later.`;
+    }
     if (item.check.mountsInside.length > 0) {
       const labels = item.check.mountsInside.map((mount) => `${mountLabel(item.path, mount.path)} (${mount.volume})`).join(", ");
       notes.push(`${labels} inside it is another volume, which DiskHound leaves alone; the user decides about the rest`);

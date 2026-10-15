@@ -8,6 +8,7 @@ import type { McpAgentCapability } from "../../shared/agentAccess";
 import type { RemovalAction, RemovalVolumeCheck } from "../../shared/agentRemovals";
 import { RemovalQueue } from "../removalQueue";
 import { RemovalReview, removalUnits, type RemovalReviewDeps, type SessionAccess } from "../removalReview";
+import { fileIdentity } from "../trashGuard";
 
 const NOW = Date.UTC(2026, 9, 12, 12);
 const OK: RemovalVolumeCheck = { volume: "the startup disk", trash: "yes", readOnly: false, mountsInside: [], checkedAt: NOW };
@@ -53,10 +54,7 @@ function harness(overrides: Partial<RemovalReviewDeps> = {}): Harness {
   const review = new RemovalReview({
     queue,
     check: async (items) => items.map((item) => checks.get(item.path) ?? OK),
-    canonicalPath: async (path) => {
-      FS.lstatSync(path);
-      return FS.realpathSync(path);
-    },
+    canonicalTarget: async (path) => ({ path: FS.realpathSync(path), fileId: idOf(path) }),
     protection: async () => (_requested, target) => (protectedPaths.has(target) ? "Refused: DiskHound never lets agents remove this folder." : null),
     sessions: () => (id) => sessions.get(id) ?? null,
     trashPath: remove("trash"),
@@ -67,6 +65,11 @@ function harness(overrides: Partial<RemovalReviewDeps> = {}): Harness {
     ...overrides,
   });
   return { queue, review, removed, sessions, checks, protectedPaths, stuck };
+}
+
+/** What is at `path` now, as the host records it when an agent asks. */
+function idOf(path: string): string {
+  return fileIdentity(FS.lstatSync(path, { bigint: true }));
 }
 
 function touch(...parts: string[]): string {
@@ -82,14 +85,14 @@ function folder(...parts: string[]): string {
   return path;
 }
 
-function ask(h: Harness, sessionId: string, asked: RemovalAction, items: { path: string; check?: RemovalVolumeCheck }[]) {
+function ask(h: Harness, sessionId: string, asked: RemovalAction, items: { path: string; check?: RemovalVolumeCheck; fileId?: string }[]) {
   return h.queue.add({
     sessionId,
     sessionName: h.sessions.get(sessionId)?.name ?? sessionId,
     roleName: h.sessions.get(sessionId)?.roleName ?? "?",
     asked,
     reason: null,
-    items: items.map((item) => ({ path: item.path, sizeBytes: 1000, check: item.check ?? OK })),
+    items: items.map((item) => ({ path: item.path, sizeBytes: 1000, check: item.check ?? OK, fileId: item.fileId ?? (FS.existsSync(item.path) ? idOf(item.path) : undefined) })),
   }).request;
 }
 
@@ -198,6 +201,42 @@ describe("RemovalReview.approve", () => {
       "This path changed after the agent asked, so DiskHound left it alone.",
       "Refused: DiskHound never lets agents remove this folder.",
     ]);
+  });
+
+  it("leaves alone a file made again at the path after the agent asked", async () => {
+    const h = harness();
+    const a = touch("a");
+    const [item] = ask(h, "s-op", "trash", [{ path: a }]).items;
+    FS.rmSync(a);
+    touch("a");
+    const { result } = await h.review.approve([{ itemId: item!.id, run: true, action: "trash" }]);
+    expect(h.removed).toEqual([]);
+    expect(FS.existsSync(a)).toBe(true);
+    expect(result.gone).toBe(1);
+    expect(h.queue.find(item!.id)?.item).toMatchObject({
+      status: "gone",
+      outcome: { message: "Already gone. Something else is at this path now, and DiskHound left it alone." },
+    });
+  });
+
+  it("removes nothing while it can't read the volumes, and offers it again once it can", async () => {
+    const h = harness();
+    const a = touch("a");
+    const b = touch("b");
+    const unknown: RemovalVolumeCheck = { ...OK, trash: "unknown", trashWhy: "DiskHound couldn't read the list of volumes (mount failed).", volumesUnknown: true };
+    const [ia, ib] = ask(h, "s-admin", "delete", [{ path: a, check: unknown }, { path: b, check: unknown }]).items;
+    h.checks.set(a, { ...unknown, checkedAt: NOW + 1 });
+    const { result } = await h.review.approve([
+      { itemId: ia!.id, run: true, action: "delete" },
+      { itemId: ib!.id, run: true, action: "delete" },
+    ]);
+    expect(h.removed).toEqual([]);
+    // Still unreadable: refused with the reason.
+    expect(h.queue.find(ia!.id)?.item).toMatchObject({ status: "refused", outcome: { message: expect.stringContaining("It removes nothing it can't check") } });
+    // Readable now: back on the list with the new facts for the user to look at.
+    expect(result.changed).toBe(1);
+    expect(h.queue.find(ib!.id)?.item).toMatchObject({ status: "waiting", check: { trash: "yes" } });
+    expect(h.queue.find(ib!.id)?.item.check.volumesUnknown).toBeUndefined();
   });
 
   it("leaves an item waiting with the new facts when its volume changed since the user looked", async () => {

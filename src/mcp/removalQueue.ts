@@ -1,15 +1,15 @@
 import { randomUUID } from "node:crypto";
 import * as FS from "node:fs";
-import * as FSP from "node:fs/promises";
 
-import type {
-  AgentRemovalList,
-  RemovalAction,
-  RemovalItem,
-  RemovalItemStatus,
-  RemovalOutcome,
-  RemovalRequest,
-  RemovalVolumeCheck,
+import {
+  sameVolumeFacts,
+  type AgentRemovalList,
+  type RemovalAction,
+  type RemovalItem,
+  type RemovalItemStatus,
+  type RemovalOutcome,
+  type RemovalRequest,
+  type RemovalVolumeCheck,
 } from "../shared/agentRemovals";
 
 /**
@@ -20,7 +20,9 @@ import type {
  * agent's connection and a restart. It is written only when something
  * changes (a request arrives, the user decides, a re-check finds a
  * volume changed), debounced so a burst of requests is one write, and
- * flushed at quit. An approval holds writes until it finishes, so it
+ * flushed at quit. Writes are synchronous: quit flushes from Electron's
+ * synchronous before-quit, where an async write could be cut off, and
+ * the file stays small. An approval holds writes until it finishes, so it
  * costs one write however many items it runs. Decided requests stay a
  * week so agents can read what happened, then drop out at the next
  * write. See removalQueue.ioBudget.test.ts for the counts.
@@ -48,7 +50,8 @@ export interface QueueInput {
   roleName: string;
   asked: RemovalAction;
   reason: string | null;
-  items: { path: string; sizeBytes: number | null; check: RemovalVolumeCheck }[];
+  /** `fileId`: what is at the path now (trashGuard's fileIdentity). */
+  items: { path: string; sizeBytes: number | null; check: RemovalVolumeCheck; fileId?: string }[];
 }
 
 export class RemovalQueueFullError extends Error {}
@@ -68,6 +71,7 @@ function parseCheck(value: unknown): RemovalVolumeCheck | null {
     typeof check.readOnly !== "boolean" ||
     !Array.isArray(check.mountsInside) ||
     !check.mountsInside.every((mount) => mount && isText(mount.path, 4096) && isText(mount.volume, 4096)) ||
+    !(check.volumesUnknown === undefined || typeof check.volumesUnknown === "boolean") ||
     !isTime(check.checkedAt)
   ) {
     return null;
@@ -81,7 +85,7 @@ function parseItem(value: unknown): RemovalItem | null {
   const check = parseCheck(item.check);
   if (
     !isText(item.id, 64) || !isText(item.path, 4096) || !isAction(item.asked) || !isSize(item.sizeBytes) ||
-    !check || !STATUSES.includes(item.status as RemovalItemStatus)
+    !check || !STATUSES.includes(item.status as RemovalItemStatus) || !(item.fileId === undefined || isText(item.fileId, 100))
   ) {
     return null;
   }
@@ -129,7 +133,6 @@ export class RemovalQueue {
   private dirty = false;
   private holds = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
-  private writing: Promise<void> = Promise.resolve();
 
   constructor(
     readonly filePath: string,
@@ -256,7 +259,12 @@ export class RemovalQueue {
       found.request.items = found.request.items.filter((item) => item.id !== id);
       this.index.delete(id);
       this.waitingByPath.delete(this.pathKey(found.request.sessionId, found.item.path));
-      if (found.request.items.length === 0) emptied.add(found.request);
+      if (found.request.items.length === 0) {
+        emptied.add(found.request);
+      } else if (found.request.decidedAt === null && found.request.items.every((item) => item.status !== "waiting")) {
+        // Its last waiting item moved here, so it is decided, and pruned in time like any other.
+        found.request.decidedAt = Math.max(...found.request.items.map((item) => item.outcome?.at ?? 0));
+      }
     }
     if (emptied.size > 0) this.requests = this.requests!.filter((request) => !emptied.has(request));
     const request: RemovalRequest = {
@@ -274,6 +282,7 @@ export class RemovalQueue {
         asked: input.asked,
         sizeBytes: item.sizeBytes,
         check: item.check,
+        ...(item.fileId === undefined ? {} : { fileId: item.fileId }),
         status: "waiting",
       })),
     };
@@ -283,7 +292,11 @@ export class RemovalQueue {
     return { request: copyRequest(request), replaced: again.size };
   }
 
-  /** The waiting request `input` repeats exactly (same items, action and reason), if any. */
+  /**
+   * The waiting request `input` repeats exactly, if any: same items,
+   * action and reason, and the same volume facts and file at each path.
+   * Anything new replaces it, so the list never keeps stale facts.
+   */
   private repeatOf(input: QueueInput, again: ReadonlySet<string>): RemovalRequest | null {
     if (again.size === 0 || again.size !== input.items.length) return null;
     const [first] = again;
@@ -291,7 +304,13 @@ export class RemovalQueue {
     const same = request.items.length === again.size &&
       request.items.every((item) => item.status === "waiting" && again.has(item.id)) &&
       request.asked === input.asked && request.reason === input.reason;
-    return same ? request : null;
+    if (!same) return null;
+    const stored = new Map(request.items.map((item) => [this.key(item.path), item]));
+    const unchanged = input.items.every((item) => {
+      const was = stored.get(this.key(item.path));
+      return was !== undefined && was.fileId === item.fileId && sameVolumeFacts(was.check, item.check);
+    });
+    return unchanged ? request : null;
   }
 
   /** Mark items as being removed (or not). In memory only. */
@@ -341,26 +360,31 @@ export class RemovalQueue {
 
   /** Write now if anything changed. */
   async flush(): Promise<void> {
+    this.flushSync();
+  }
+
+  /**
+   * Write now if anything changed, before returning. Quit calls this
+   * from Electron's synchronous before-quit. The file is under 500 KB
+   * with a busy week of history, a few milliseconds to write.
+   */
+  flushSync(): void {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    const next = this.writing.then(async () => {
-      if (!this.dirty || !this.requests) return;
-      this.dirty = false;
-      this.prune();
-      const file: RemovalsFile = { protocol: REMOVALS_PROTOCOL, version: FILE_VERSION, requests: this.requests };
-      const temporary = `${this.filePath}.${process.pid}.tmp`;
-      try {
-        await FSP.writeFile(temporary, `${JSON.stringify(file)}\n`, { encoding: "utf8", mode: 0o600 });
-        await FSP.rename(temporary, this.filePath);
-      } catch (error) {
-        this.dirty = true;
-        this.options.log?.(`couldn't write ${this.filePath}: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    });
-    this.writing = next.catch(() => undefined);
-    return next;
+    if (!this.dirty || !this.requests) return;
+    this.dirty = false;
+    this.prune();
+    const file: RemovalsFile = { protocol: REMOVALS_PROTOCOL, version: FILE_VERSION, requests: this.requests };
+    const temporary = `${this.filePath}.${process.pid}.tmp`;
+    try {
+      FS.writeFileSync(temporary, `${JSON.stringify(file)}\n`, { encoding: "utf8", mode: 0o600 });
+      FS.renameSync(temporary, this.filePath);
+    } catch (error) {
+      this.dirty = true;
+      this.options.log?.(`couldn't write ${this.filePath}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   dispose(): Promise<void> {
