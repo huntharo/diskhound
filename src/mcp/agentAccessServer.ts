@@ -11,6 +11,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { AGENT_ACCESS_HOST, AGENT_ACCESS_PORT, MCP_AGENT_CAPABILITIES, agentAccessMcpUrl } from "../shared/agentAccess";
 import { McpPolicyStore, PolicyFileAuthorizer, type McpAuthorization } from "./accessPolicy";
 import { AgentOAuth, type RequestConsent } from "./agentOAuth";
+import { ensureListenerKey, listenerProof, PROOF_NONCE_PATTERN } from "./listenerProof";
 import type { AgentActivitySink, DiskhoundAgentBackend } from "./backend";
 import type { AgentSecuritySink } from "./securityLog";
 import { createDiskhoundMcpServer, TOOL_CAPABILITIES, toolActionText } from "./server";
@@ -30,6 +31,8 @@ export interface AgentAccessServerOptions {
   skills: SkillCatalog;
   policy: McpPolicyStore;
   clientsFile: string;
+  /** 32-byte file the stdio helper reads before sending a saved token. */
+  listenerKeyFile: string;
   requestConsent: RequestConsent;
   onChanged: () => void;
   /** Tests pass 0 for an ephemeral port. */
@@ -57,6 +60,7 @@ const MAX_PENDING_PER_TOKEN = 16;
 export class AgentAccessServer {
   private http: HttpServer | undefined;
   private oauth: AgentOAuth | undefined;
+  private listenerKey: Buffer | undefined;
   private boundPort: number;
   private readonly pendingByToken = new Map<string, number>();
   /** One per in-flight /mcp request; stop() aborts them all. */
@@ -78,6 +82,7 @@ export class AgentAccessServer {
 
   async start(): Promise<void> {
     if (this.http) return;
+    this.listenerKey = ensureListenerKey(this.options.listenerKeyFile);
     const app = express();
     app.disable("x-powered-by");
     app.use((req, res, next) => {
@@ -117,6 +122,16 @@ export class AgentAccessServer {
       });
       this.oauth = oauth;
 
+      // Unauthenticated on purpose: the proof is an HMAC of a nonce the
+      // helper just minted. The key stays in the user's private file.
+      app.get("/diskhound/listener-proof", (req, res) => {
+        const nonce = typeof req.query.nonce === "string" ? req.query.nonce : "";
+        if (!this.listenerKey || !PROOF_NONCE_PATTERN.test(nonce)) {
+          res.status(400).json({ error: "invalid_nonce" });
+          return;
+        }
+        res.json({ proof: listenerProof(this.listenerKey, nonce) });
+      });
       app.get("/authorize/status", (req, res) => {
         oauth.status(typeof req.query.id === "string" ? req.query.id : "", res);
       });

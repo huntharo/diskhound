@@ -56,6 +56,9 @@ fn bridge(origin: String) -> Bridge {
     bridge.token = Some(format!("dhmcp_{}", "a".repeat(43)));
     // Most tests talk to a one-response peer; identity has its own test.
     bridge.verified = true;
+    // Never the user's real listener key. Identity tests set their own file.
+    bridge.listener_key_path =
+        Some(std::env::temp_dir().join("diskhound-missing-listener-key/mcp-listener-key"));
     bridge
 }
 
@@ -333,18 +336,56 @@ async fn a_token_is_never_sent_to_another_app_on_the_port() {
 
 #[tokio::test]
 async fn initialize_answers_at_once_while_the_user_decides() {
+    let directory =
+        std::env::temp_dir().join(format!("diskhound-listener-init-{}", random().unwrap()));
+    let key_path = directory.join("mcp-listener-key");
+    let key = vec![0x33u8; 32];
+    write_private_key(&key_path, &key);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
-    let metadata =
-        json!({"resource":format!("{origin}/mcp"),"resource_name":"DiskHound"}).to_string();
+    let origin_for_peer = origin.clone();
     let served = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let request = read_request(&mut socket).await;
-        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{metadata}", metadata.len()).as_bytes()).await.unwrap();
-        request
+        let mut requests = Vec::new();
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_request(&mut socket).await;
+            let target = request
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .nth(1)
+                .unwrap()
+                .to_owned();
+            requests.push(request);
+            let url = Url::parse(&format!("http://127.0.0.1{target}")).unwrap();
+            let body = if url.path() == "/diskhound/listener-proof" {
+                let nonce = url
+                    .query_pairs()
+                    .find(|(name, _)| name == "nonce")
+                    .unwrap()
+                    .1;
+                json!({"proof": hex_encode(&hmac_sha256(&key, nonce.as_bytes()))}).to_string()
+            } else {
+                json!({"resource": format!("{origin_for_peer}/mcp"), "resource_name": "DiskHound"})
+                    .to_string()
+            };
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+        requests
     });
     let mut client = bridge(origin);
     client.verified = false;
+    client.listener_key_path = Some(key_path);
     client.token = None;
     let started = Instant::now();
     let (reply, notes) = client
@@ -367,7 +408,11 @@ async fn initialize_answers_at_once_while_the_user_decides() {
     assert_eq!(client.client_name, "Claude Code");
     // The approval waits a moment, so a health check never opens it.
     assert!(client.approval.is_none() && client.approval_due.is_some());
-    assert!(served.await.unwrap().starts_with("GET /.well-known/"));
+    let requests = served.await.unwrap();
+    assert!(requests[0].starts_with("GET /.well-known/"));
+    assert!(requests[1].starts_with("GET /diskhound/listener-proof?nonce="));
+    assert!(!requests[0].to_lowercase().contains("authorization:"));
+    std::fs::remove_dir_all(directory).unwrap();
     // Before approval: one placeholder tool, empty lists, no network.
     let (prompts, _) = client
         .handle(&json!({"jsonrpc":"2.0","id":2,"method":"prompts/list"}))
@@ -576,5 +621,169 @@ async fn each_client_keeps_its_own_approval_and_lock() {
             .is_err()
     );
     drop((waiting, other));
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn listener_proof_matches_hmac_sha256() {
+    // RFC 4231 test case 1.
+    let key = [0x0bu8; 20];
+    let mac = hmac_sha256(&key, b"Hi There");
+    assert_eq!(
+        hex_encode(&mac),
+        "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_listener_key_other_users_can_read_is_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory =
+        std::env::temp_dir().join(format!("diskhound-listener-open-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir(&directory).unwrap();
+    let path = directory.join("mcp-listener-key");
+    std::fs::write(&path, [7u8; 32]).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(load_listener_key(&path).unwrap_err(), NOT_DISKHOUND);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+fn write_private_key(path: &std::path::Path, key: &[u8]) {
+    use std::io::Write;
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path).unwrap().write_all(key).unwrap();
+}
+
+#[tokio::test]
+async fn a_saved_token_is_not_sent_when_the_listener_cannot_prove_the_key() {
+    let directory =
+        std::env::temp_dir().join(format!("diskhound-listener-impostor-{}", random().unwrap()));
+    let key_path = directory.join("mcp-listener-key");
+    let key = vec![0x11u8; 32];
+    write_private_key(&key_path, &key);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let metadata =
+        json!({"resource": format!("{origin}/mcp"), "resource_name": "DiskHound"}).to_string();
+    let bogus = json!({"proof": "ab".repeat(32)}).to_string();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = seen.clone();
+    let served = tokio::spawn(async move {
+        for body in [metadata, bogus] {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_request(&mut socket).await;
+            record.lock().unwrap().push(request);
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+    });
+
+    let mut client = bridge(origin);
+    client.verified = false;
+    client.listener_key_path = Some(key_path);
+    assert_eq!(client.verify().await.unwrap_err(), NOT_DISKHOUND);
+    served.await.unwrap();
+    let requests = seen.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].starts_with("GET /.well-known/oauth-protected-resource/mcp"));
+    assert!(requests[1].starts_with("GET /diskhound/listener-proof?nonce="));
+    for request in &requests {
+        assert!(!request.to_lowercase().contains("authorization:"));
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn a_saved_token_is_sent_only_after_the_listener_proves_the_key() {
+    let directory =
+        std::env::temp_dir().join(format!("diskhound-listener-real-{}", random().unwrap()));
+    let key_path = directory.join("mcp-listener-key");
+    let key = vec![0x22u8; 32];
+    write_private_key(&key_path, &key);
+    let key_for_peer = key.clone();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let origin_for_peer = origin.clone();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = seen.clone();
+    let served = tokio::spawn(async move {
+        for _ in 0..3 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_request(&mut socket).await;
+            let target = request
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .nth(1)
+                .unwrap()
+                .to_owned();
+            record.lock().unwrap().push(request);
+            let url = Url::parse(&format!("http://127.0.0.1{target}")).unwrap();
+            let body = if url.path() == "/.well-known/oauth-protected-resource/mcp" {
+                json!({"resource": format!("{origin_for_peer}/mcp"), "resource_name": "DiskHound"})
+                    .to_string()
+            } else if url.path() == "/diskhound/listener-proof" {
+                let nonce = url
+                    .query_pairs()
+                    .find(|(name, _)| name == "nonce")
+                    .unwrap()
+                    .1;
+                json!({"proof": hex_encode(&hmac_sha256(&key_for_peer, nonce.as_bytes()))})
+                    .to_string()
+            } else {
+                assert_eq!(url.path(), "/mcp");
+                json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18"}})
+                    .to_string()
+            };
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+    });
+
+    let mut client = bridge(origin);
+    client.verified = false;
+    client.listener_key_path = Some(key_path);
+    let (reply, _) = client
+        .handle(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"codex-mcp-client","title":"Codex"}}}))
+        .await
+        .unwrap();
+    assert_eq!(reply.unwrap()["result"]["protocolVersion"], "2025-06-18");
+    served.await.unwrap();
+    let requests = seen.lock().unwrap().clone();
+    assert_eq!(requests.len(), 3);
+    assert!(!requests[0].to_lowercase().contains("authorization:"));
+    assert!(!requests[1].to_lowercase().contains("authorization:"));
+    assert!(requests[2]
+        .to_lowercase()
+        .contains("authorization: bearer dhmcp_"));
     std::fs::remove_dir_all(directory).unwrap();
 }

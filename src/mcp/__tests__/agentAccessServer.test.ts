@@ -21,6 +21,7 @@ import { AgentAccessServer, allowedOrigin, isLoopbackAddress, withDefaultArgumen
 import { AgentAccessService } from "../agentAccessService";
 import type { TrashRequest } from "../backend";
 import { ConsentBroker, type ConsentSender, type ConsentWindow } from "../consentBroker";
+import { listenerProof } from "../listenerProof";
 import { loadSkillCatalog } from "../skills";
 import { createFakeBackend, RecordingActivity, RecordingSecurity, SKILLS_DIR, type FakeBackend } from "./fakeBackend";
 
@@ -91,6 +92,7 @@ beforeEach(async () => {
     skills: SKILLS,
     policy,
     clientsFile: Path.join(tempDir, "mcp-oauth-clients.json"),
+    listenerKeyFile: Path.join(tempDir, "mcp-listener-key"),
     requestConsent: broker.request,
     onChanged,
     port: 0,
@@ -306,6 +308,7 @@ describe("AgentAccessServer basics", () => {
       skills: SKILLS,
       policy,
       clientsFile: Path.join(tempDir, "mcp-oauth-clients.json"),
+      listenerKeyFile: Path.join(tempDir, "mcp-listener-key"),
       requestConsent: broker.request,
       onChanged,
       port: 0,
@@ -327,6 +330,7 @@ describe("AgentAccessService", () => {
         skills: SKILLS,
         policy,
         clientsFile: Path.join(tempDir, "mcp-oauth-clients.json"),
+        listenerKeyFile: Path.join(tempDir, "mcp-listener-key"),
         requestConsent: broker.request,
         onChanged,
         port,
@@ -470,6 +474,20 @@ describe("OAuth metadata", () => {
       scopes_supported: [...MCP_AGENT_CAPABILITIES],
       resource_name: "DiskHound",
     });
+  });
+
+  it("proves it holds the listener key without returning the key", async () => {
+    const nonce = "a".repeat(43);
+    const missing = await fetch(`${base}/diskhound/listener-proof`);
+    expect(missing.status).toBe(400);
+    const response = await fetch(`${base}/diskhound/listener-proof?nonce=${nonce}`);
+    expect(response.status).toBe(200);
+    const key = FS.readFileSync(Path.join(tempDir, "mcp-listener-key"));
+    expect(key).toHaveLength(32);
+    expect(await response.json()).toEqual({ proof: listenerProof(key, nonce) });
+    if (process.platform !== "win32") {
+      expect(FS.statSync(Path.join(tempDir, "mcp-listener-key")).mode & 0o777).toBe(0o600);
+    }
   });
 
   it("serves authorization server metadata for a public-client, PKCE-only server", async () => {

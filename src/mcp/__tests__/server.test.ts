@@ -501,6 +501,13 @@ describe("diskhound_move_to_trash", () => {
     expect(text(result)).toContain("Trash");
   });
 
+  it("asks the user to confirm a path whose filename ends with a space", async () => {
+    const { client, backend } = await connect({ roleId: "builtin.operator" });
+    const path = `${ROOT}/Downloads/report.txt `;
+    await call(client, "diskhound_move_to_trash", { paths: [path] });
+    expect(backend.confirmAndTrash).toHaveBeenCalledWith(expect.objectContaining({ paths: [path] }));
+  });
+
   it("reports sizes in the units the user picked, so they match the window", async () => {
     const backend = createFakeBackend();
     Object.assign(backend, { sizeUnitBase: () => 1000 as const });
@@ -587,6 +594,13 @@ describe("diskhound_delete_permanently", () => {
     expect(backend.confirmAndTrash).not.toHaveBeenCalled();
     expect(structured(result)).toMatchObject({ confirmed: true, deletedCount: 1 });
     expect(text(result)).toMatch(/^Deleted 1 of 1 item \(.+\) permanently\./);
+  });
+
+  it("asks the user to confirm a path whose filename ends with a space", async () => {
+    const { client, backend } = await connect({ roleId: "builtin.admin" });
+    const path = `${ROOT}/Downloads/report.txt `;
+    await call(client, "diskhound_delete_permanently", { paths: [path] });
+    expect(backend.confirmAndDelete).toHaveBeenCalledWith(expect.objectContaining({ paths: [path] }));
   });
 
   it("reports a declined confirmation without claiming anything was deleted", async () => {

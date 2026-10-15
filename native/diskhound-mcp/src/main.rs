@@ -161,6 +161,87 @@ const APPROVAL_WAIT: Duration = Duration::from_secs(30);
 /// up on a request after 60 s (the MCP SDK's default).
 const LIST_WAIT: Duration = Duration::from_secs(45);
 const NOT_DISKHOUND: &str = "Something other than DiskHound is listening on DiskHound's port. Ask the user to quit that program and keep DiskHound open with Settings > AI Agents turned on, then call diskhound_status again.";
+
+fn listener_key_path() -> Result<std::path::PathBuf> {
+    Ok(dirs::data_local_dir()
+        .ok_or(NOT_DISKHOUND)?
+        .join("DiskHound")
+        .join("mcp-listener-key"))
+}
+
+/// The key file must be a regular 32-byte file private to this user.
+/// A symlink or a looser mode is another account's chance to learn it.
+fn load_listener_key(path: &std::path::Path) -> Result<Vec<u8>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let info = std::fs::symlink_metadata(path).map_err(|_| NOT_DISKHOUND)?;
+        if !info.is_file()
+            || info.uid() != unsafe { libc::geteuid() }
+            || info.mode() & 0o777 != 0o600
+        {
+            return Err(NOT_DISKHOUND);
+        }
+    }
+    #[cfg(windows)]
+    {
+        let info = std::fs::symlink_metadata(path).map_err(|_| NOT_DISKHOUND)?;
+        if !info.is_file() || info.file_type().is_symlink() {
+            return Err(NOT_DISKHOUND);
+        }
+    }
+    let bytes = std::fs::read(path).map_err(|_| NOT_DISKHOUND)?;
+    if bytes.len() != 32 {
+        return Err(NOT_DISKHOUND);
+    }
+    Ok(bytes)
+}
+
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    const BLOCK: usize = 64;
+    let mut padded = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        padded[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        padded[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0u8; BLOCK];
+    let mut opad = [0u8; BLOCK];
+    for i in 0..BLOCK {
+        ipad[i] = padded[i] ^ 0x36;
+        opad[i] = padded[i] ^ 0x5c;
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(message);
+    let inner = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner);
+    outer.finalize().into()
+}
+
+fn proof_matches(key: &[u8], nonce: &str, proof: &str) -> bool {
+    if proof.len() != 64 || !proof.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return false;
+    }
+    let expected = hex_encode(&hmac_sha256(key, nonce.as_bytes()));
+    let mut diff = 0u8;
+    for (left, right) in expected.bytes().zip(proof.bytes()) {
+        diff |= left ^ right;
+    }
+    diff == 0
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0xf) as usize] as char);
+    }
+    out
+}
 const OFFLINE: &str = "DiskHound isn't reachable. Ask the user to open DiskHound and turn on Settings > AI Agents > Allow local AI agents, then call diskhound_status again.";
 const DENIED: &str =
     "The user denied this connection in DiskHound. Reconnect this MCP server to ask again.";
@@ -202,8 +283,10 @@ struct Bridge {
     version: String,
     /// What the client called itself in `initialize`; names the approval.
     client_name: String,
-    /// DiskHound (not another app) answered on the port.
+    /// DiskHound proved it holds the listener key, not just the public name.
     verified: bool,
+    /// Tests point this at a temp file. None uses the user's data directory.
+    listener_key_path: Option<std::path::PathBuf>,
     /// The background approval, once started.
     approval: Option<tokio::sync::watch::Receiver<Approval>>,
     /// When to start the approval if nothing asks for it sooner.
@@ -387,6 +470,7 @@ impl Bridge {
             version: "2025-03-26".into(),
             client_name: "MCP client".into(),
             verified: false,
+            listener_key_path: None,
             approval: None,
             approval_due: None,
             approval_applied: false,
@@ -400,6 +484,11 @@ impl Bridge {
     }
 
     /// Make sure DiskHound owns the port before sending it a token or a login.
+    ///
+    /// The public metadata is not enough: another account can bind the port
+    /// and copy `resource_name`. The listener key is mode 0600 in the user's
+    /// data directory. DiskHound returns HMAC-SHA256(key, nonce) for a nonce
+    /// this process just minted, and the key itself is never sent.
     async fn verify(&mut self) -> Result<()> {
         if self.verified {
             return Ok(());
@@ -420,6 +509,29 @@ impl Bridge {
         if metadata["resource_name"] != "DiskHound"
             || metadata["resource"] != format!("{}/mcp", self.origin)
         {
+            return Err(NOT_DISKHOUND);
+        }
+        let path = match &self.listener_key_path {
+            Some(path) => path.clone(),
+            None => listener_key_path()?,
+        };
+        let key = load_listener_key(&path)?;
+        let nonce = random()?;
+        let proof_response = self
+            .http
+            .get(format!(
+                "{}/diskhound/listener-proof?nonce={nonce}",
+                self.origin
+            ))
+            .send()
+            .await
+            .map_err(|_| UNAVAILABLE)?;
+        if !proof_response.status().is_success() {
+            return Err(NOT_DISKHOUND);
+        }
+        let payload = body(proof_response).await.map_err(|_| NOT_DISKHOUND)?;
+        let proof = payload["proof"].as_str().unwrap_or("");
+        if !proof_matches(&key, &nonce, proof) {
             return Err(NOT_DISKHOUND);
         }
         self.verified = true;
