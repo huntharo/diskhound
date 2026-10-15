@@ -12,6 +12,21 @@ import { openTab, scanFolderFromPicker } from "./fixtures/steps";
 
 const executable = join(process.cwd(), "native", "diskhound-mcp", "target", "debug", process.platform === "win32" ? "diskhound-mcp.exe" : "diskhound-mcp");
 
+/**
+ * Linux E2E points DiskHound at a temp HOME so it does not write the
+ * developer's real data directory. The listener key lives there. The
+ * helper has to see that same HOME, or it never asks for approval.
+ */
+function helperEnv(handle: AppHandle): Record<string, string> | undefined {
+  if (process.platform !== "linux") return undefined;
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) env[key] = value;
+  }
+  env.HOME = join(handle.dataDir, "home");
+  return env;
+}
+
 interface ConnectOptions {
   /** clientInfo.name: "claude-code", or Claude Desktop's extension name. */
   name?: string;
@@ -34,7 +49,7 @@ async function connect(handle: AppHandle, decision: "Approve" | "Deny", options:
     toolsChanged += 1;
   });
   // Never touch the developer's real OS credential store.
-  const transport = new StdioClientTransport({ command, args: ["--ephemeral", ...args], stderr: "pipe" });
+  const transport = new StdioClientTransport({ command, args: ["--ephemeral", ...args], env: helperEnv(handle), stderr: "pipe" });
   let diagnostics = "";
   transport.stderr?.on("data", (chunk) => { diagnostics += chunk.toString(); });
   const opened = handle.app.waitForEvent("window", {
@@ -171,7 +186,7 @@ test("stdio EOF exits while approval is pending, and withdraws it", async ({ lau
   const handle = await launch({ settings: { agents: { enabled: true } } });
   await waitForAgentServer(handle);
   const opened = handle.app.waitForEvent("window");
-  const child = spawn(executable, ["--ephemeral", "--port", String(handle.agentPort)], { stdio: "pipe" });
+  const child = spawn(executable, ["--ephemeral", "--port", String(handle.agentPort)], { stdio: "pipe", env: helperEnv(handle) });
   let stdout = "";
   child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
   child.stderr.resume();
