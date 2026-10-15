@@ -60,7 +60,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         if: runner.os == 'Windows'
         with:
-          workspaces: native/diskhound-native-scanner
+          workspaces: |
+            native/diskhound-native-scanner
+            native/diskhound-mcp
 
       - name: Build native scanner for USN integration
         if: runner.os == 'Windows'
@@ -84,7 +86,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: native/diskhound-native-scanner
+          workspaces: |
+            native/diskhound-native-scanner
+            native/diskhound-mcp
 
       - name: Cargo check
         run: cargo check --manifest-path native/diskhound-native-scanner/Cargo.toml
@@ -96,6 +100,12 @@ jobs:
         env:
           DISKHOUND_REQUIRE_USN_TESTS: ${{ runner.os == 'Windows' && '1' || '0' }}
         run: cargo test --manifest-path native/diskhound-native-scanner/Cargo.toml
+
+      - name: Test MCP stdio bridge
+        run: cargo test --locked --manifest-path native/diskhound-mcp/Cargo.toml
+
+      - name: Build MCP stdio bridge
+        run: cargo build --locked --release --manifest-path native/diskhound-mcp/Cargo.toml
 
       - name: Cargo build (release)
         run: cargo build --release --manifest-path native/diskhound-native-scanner/Cargo.toml
@@ -129,7 +139,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: native/diskhound-native-scanner
+          workspaces: |
+            native/diskhound-native-scanner
+            native/diskhound-mcp
 
       - name: Install dependencies
         run: bun install --frozen-lockfile

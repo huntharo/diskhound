@@ -112,8 +112,10 @@ function current(): HarnessState {
 }
 
 /** What a handler sees as `event`: sent from the main window. */
-function ipcEvent(harness: HarnessState): { sender: unknown } {
-  return { sender: harness.windows[0]?.webContents ?? null };
+/** An event from the main window's top frame, as Electron sends it. */
+function ipcEvent(harness: HarnessState): { sender: unknown; senderFrame: unknown } {
+  const sender = harness.windows[0]?.webContents ?? null;
+  return { sender, senderFrame: sender?.mainFrame ?? null };
 }
 
 async function callHandler<T>(harness: HarnessState, channel: string, args: unknown[]): Promise<T> {
@@ -141,6 +143,8 @@ function lenient<T extends object>(target: T): T {
 }
 
 class FakeWebContents extends EventEmitter {
+  readonly mainFrame = { routingId: 1 };
+
   constructor(readonly id: number) {
     super();
   }
