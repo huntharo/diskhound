@@ -10,9 +10,11 @@ import { MiddleEllipsis } from "./MiddleEllipsis";
 interface Props {
   onScanDrive: (drivePath: string) => void;
   onScanFolder: (folderPath: string) => void;
+  /** Settings → AI Agents → Connect: the first screen is where new users look. */
+  onConnectAgent?: () => void;
 }
 
-export function DiskPicker({ onScanDrive, onScanFolder }: Props) {
+export function DiskPicker({ onScanDrive, onScanFolder, onConnectAgent }: Props) {
   const { drives, loading } = useLiveDiskSpace();
   const [recents, setRecents] = useState<RecentScan[]>([]);
   const [recentsLoading, setRecentsLoading] = useState(true);
@@ -109,8 +111,14 @@ export function DiskPicker({ onScanDrive, onScanFolder }: Props) {
           </>
         )}
 
-        {/* Footer spacing */}
-        <div style={{ height: 4 }} />
+        {onConnectAgent ? (
+          <div className="picker-agent-hint">
+            <span>Using Claude or Codex?</span>
+            <button className="picker-agent-link" onClick={onConnectAgent}>Connect an AI agent ›</button>
+          </div>
+        ) : (
+          <div style={{ height: 4 }} />
+        )}
       </div>
     </div>
   );
