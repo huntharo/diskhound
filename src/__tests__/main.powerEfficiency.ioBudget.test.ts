@@ -93,7 +93,9 @@ describe.skipIf(process.platform === "win32")("a scan and the Power Efficiency s
     FS.rmSync(scratch, { recursive: true, force: true });
   });
 
-  const spawns = () => (FS.existsSync(log) ? FS.readFileSync(log, "utf8").trim().split("\n") : [])
+  // The shell opens the log before writing, and a read may catch a partial
+  // write. Only a newline-terminated record represents a complete command.
+  const spawns = () => (FS.existsSync(log) ? FS.readFileSync(log, "utf8").split("\n").slice(0, -1) : [])
     .map((line) => {
       const [pid, ...args] = line.split(" ");
       const at = args.indexOf("--workers");
@@ -115,6 +117,21 @@ describe.skipIf(process.platform === "win32")("a scan and the Power Efficiency s
       return false;
     }
   };
+
+  it("waits for complete spawn records when the shell has only opened or partly written the log", () => {
+    try {
+      FS.writeFileSync(log, "");
+      expect(spawns()).toEqual([]);
+      FS.writeFileSync(log, "123 --root /fixture --work");
+      expect(spawns()).toEqual([]);
+      FS.appendFileSync(log, "ers 2\n456 --root /fixture --workers");
+      expect(spawns()).toEqual([{ pid: 123, workers: 2 }]);
+      FS.appendFileSync(log, " 4\n");
+      expect(spawns()).toEqual([{ pid: 123, workers: 2 }, { pid: 456, workers: 4 }]);
+    } finally {
+      FS.rmSync(log, { force: true });
+    }
+  });
 
   it("leaves a running scan alone and gives the next one the new workers", async () => {
     const root = Path.join(scratch, "root");
