@@ -268,3 +268,25 @@ describe("Dev Artifacts worker heap", () => {
     }
   });
 });
+
+it("full diff progress does not settle or terminate either worker request", async () => {
+  const progress = { phase: "sorting" as const, fraction: 0.25, completed: 100, total: 220 };
+  const path = await fakeWorker([
+    reply({ type: "progress", progress }),
+    `setTimeout(() => { ${reply({ type: "result", result: diff })} }, 20);`,
+  ].join("\n"));
+  const seen: unknown[] = [];
+  expect(await runFullDiffWorker({ baselineId: "baseline", currentId: "current", baselinePath: "/unused/a", currentPath: "/unused/b" },
+    { workerPath: path, onProgress: (value) => seen.push(value) })).toEqual(diff);
+  expect(seen).toEqual([progress]);
+
+  const sorted = { exists: true, records: 42, runs: ["/unused/run"] };
+  const sortPath = await fakeWorker([
+    reply({ type: "sort-progress", bytesRead: 100 }),
+    `setTimeout(() => { ${reply({ type: "sorted", sorted })} }, 20);`,
+  ].join("\n"));
+  const bytes: number[] = [];
+  expect(await runFullDiffSortWorker({ indexPath: "/unused/a", runDir: "/unused/runs", caseSensitive: true, sortChunkRecords: 10 },
+    { workerPath: sortPath, onSortProgress: (value) => bytes.push(value) })).toEqual(sorted);
+  expect(bytes).toEqual([100]);
+});
