@@ -598,6 +598,7 @@ pub fn plan_for(root: &Path) -> PrunePlan {
         other_mounts: foreign_mount_points(&mounts, &root),
         duplicate_mounts: duplicate_mount_paths(&mounts, &root),
         firmlink_twins: HashSet::new(),
+        mac_metadata_volume: None,
     }
 }
 
