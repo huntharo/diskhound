@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 
 import type { Locator, Page } from "@playwright/test";
 
+import { callTool, connectAgent, resultText, signIn, turnOnAgents } from "./fixtures/agent";
 import { expect, test } from "./fixtures/electron-app";
 import { openTab, scanFolderFromPicker } from "./fixtures/steps";
 
@@ -226,4 +227,57 @@ test.describe("APFS clones", () => {
       + "up to 33.6 MB if no copy is left elsewhere.",
     );
   });
+});
+
+test("an agent measures what removing a set frees, counting shared blocks once", async ({ launch }, testInfo) => {
+  test.skip(process.platform === "win32", "Windows has no measure tool; its scans count each file once");
+  // Two worktrees share a file with each other, and the second one also
+  // shares a file with a store outside the set. On macOS the shared
+  // files are APFS clones; elsewhere they are hardlinks.
+  const share = process.platform === "darwin" ? cloneFile : linkSync;
+  const root = testInfo.outputPath("tree");
+  const one = join(root, "wt", "one");
+  const two = join(root, "wt", "two");
+  const store = join(root, "store");
+  for (const dir of [one, two, store]) mkdirSync(dir, { recursive: true });
+  writeFileSync(join(one, "shared.bin"), randomBytes(DATA_BYTES));
+  share(join(one, "shared.bin"), join(two, "shared.bin"));
+  writeFileSync(join(one, "own.bin"), randomBytes(OTHER_BYTES));
+  writeFileSync(join(store, "held.bin"), randomBytes(OTHER_BYTES));
+  share(join(store, "held.bin"), join(two, "held.bin"));
+
+  // No scan: the tool reads the disk as it is now.
+  const handle = await launch();
+  await turnOnAgents(handle.page);
+  const agent = await connectAgent(handle, await signIn(handle, { sessionName: "Measure" }));
+  const gone = join(root, "gone");
+  const nested = join(two, "held.bin");
+  const result = await callTool(agent, "diskhound_measure_removal", { paths: [one, two, nested, gone] });
+  expect(result.isError, resultText(result)).not.toBe(true);
+  // A hardlinked file takes its space once; each clone counts in full.
+  const sizeBytes = process.platform === "darwin" ? 2 * DATA_BYTES + 2 * OTHER_BYTES : DATA_BYTES + 2 * OTHER_BYTES;
+  expect(result.structuredContent).toMatchObject({
+    total: {
+      files: 4,
+      sizeBytes,
+      freesBytes: DATA_BYTES + OTHER_BYTES,
+      freesOneAtATimeBytes: OTHER_BYTES,
+      heldElsewhereBytes: OTHER_BYTES,
+      uncertainBytes: 0,
+    },
+    paths: [
+      { path: one, kind: "folder", files: 2, freesAloneBytes: OTHER_BYTES, sharedBytes: DATA_BYTES },
+      { path: two, kind: "folder", files: 2, freesAloneBytes: 0, sharedBytes: DATA_BYTES + OTHER_BYTES },
+    ],
+    missing: [gone],
+    nested: [{ path: nested, within: two }],
+  });
+  expect(resultText(result)).toContain("Removing these 2 items together frees");
+  expect(resultText(result)).toContain(`Not found: ${gone}.`);
+
+  // The same set, asked again in another order, comes from the walk
+  // that already finished.
+  const again = await callTool(agent, "diskhound_measure_removal", { paths: [gone, nested, two, one] });
+  expect(again.structuredContent?.measuredAt).toBe(result.structuredContent?.measuredAt);
+  await agent.close();
 });

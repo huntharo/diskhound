@@ -459,7 +459,7 @@ function TreemapContextMenu({ x, y, file, onClose }: {
         title={deletedTitle}
         onClick={() => void doAction(() => nativeApi.revealPath(file.path), "Reveal")}
       >
-        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2">
+        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2">
           <path d="M1.5 3.5V11.5C1.5 12.05 1.95 12.5 2.5 12.5H11.5C12.05 12.5 12.5 12.05 12.5 11.5V5.5C12.5 4.95 12.05 4.5 11.5 4.5H7L5.5 2.5H2.5C1.95 2.5 1.5 2.95 1.5 3.5Z" />
         </svg>
         Show in {platformTerminology(nativeApi.platform).fileManager}
@@ -470,7 +470,7 @@ function TreemapContextMenu({ x, y, file, onClose }: {
         title={deletedTitle}
         onClick={() => void doAction(() => nativeApi.openPath(file.path), "Open")}
       >
-        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2">
+        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2">
           <path d="M3 1.5H11C11.55 1.5 12 1.95 12 2.5V11.5C12 12.05 11.55 12.5 11 12.5H3C2.45 12.5 2 12.05 2 11.5V2.5C2 1.95 2.45 1.5 3 1.5Z" />
           <path d="M5 7H9M7 5V9" />
         </svg>
@@ -486,7 +486,7 @@ function TreemapContextMenu({ x, y, file, onClose }: {
           );
         }}
       >
-        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2">
+        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2">
           <rect x="4" y="4" width="8" height="9" rx="1" />
           <path d="M4 4V3C4 2.45 4.45 2 5 2H9C9.55 2 10 2.45 10 3V4" />
         </svg>
@@ -511,9 +511,9 @@ function TreemapContextMenu({ x, y, file, onClose }: {
           })();
         }}
       >
-        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2">
+        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2">
           <path d="M2 7H10M7.5 4.5L10 7L7.5 9.5" />
-          <path d="M12 3V11" strokeDasharray="1.5 1.5" />
+          <path d="M12 3V11" stroke-dasharray="1.5 1.5" />
         </svg>
         Easy Move (symlink)
       </button>
@@ -533,7 +533,7 @@ function TreemapContextMenu({ x, y, file, onClose }: {
           void addExcludedFolder(parentFolder);
         }}
       >
-        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2">
+        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2">
           <path d="M7 1.5L11.5 3.5V6.5C11.5 9.35 9.7 11.5 7 12.5C4.3 11.5 2.5 9.35 2.5 6.5V3.5L7 1.5Z" />
           <path d="M5 7L6.4 8.4L9.2 5.5" />
         </svg>
@@ -546,7 +546,7 @@ function TreemapContextMenu({ x, y, file, onClose }: {
         title={deletedTitle ?? (protectedBy ? `Protected by ${protectedBy}` : undefined)}
         onClick={() => void doAction(() => nativeApi.trashPath(file.path), "Trash", "trash")}
       >
-        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2">
+        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2">
           <path d="M2.5 4.5H11.5L10.5 12.5H3.5L2.5 4.5Z" />
           <path d="M1.5 4.5H12.5" />
           <path d="M5 2.5H9" />
@@ -562,7 +562,7 @@ function TreemapContextMenu({ x, y, file, onClose }: {
           void doAction(() => nativeApi.permanentlyDeletePath(file.path), "Delete", "delete");
         }}
       >
-        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2">
+        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.2">
           <path d="M3.5 3.5L10.5 10.5M10.5 3.5L3.5 10.5" />
         </svg>
         Delete permanently

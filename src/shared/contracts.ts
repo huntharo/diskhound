@@ -10,6 +10,15 @@ import {
   isPowerEfficiency,
   type PowerEfficiency,
 } from "./powerEfficiency";
+import type {
+  AddToClaudeResult,
+  AgentAccessSnapshot,
+  AgentActivityEntry,
+  AgentConsentDecision,
+  AgentConsentPrompt,
+  AgentConsentState,
+  AgentSecurityEvent,
+} from "./agentAccess";
 
 export type ScanStatus = "idle" | "running" | "done" | "cancelled" | "error";
 export type ScanEngine = "js-worker" | "native-sidecar" | "usn-journal";
@@ -364,6 +373,18 @@ export interface AppSettings {
    *  overridden by another tool). Matches Process Lasso's "CPU
    *  Affinity Rules" tab semantics. */
   affinityRules: AffinityRule[];
+  /** Local AI agent access over MCP (Settings → AI Agents). */
+  agents: AgentSettings;
+}
+
+export interface AgentSettings {
+  /**
+   * Listen for MCP connections from local agents (Claude Code, Codex)
+   * on the loopback port. Off by default: nothing listens until the
+   * user opts in, and every agent still needs OAuth approval in the
+   * app. Sessions and their roles live in mcp-policy.json, not here.
+   */
+  enabled: boolean;
 }
 
 export interface AffinityRule {
@@ -692,6 +713,24 @@ export interface DevArtifact {
   clone?: DevArtifactCloneInfo;
   /** `git-repo` rows only: what main read from the repo's `.git/config`. */
   git?: DevGitRepoInfo;
+  /** `worktree` rows only. */
+  worktree?: DevWorktreeInfo;
+}
+
+/**
+ * A `worktree` row is the whole linked checkout: `size`, `fileCount` and
+ * `clone` cover every file in it, so the row says what removing it frees.
+ * Trees inside it (node_modules, target, ...) are part of the row, not
+ * rows of their own, so no byte is counted twice.
+ */
+export interface DevWorktreeInfo {
+  /**
+   * The main checkout (or bare repo) the worktree's `.git` file points
+   * at. Absent for a `.worktrees/<name>` folder without a readable one.
+   */
+  project?: string;
+  /** Bytes of the trees inside the worktree, by kind. Already in `size`. */
+  nestedSize?: Partial<Record<DevArtifactKind, number>>;
 }
 
 /**
@@ -723,6 +762,35 @@ export interface DevGitRepoCheck {
   stashes: number | null;
   /** Other checkouts that use this repo's `.git` (`git worktree add`). */
   linkedWorktrees: string[];
+}
+
+/**
+ * What `git` reports about a linked worktree just before the Dev tab
+ * deletes it. Its commits live in the main repo and stay there, so what
+ * can be lost is the worktree's own: uncommitted files, and commits on a
+ * detached HEAD that no branch holds.
+ */
+export interface DevWorktreeCheck {
+  /** False when git could not answer for this worktree; `problem` says why. */
+  checked: boolean;
+  problem: string | null;
+  /** Its branch, or null when HEAD is detached or unknown. */
+  branch: string | null;
+  /** Modified, staged and untracked paths. Ignored files are not counted. */
+  changedFiles: number | null;
+  /** Commits reachable from its HEAD but from no branch, remote or tag. */
+  commitsOnlyHere: number | null;
+  /** `git worktree lock` reason ("" for a lock without one), or null when not locked. */
+  lockReason: string | null;
+  /**
+   * Git has no record of it: its `.git` file points at an admin folder
+   * that is gone (the main repo was deleted, the worktree pruned, or the
+   * repo's disk is not connected), or there is no `.git` at all. Nothing
+   * can be checked or removed through git, so the Dev tab offers to move
+   * it to the Trash on its own, after a confirm. A `.git` folder (a full
+   * clone) or a pointer that is not a worktree's is not orphaned.
+   */
+  orphaned: boolean;
 }
 
 export interface DevArtifactReport {
@@ -1305,6 +1373,23 @@ export interface NavigateViewPayload {
    * rows in the widget so clicking C: jumps to its overview.
    */
   scanRoot?: string;
+  /**
+   * With `view: "folders"`, the folder to open. Sent by the MCP
+   * `diskhound_show` / `diskhound_list_folder` tools so the window
+   * follows an agent's drill-down.
+   */
+  folderPath?: string;
+  /**
+   * With `view: "settings"`, the section to scroll to. The app menu's
+   * Connect an AI Agent… and the tray use "ai-agents".
+   */
+  section?: "ai-agents";
+}
+
+/** What the main window is showing; reported to main for agents. */
+export interface WindowViewState {
+  view: AppView;
+  rootPath: string | null;
 }
 
 // ── IPC API ─────────────────────────────────────────────────
@@ -1480,6 +1565,10 @@ export interface DiskhoundNativeApi {
   forgetDevArtifactPaths: (rootPath: string, paths: string[]) => Promise<DevArtifactReport | null>;
   /** Run `git` in a `git-repo` row's checkout to find work that is not on a remote. */
   checkGitRepo: (checkoutPath: string) => Promise<DevGitRepoCheck>;
+  /** Run `git` in a linked worktree to find work that exists only there. */
+  checkGitWorktree: (worktreePath: string) => Promise<DevWorktreeCheck>;
+  /** Recheck a clean worktree and permanently remove it with `git worktree remove`. */
+  removeGitWorktree: (worktreePath: string) => Promise<PathActionResult>;
   onDevArtifactsProgress: (listener: (progress: DevArtifactsRescanProgress) => void) => () => void;
 
   // Easy Move
@@ -1680,6 +1769,34 @@ export interface DiskhoundNativeApi {
    * navigation request — only the main window's renderer does.
    */
   onNavigateView: (listener: (payload: NavigateViewPayload) => void) => () => void;
+  /** Tell main which tab and root the main window shows (for agents). */
+  reportViewState: (state: WindowViewState) => void;
+  /** Paths an agent moved to the Trash (after the user confirmed). */
+  onPathsTrashed: (listener: (paths: string[]) => void) => () => void;
+  /** Paths an agent deleted permanently (after the user confirmed). */
+  onPathsDeleted: (listener: (paths: string[]) => void) => () => void;
+
+  // Local AI agent access (MCP)
+  getAgentAccess: () => Promise<AgentAccessSnapshot>;
+  setAgentAccessEnabled: (enabled: boolean) => Promise<AgentAccessSnapshot>;
+  revokeAgentSession: (sessionId: string) => Promise<AgentAccessSnapshot>;
+  assignAgentSessionRole: (sessionId: string, roleId: string) => Promise<AgentAccessSnapshot>;
+  forgetRevokedAgentSessions: () => Promise<AgentAccessSnapshot>;
+  onAgentAccessChanged: (listener: (snapshot: AgentAccessSnapshot) => void) => () => void;
+  onAgentActivity: (listener: (entry: AgentActivityEntry) => void) => () => void;
+  /** Something an agent tried and wasn't allowed to do (new or repeated). */
+  onAgentSecurityEvent: (listener: (event: AgentSecurityEvent) => void) => () => void;
+  /** Bring the approval sheet that's waiting to the front. */
+  focusAgentApproval: () => Promise<boolean>;
+  /** Deny a waiting approval from Settings. */
+  dismissAgentApproval: (requestId: string) => Promise<AgentAccessSnapshot>;
+  /** Build DiskHound's Claude extension and open it in Claude, which asks to install it. */
+  addAgentToClaude: () => Promise<AddToClaudeResult>;
+  /** Approval window only: the pending request this window was opened for. */
+  agentConsentRead: () => Promise<(AgentConsentPrompt & Omit<AgentConsentState, "requestId">) | null>;
+  agentConsentDecide: (decision: AgentConsentDecision) => Promise<{ ok: boolean; message?: string }>;
+  /** Approval window only: the waiting agent went quiet, or came back. */
+  onAgentConsentState: (listener: (state: AgentConsentState) => void) => () => void;
 }
 
 // ── Defaults ────────────────────────────────────────────────
@@ -1741,6 +1858,9 @@ export function defaultSettings(): AppSettings {
     },
     recentScans: [],
     affinityRules: [],
+    agents: {
+      enabled: false,
+    },
   };
 }
 
@@ -1794,6 +1914,7 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
     cleanup: { ...defaults.cleanup, ...(input?.cleanup ?? {}) },
     storage: { ...defaults.storage, ...(input?.storage ?? {}) },
     recentScans: Array.isArray(input?.recentScans) ? input!.recentScans : defaults.recentScans,
+    agents: { ...defaults.agents, ...(input?.agents ?? {}) },
     affinityRules: Array.isArray(input?.affinityRules)
       ? input!.affinityRules
           .map((r) => normalizeAffinityRule(r))
@@ -1929,6 +2050,9 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
         bytesFound: Math.max(0, Math.round(scan.bytesFound)),
       })),
     affinityRules: merged.affinityRules,
+    agents: {
+      enabled: Boolean(merged.agents.enabled),
+    },
   };
 }
 

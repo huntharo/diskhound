@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { DevArtifact, DevGitRepoCheck } from "../../../shared/contracts";
+import type { DevArtifact, DevGitRepoCheck, DevWorktreeCheck } from "../../../shared/contracts";
 import {
   artifactsInsideCheckout,
   gitCheckLosesHistory,
@@ -8,6 +8,9 @@ import {
   gitRemovalConfirm,
   gitRepoManagedBy,
   gitRepoRemovalBlock,
+  orphanedWorktreeConfirm,
+  worktreeBulkNote,
+  worktreeRisks,
 } from "../gitRepoDisplay";
 
 function row(path: string, kind: DevArtifact["kind"] = "git-repo", size = 1): DevArtifact {
@@ -143,5 +146,92 @@ describe("gitRemovalConfirm", () => {
     const unchecked = gitRemovalConfirm({ artifact: repo, check: noGit, inside: [], trash: "Trash" });
     expect(unchecked.first).toContain("git could not run here");
     expect(unchecked.second).toContain("Nothing was checked");
+  });
+});
+
+describe("worktree checks", () => {
+  const CLEAR: DevWorktreeCheck = {
+    checked: true,
+    problem: null,
+    branch: "feat",
+    changedFiles: 0,
+    commitsOnlyHere: 0,
+    lockReason: null,
+    orphaned: false,
+  };
+
+  it("clear only a worktree git checked and found nothing in", () => {
+    expect(worktreeRisks(CLEAR)).toEqual([]);
+    expect(worktreeRisks({ ...CLEAR, changedFiles: 3 })).toEqual(["3 files with uncommitted changes."]);
+    expect(worktreeRisks({ ...CLEAR, branch: null, commitsOnlyHere: 1 }))
+      .toEqual(["1 commit on its detached HEAD is on no branch."]);
+    expect(worktreeRisks({ ...CLEAR, lockReason: "" })).toEqual(["Locked with git worktree lock."]);
+    // Unknown is a risk, not a pass.
+    expect(worktreeRisks({ ...CLEAR, changedFiles: null })).toEqual(["Could not check for uncommitted changes."]);
+    expect(worktreeRisks({ ...CLEAR, checked: false, problem: "git could not run here.", changedFiles: null, commitsOnlyHere: null }))
+      .toEqual(["git could not run here."]);
+  });
+
+  it("say in the bulk confirm which worktrees stay and why", () => {
+    const kept = Array.from({ length: 7 }, (_, i) => ({
+      artifact: { path: `/Users/me/.codex/worktrees/a${i}/app` },
+      check: { ...CLEAR, changedFiles: i + 1 },
+    }));
+    const note = worktreeBulkNote(40, kept);
+    expect(note).toContain("Git checked 40 worktrees: no uncommitted changes, no commits outside a branch.");
+    expect(note).toContain("Not deleted: 7 worktrees that Git could not clear for removal:");
+    expect(note).toContain("    app — 1 file with uncommitted changes.");
+    expect(note).toContain("…and 2 more");
+    expect(worktreeBulkNote(3, [])).toContain("Git will permanently remove these worktrees and their registrations.");
+  });
+
+  it("explains a failed Git check without claiming the worktree has unique work", () => {
+    const note = worktreeBulkNote(0, [{
+      artifact: { path: "/Users/me/worktrees/feat" },
+      check: { ...CLEAR, checked: false, problem: "git could not run here." },
+    }]);
+    expect(note).toContain("git could not run here.");
+    expect(note).toContain("Save their work or resolve the Git checks before trying again.");
+    expect(note).not.toContain("work that exists only there");
+  });
+
+  const ORPHAN: DevWorktreeCheck = {
+    checked: false,
+    problem: "Its repository is gone (/Users/me/github/app/.git/worktrees/feat), so git has no record of it.",
+    branch: null,
+    changedFiles: null,
+    commitsOnlyHere: null,
+    lockReason: null,
+    orphaned: true,
+  };
+
+  it("point orphaned worktrees in a bulk delete to the one-at-a-time Trash path", () => {
+    const orphan = { artifact: { path: "/wt/gone" }, check: ORPHAN };
+    const dirty = { artifact: { path: "/wt/dirty" }, check: { ...CLEAR, changedFiles: 1 } };
+    expect(worktreeBulkNote(0, [orphan], "Recycle Bin"))
+      .toContain("Git has no record of it: delete each one on its own to move it to the Recycle Bin after a confirm.");
+    const mixed = worktreeBulkNote(0, [orphan, dirty]);
+    expect(mixed).toContain("Save their work or resolve the Git checks before trying again.");
+    expect(mixed).toContain("1 of them has no Git record: delete each one on its own");
+    expect(worktreeBulkNote(0, [dirty])).not.toContain("no Git record");
+  });
+
+  it("say what could not be checked before an orphaned worktree goes to the Trash", () => {
+    const text = orphanedWorktreeConfirm({
+      artifact: { path: "/Users/me/.codex/worktrees/ab12/app", size: 3_000_000_000, fileCount: 40_000 },
+      check: ORPHAN,
+      trash: "Trash",
+    });
+    expect(text).toMatch(/^Move the orphaned worktree app to the Trash\?/);
+    expect(text).toContain("⚠ Its repository is gone");
+    expect(text).toContain("cannot check it for uncommitted changes");
+    expect(text).toContain("connect the disk and try again");
+    expect(text).toContain("you can restore it");
+    const noGit = orphanedWorktreeConfirm({
+      artifact: { path: "/src/app/.worktrees/old", size: 1, fileCount: 1 },
+      check: { ...ORPHAN, problem: "It has no .git file, so git has no record of it." },
+      trash: "Trash",
+    });
+    expect(noGit).not.toContain("connect the disk");
   });
 });

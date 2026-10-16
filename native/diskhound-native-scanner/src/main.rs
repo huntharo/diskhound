@@ -34,6 +34,8 @@ mod index_line;
 #[cfg(not(windows))]
 mod hardlinks;
 #[cfg(not(windows))]
+mod measure;
+#[cfg(not(windows))]
 mod walk_prune;
 #[cfg(test)]
 mod test_support;
@@ -429,12 +431,26 @@ impl IndexWriter {
         Ok(())
     }
 
+    /// `finish_with_tree_totals` without folder rollups: a linked worktree
+    /// then counts only the Dev trees and clone files found inside it.
+    #[cfg(test)]
+    fn finish(self) -> (io::Result<()>, Option<CloneGroupSummary>) {
+        self.finish_with_tree_totals(&|_| None)
+    }
+
     /// Signal the writer thread to finish pending messages, close the
     /// gzip stream cleanly, and flush to disk. Blocks on the join so
     /// the caller knows the file is complete before returning. Also
     /// returns the clone-group summary, None when the writer thread
     /// panicked and its groups are lost.
-    fn finish(mut self) -> (io::Result<()>, Option<CloneGroupSummary>) {
+    ///
+    /// `tree_totals` gives a folder's recursive (bytes, files), from the
+    /// scan's `directory_totals`. The Dev sidecar sizes each linked
+    /// worktree from it; see `DevArtifactAcc::resolve_worktrees`.
+    fn finish_with_tree_totals(
+        mut self,
+        tree_totals: &dyn Fn(&str) -> Option<(u64, u64)>,
+    ) -> (io::Result<()>, Option<CloneGroupSummary>) {
         if let Some(tx) = self.tx.take() {
             let _ = tx.send(IndexWriteMsg::Finish);
             drop(tx);
@@ -451,12 +467,15 @@ impl IndexWriter {
         // Write the Dev sidecar even if gzip finish failed — classify
         // already ran on every file the writer accepted.
         if let (Some(out), Some(acc)) = (self.dev_output.take(), self.dev_acc.take()) {
-            let guard = acc.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = acc.lock().unwrap_or_else(|e| e.into_inner());
+            guard.resolve_worktrees(tree_totals);
             match dev_artifacts::write_sidecar(&out, &self.scan_root, &guard, clone_groups.as_ref()) {
                 Ok(()) => eprintln!(
-                    "[diskhound-native-scanner] dev-artifacts sidecar: wrote {} ({} roots)",
+                    "[diskhound-native-scanner] dev-artifacts sidecar: wrote {} ({} roots, {} worktrees, {} .git files read)",
                     out.display(),
-                    guard.root_count()
+                    guard.root_count(),
+                    guard.worktree_count(),
+                    guard.git_file_reads(),
                 ),
                 Err(err) => eprintln!(
                     "[diskhound-native-scanner] dev-artifacts sidecar: write failed ({err})"
@@ -1168,6 +1187,20 @@ fn main() {
         || matches_flag(&raw_args, "--mode", "query-cursor");
     let is_sample = raw_args.iter().any(|a| a == "--mode=sample")
         || matches_flag(&raw_args, "--mode", "sample");
+    let is_measure = raw_args.iter().any(|a| a == "--mode=measure-removal")
+        || matches_flag(&raw_args, "--mode", "measure-removal");
+
+    if is_measure {
+        #[cfg(not(windows))]
+        let result = measure::run(&raw_args, &CANCELLED);
+        #[cfg(windows)]
+        let result: Result<(), String> = Err("measure-removal is not available on Windows".into());
+        if let Err(error) = result {
+            let _ = emit_message(&Message::Error { message: error });
+            std::process::exit(1);
+        }
+        return;
+    }
 
     if is_sample {
         if let Err(error) = sample::run_sample_once() {
@@ -1436,7 +1469,9 @@ fn run() -> Result<(), String> {
     // Dev sidecar after Done raced: the rename missed, and Dev Artifacts
     // fell through to a 1m+ folder-tree classify on a 7M-file C: scan.
     if let Some(writer) = state.index_writer.take() {
-        let (result, clone_summary) = writer.finish();
+        let totals = &state.directory_totals;
+        let (result, clone_summary) = writer
+            .finish_with_tree_totals(&|path| totals.get(path).map(|t| (t.size, t.file_count)));
         if let Err(err) = result {
             eprintln!("[diskhound-native-scanner] index writer finish failed ({err})");
         }
@@ -1704,7 +1739,12 @@ fn scan_generic_with_plan_mode(
         let clone = clone_attrs_enabled.then(|| {
             if cache_clone_attrs {
                 let before = clone_cache.lookups();
-                let attrs = clone_cache.get(&path, metadata.clone_id(), link_id);
+                let attrs = clone_cache.get(
+                    &path,
+                    metadata.clone_id(),
+                    metadata.real_dev(),
+                    link_id,
+                );
                 if clone_cache.lookups() != before {
                     state.io.count_stat();
                 }
@@ -1713,7 +1753,7 @@ fn scan_generic_with_plan_mode(
                 if metadata.clone_id().is_some() {
                     state.io.count_stat();
                 }
-                clone_attrs::file_clone_attrs(&path, metadata.clone_id())
+                clone_attrs::file_clone_attrs(&path, metadata.clone_id(), metadata.real_dev())
             }
         });
         #[cfg(not(target_os = "macos"))]
@@ -6051,6 +6091,7 @@ mod index_writer_clone_tests {
         let clone = |private_size| CloneAttrs {
             private_size,
             clone_id: 0,
+            volume_id: 0,
             clone_refcnt: 0,
             ext_flags: EF_MAY_SHARE_BLOCKS,
         };

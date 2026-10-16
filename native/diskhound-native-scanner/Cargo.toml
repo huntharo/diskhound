@@ -25,7 +25,7 @@ windows-sys = { version = "0.59.0", features = [
 windows-sys = { version = "0.59.0", features = ["Win32_Security_Authorization"] }
 
 [target.'cfg(not(windows))'.dependencies]
-dua-core = "4.1.0"
+dua-core = { path = "vendor/dua-core" }
 libc = "0.2"
 
 [profile.release]
