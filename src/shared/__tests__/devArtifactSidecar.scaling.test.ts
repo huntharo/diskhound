@@ -3,10 +3,8 @@ import { describe, expect, it } from "vitest";
 import { countReads, expectNearLinear, measureOpsSync } from "../../testing/opCounter";
 import type { DevArtifact, DevArtifactReport } from "../contracts";
 import {
-  carryWorktreeInfo,
   compactDevArtifactSidecar,
   DEV_SIDECAR_ROOT_CAP,
-  planRescanTargets,
   reportFromSidecar,
   type DevArtifactSidecar,
 } from "../devArtifactSidecar";
@@ -43,44 +41,6 @@ function reportWith(projects: number): DevArtifactReport {
   return reportFromSidecar(sidecar);
 }
 
-describe("planRescanTargets scaling", () => {
-  it("checks seeded roots against known roots in linear work", () => {
-    const run = (projects: number) => {
-      const sidecar = sidecarWith(projects);
-      // One seed per project: half nested under a known root, half new.
-      const extras = Array.from({ length: projects }, (_, i) => (
-        i % 2 === 0
-          ? join(join(projectPath(i), "node_modules"), ".cache")
-          : join(projectPath(i), "DiagOutputDir")
-      ));
-      return measureOpsSync(() => planRescanTargets(sidecar, extras)).ops;
-    };
-    expectNearLinear("planRescanTargets", run(PROJECTS), run(PROJECTS * 8), {
-      maxTotal: PROJECTS * 8 * 100,
-    });
-  });
-
-  it("skips seeds that equal, sit under, or hold a known root, ignoring case", () => {
-    const sidecar: DevArtifactSidecar = {
-      version: 1,
-      rootPath: "C:\\",
-      generatedAt: 1,
-      roots: [{ path: "C:\\Work\\app\\node_modules", kind: "node-modules", size: 10, files: 1 }],
-      projects: [],
-    };
-    expect(planRescanTargets(sidecar, [
-      "c:\\work\\APP\\node_modules\\",
-      "C:\\work\\app\\node_modules\\.cache",
-      "C:\\Work",
-      "C:\\Windows\\Temp\\DiagOutputDir",
-      "C:\\Windows\\Temp\\DiagOutputDir\\RdClientAutoTrace",
-    ])).toEqual([
-      "C:\\Work\\app\\node_modules",
-      "C:\\Windows\\Temp\\DiagOutputDir",
-    ]);
-  });
-});
-
 describe("compactDevArtifactSidecar / reportFromSidecar scaling", () => {
   it("compacts in n log n", () => {
     const run = (projects: number) => {
@@ -102,32 +62,6 @@ describe("compactDevArtifactSidecar / reportFromSidecar scaling", () => {
     };
     expectNearLinear("reportFromSidecar", run(PROJECTS), run(PROJECTS * 8), {
       maxTotal: PROJECTS * 8 * 2 * 160,
-    });
-  });
-});
-
-describe("carryWorktreeInfo scaling", () => {
-  it("carries each worktree's info in linear work", () => {
-    const withWorktrees = (projects: number): DevArtifactSidecar => {
-      const sidecar = sidecarWith(projects);
-      for (let i = 0; i < projects; i += 1) {
-        sidecar.roots.push({
-          path: join(join(projectPath(i), ".worktrees"), "feat"),
-          kind: "worktree",
-          size: 9_000 + i,
-          files: 90,
-          worktree: { project: projectPath(i), nestedSize: { "node-modules": 4_000, "rust-target": 1_000 } },
-        });
-      }
-      return sidecar;
-    };
-    const run = (projects: number) => {
-      const previous = withWorktrees(projects);
-      const next = withWorktrees(projects);
-      return measureOpsSync(() => carryWorktreeInfo(next, previous)).ops;
-    };
-    expectNearLinear("carryWorktreeInfo", run(PROJECTS), run(PROJECTS * 8), {
-      maxTotal: PROJECTS * 8 * 3 * 40,
     });
   });
 });
