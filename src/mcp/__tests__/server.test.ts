@@ -695,7 +695,10 @@ describe("removal requests in diskhound_status", () => {
     expect(summary).toContain("Removal request decided 2 min ago (you asked 18 min ago): Moved 1 item to the Trash (100 MB). They free that space once the Trash is emptied. Not moved: /c (The Trash did not take this folder — it is still on disk.). Skipped by the user: /b.");
     expect(summary).toContain("Removal request decided 2 min ago (you asked 10 min ago): The user moved 1 item to the Trash instead of deleting it (100 MB): /d. Deleted 1 item permanently (100 MB). Not done: /f (This path changed after the agent asked, so DiskHound left it alone.).");
     expect(summary).not.toContain("waiting for the user");
+    // Freed space can lag: the agent hears why, as it did when the dialog removed things.
+    expect(summary).toContain("Trashed items keep using space until the Trash is emptied.");
     expect(structured(status).removalRequests).toMatchObject({
+      note: expect.stringContaining("Trash is emptied"),
       waiting: null,
       recent: [
         { requestId: "rq_1", items: [{ path: "/a", status: "moved", done: "trash" }, { path: "/b", status: "skipped", done: null }, { path: "/c", status: "failed" }] },

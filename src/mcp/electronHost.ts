@@ -36,6 +36,7 @@ import {
 } from "../shared/agentAccess";
 import {
   EMPTY_REMOVAL_LIST,
+  waitingItems,
   type AgentRemovalList,
   type RemovalApprovalResult,
   type RemovalDecision,
@@ -344,7 +345,7 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
     pushTimer = null;
     const list = queue.list();
     mainWindowSend(AGENT_REMOVALS_CHANNEL, list);
-    const waiting = list.requests.reduce((sum, request) => sum + request.items.filter((item) => item.status === "waiting").length, 0);
+    const waiting = waitingItems(list).length;
     if (waiting !== lastWaiting) {
       lastWaiting = waiting;
       deps.removalsWaiting?.(waiting);
@@ -402,6 +403,11 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
       offered.push(target);
     }
     const targets = outermostPaths(offered);
+    // A path inside another one asked for goes with it; say so.
+    for (const path of offered) {
+      const parent = targets.find((target) => target !== path && isInside(target, path));
+      if (parent) refused.push({ path, message: `It's inside ${parent}, which is on the list with it.` });
+    }
     const sizes = await Promise.all(targets.map((path) => recordedSize(path)));
     const checks = await probe.check(targets.map((path, index) => ({ path, sizeBytes: sizes[index] ?? null })));
     const items: QueueInput["items"] = [];

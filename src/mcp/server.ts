@@ -239,14 +239,19 @@ export function createDiskhoundMcpServer(options: DiskhoundMcpServerOptions): Mc
         by("refused").length ? `Not done: ${withWhy(by("refused"))}.` : null,
       ].filter(Boolean).join(" ");
     };
+    // Freed space can lag what was removed (snapshots, clones, the Trash itself).
+    const removed = recent.some((request) => request.items.some((item) => item.status === "moved" || item.status === "deleted" || item.status === "partial"));
+    const note = removed ? platformSpaceNote(backend.platform) : null;
     const lines = [
       waiting.length
         ? `Removal requests: ${plural(waiting.length, "item")} (${removedText(waiting)}) waiting for the user to review in DiskHound (you asked ${ageText(waitingSince, nowMs)}).`
         : null,
       ...recent.slice(0, 3).map((request) =>
         `Removal request decided ${ageText(decidedAt(request), nowMs)} (you asked ${ageText(request.requestedAt, nowMs)}): ${decidedText(request)}`),
+      note,
     ].filter((line): line is string => line !== null);
     const value = {
+      ...(note ? { note } : {}),
       waiting: waiting.length
         ? { items: waiting.length, sizeBytes: waiting.reduce((sum, item) => sum + (item.sizeBytes ?? 0), 0), size: removedText(waiting), since: new Date(waitingSince).toISOString() }
         : null,

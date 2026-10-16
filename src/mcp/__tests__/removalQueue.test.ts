@@ -125,6 +125,16 @@ describe("RemovalQueue", () => {
     expect(onDisk().requests.map((candidate: { id: string }) => candidate.id)).not.toContain(request.id);
   });
 
+  it("leaves a debounced write to the batch that started since", async () => {
+    const q = queue({ debounceMs: 5 });
+    ask(q, "s1", ["/a"]);
+    await q.batch(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(FS.existsSync(file)).toBe(false);
+    });
+    expect(onDisk().requests[0].items[0].path).toBe("/a");
+  });
+
   it("writes a pending change before quit returns", () => {
     const q = queue();
     ask(q, "s1", ["/a"]);

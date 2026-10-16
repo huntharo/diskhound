@@ -57,6 +57,9 @@ export function RemovalReviewSheet() {
   const bin = trashName(platform);
   // Requests stay on the sheet once shown, so their results appear in place.
   const shown = useRef(new Set<string>());
+  // Items on the list when the sheet opened. One an agent adds later starts
+  // unticked, so Remove never runs something the user hasn't looked at.
+  const opened = useRef<Set<string> | null>(null);
   const [ticks, setTicks] = useState(() => new Map<string, boolean>());
   const [actions, setActions] = useState(() => new Map<string, RemovalAction>());
   const [busy, setBusy] = useState(false);
@@ -77,13 +80,20 @@ export function RemovalReviewSheet() {
     for (const request of snapshot.removals.requests) {
       if (request.items.some((item) => item.status === "waiting" || item.status === "running")) shown.current.add(request.id);
     }
-    return snapshot.removals.requests.filter((request) => shown.current.has(request.id));
+    const list = snapshot.removals.requests.filter((request) => shown.current.has(request.id));
+    opened.current ??= new Set(list.flatMap((request) => request.items.map((item) => item.id)));
+    return list;
   }, [snapshot?.removals]);
 
-  const groups = useMemo(
-    () => reviewGroups(requests, snapshot?.sessions ?? [], ticks, actions, platform),
-    [requests, snapshot?.sessions, ticks, actions],
+  const late = useMemo(
+    () => new Set(requests.flatMap((request) => request.items.filter((item) => !opened.current?.has(item.id)).map((item) => item.id))),
+    [requests],
   );
+  const groups = useMemo(() => {
+    const start = new Map<string, boolean>([...late].map((id) => [id, false]));
+    for (const [id, on] of ticks) start.set(id, on);
+    return reviewGroups(requests, snapshot?.sessions ?? [], start, actions, platform);
+  }, [requests, late, snapshot?.sessions, ticks, actions]);
   const rows = useMemo(() => groups.flatMap((group) => group.rows), [groups]);
 
   if (!snapshot) return null;
@@ -123,6 +133,8 @@ export function RemovalReviewSheet() {
     try {
       const outcome = await nativeApi.measureAgentRemovals(ticked.map((row) => row.item.id));
       setMeasure({ key, result: outcome, at: Date.now() });
+    } catch (err) {
+      setMeasure({ key, result: { ok: false, error: err instanceof Error ? err.message : String(err) }, at: Date.now() });
     } finally {
       setMeasuring(null);
     }
@@ -143,6 +155,7 @@ export function RemovalReviewSheet() {
     if (choice.locked) return { text: choice.locked, tone: "gone" };
     const lines: string[] = [];
     let tone: "" | "warn" = "";
+    if (late.has(item.id) && !row.ticked) lines.push("Added while the list was open. Tick it to include it.");
     const alone = freesAlone.get(item.path);
     if (alone) {
       lines.push(`Frees ${formatBytes(alone.freesAloneBytes)}${alone.sharedBytes > 0 ? ` alone; ${formatBytes(alone.sharedBytes)} is shared with files outside it` : ""}.`);

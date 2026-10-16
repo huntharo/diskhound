@@ -214,7 +214,10 @@ export function removalChoice(
   }
   const askedOk = item.asked === "trash" ? trash : del;
   const action = askedOk ? item.asked : trash ? "trash" : "delete";
-  return { trash, delete: del, ticked: askedOk && check.mountsInside.length === 0, action, locked: null };
+  // Windows deletes what its Recycle Bin can't hold instead of recycling
+  // it, so an item that may not fit waits for the user to tick it.
+  const mayNotFit = platform === "win32" && action === "trash" && check.trash === "unknown";
+  return { trash, delete: del, ticked: askedOk && check.mountsInside.length === 0 && !mayNotFit, action, locked: null };
 }
 
 /** "archive/" for a mount inside `/x/datasets`; the mount's path relative to the item. */

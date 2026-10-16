@@ -228,6 +228,13 @@ describe("TrashProbe on Linux (gio's rules)", () => {
     expect(none[0]).toMatchObject({ trash: "no", trashWhy: "/mnt/scratch has no Trash folder, and DiskHound can't make one there." });
   });
 
+  it("leaves unticked a Windows item that may not fit the Recycle Bin", () => {
+    const check = { volume: "C:", trash: "unknown" as const, trashWhy: "It may be bigger than the Recycle Bin on C:.", readOnly: false, mountsInside: [], checkedAt: NOW };
+    expect(removalChoice({ asked: "trash", check }, ["files.trash"], "Codex", "win32")).toMatchObject({ trash: true, ticked: false });
+    // Elsewhere a Trash that can't take it refuses rather than deleting.
+    expect(removalChoice({ asked: "trash", check }, ["files.trash"], "Codex", "darwin")).toMatchObject({ trash: true, ticked: true });
+  });
+
   it("counts a shared .Trash where gio can still make the user's folder", async () => {
     const trashDirs = { "/mnt/scratch/.Trash": { mode: 0o41777, uid: 0 } };
     const [creatable] = await linuxProbe({ writable: (path) => path === "/mnt/scratch/.Trash", trashDirs })

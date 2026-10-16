@@ -397,7 +397,8 @@ export class RemovalQueue {
     if (this.holds > 0 || this.timer) return;
     this.timer = setTimeout(() => {
       this.timer = null;
-      void this.flush();
+      // A batch that started since writes once at its end.
+      if (this.holds === 0) this.flushSync();
     }, this.options.debounceMs ?? DEBOUNCE_MS);
     this.timer.unref?.();
   }
