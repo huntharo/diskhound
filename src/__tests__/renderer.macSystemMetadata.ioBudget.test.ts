@@ -75,6 +75,18 @@ it("shows measured Spotlight bytes, keeps old history unknown, and hides on othe
   const old = ui.mount(h(MacSystemMetadataCard, { snapshot: snapshot() }));
   await ui.settle();
   expect(old.querySelectorAll(".storage-card-value")[0].textContent).toBe("Size unavailable");
+  const oldMount = ui.mount(h(MacSystemMetadataCard, { snapshot: snapshot({ rootPath: "/Users/me/mnt/image" }) }));
+  await ui.settle();
+  expect(oldMount.textContent).toContain("Volume paths not recorded in this scan");
+  expect(oldMount.textContent).not.toContain("Outside this scan");
+  expect(oldMount.textContent).not.toContain("/System/Volumes/Data");
+  const unresolved = ui.mount(h(MacSystemMetadataCard, { snapshot: snapshot({ macSystemMetadata: [
+    { kind: "fsevents", path: "/System/Volumes/Data/.fseventsd", bytes: null,
+      status: "unavailable", issue: "volume-unresolved" },
+  ] }) }));
+  await ui.settle();
+  expect(unresolved.textContent).toContain("Could not resolve the volume mount; scan again");
+  expect(unresolved.textContent).not.toContain("/System/Volumes/Data");
   window.diskhound = { ...window.diskhound, platform: "linux" };
   const other = ui.mount(h(MacSystemMetadataCard, { snapshot: snapshot() }));
   await ui.settle();

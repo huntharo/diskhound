@@ -759,7 +759,7 @@ impl ScanState {
             hottest_directories: Vec::with_capacity(input.top_directory_limit),
             hottest_directories_due_at: 0,
             mac_system_metadata: cfg!(target_os = "macos")
-                .then(|| mac_system_metadata::Tracker::new(&root_path_string)),
+                .then(|| mac_system_metadata::Tracker::new(&root_path_string, None)),
             input,
             root_path_string,
             started_at_ms: unix_timestamp_ms(SystemTime::now()),
@@ -1589,6 +1589,12 @@ fn scan_generic_with_plan_mode(
 ) -> Result<(), String> {
     state.scan_phase = ScanPhase::Indexing;
     state.expected_total_files = state.input.expected_total_files;
+    // Reuse the mount table and firmlink resolution already read for pruning.
+    if let Some(volume) = plan.mac_metadata_volume.as_deref() {
+        state.mac_system_metadata = Some(mac_system_metadata::Tracker::new(
+            &state.root_path_string, Some(volume),
+        ));
+    }
 
     // Parallelism: dua-core reads directories on a work-stealing pool.
     // Directory enumeration is embarrassingly parallel at the I/O layer,

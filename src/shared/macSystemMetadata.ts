@@ -4,10 +4,14 @@ const under = (parent: string, path: string) => path === parent
   || path.startsWith(parent === "/" ? "/" : `${parent}/`);
 
 /** Startup metadata has one canonical Data-volume path, never firmlink aliases. */
-export function macSystemMetadataPaths(root: string): string[] {
+export function macSystemMetadataPaths(root: string, mountPoint?: string): string[] {
   const external = /^\/Volumes\/[^/]+/.exec(root)?.[0];
   const direct = /^(.*)\/\.(?:fseventsd|Spotlight-V100)$/.exec(root)?.[1];
-  const volume = external ?? direct ?? "/System/Volumes/Data";
+  // Direct store scans also support explicitly selected metadata folders.
+  // Otherwise use the owning mount already resolved by the prune plan.
+  // Path hints are only a fallback for old history and missing mount data.
+  const volume = direct ?? (mountPoint === "/" ? "/System/Volumes/Data" : mountPoint)
+    ?? external ?? "/System/Volumes/Data";
   return [`${volume}/.fseventsd`, `${volume}/.Spotlight-V100`];
 }
 
@@ -15,7 +19,7 @@ export function macSystemMetadataPaths(root: string): string[] {
 export class MacSystemMetadataTracker {
   private rows;
 
-  constructor(private root: string, paths = macSystemMetadataPaths(root)) {
+  constructor(private root: string, paths = macSystemMetadataPaths(root), private volumeResolved = true) {
     this.rows = paths.map((path, i) => ({
       kind: (i === 0 ? "fsevents" : "spotlight") as MacSystemMetadataUsage["kind"],
       path, bytes: 0, observed: false, issue: undefined as MacSystemMetadataUsage["issue"],
@@ -46,6 +50,9 @@ export class MacSystemMetadataTracker {
 
   snapshot(done: boolean): MacSystemMetadataUsage[] {
     return this.rows.map((row) => {
+      if (!this.volumeResolved) return {
+        kind: row.kind, path: row.path, bytes: null, status: "unavailable", issue: "volume-unresolved",
+      };
       const covered = under(this.root, row.path);
       const complete = covered && done && row.observed && !row.issue;
       // Failed / unobserved collection is unknown even when its accumulator is zero.

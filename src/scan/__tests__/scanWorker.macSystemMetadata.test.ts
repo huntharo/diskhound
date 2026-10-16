@@ -6,16 +6,13 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ScanSnapshot } from "../../shared/contracts";
 import { runScan } from "../scanWorker";
 
+const mount = vi.hoisted(() => ({ point: "" }));
+
 vi.mock("../../shared/scanPrune", async (original) => {
   const mod = await original<typeof import("../../shared/scanPrune")>();
-  return { ...mod, loadScanPrunePlan: async () => mod.emptyPrunePlan() };
-});
-// Keep every scan and fixture in a temp profile, including on non-macOS CI.
-vi.mock("../../shared/macSystemMetadata", async (original) => {
-  const mod = await original<typeof import("../../shared/macSystemMetadata")>();
-  return { ...mod, MacSystemMetadataTracker: class extends mod.MacSystemMetadataTracker {
-    constructor(root: string) { super(root, [`${root}/.fseventsd`, `${root}/.Spotlight-V100`]); }
-  } };
+  // Simulate the mount table only; exercise the real resolution and tracker.
+  return { ...mod, loadScanPrunePlan: async (root: string) => mod.macPrunePlan(root,
+    ["/", "/System/Volumes/Data", mount.point], mod.parseFirmlinks("/Users\tUsers\n/private\tprivate")) };
 });
 vi.mock("node:fs/promises", async (original) => ({
   ...await original<typeof import("node:fs/promises")>(),
@@ -26,6 +23,7 @@ const platform = process.platform;
 beforeEach(() => {
   Object.defineProperty(process, "platform", { value: "darwin" });
   root = FS.realpathSync(FS.mkdtempSync(Path.join(OS.tmpdir(), "diskhound-metadata-")));
+  mount.point = root;
   FS.mkdirSync(`${root}/.fseventsd`);
   FS.mkdirSync(`${root}/.Spotlight-V100`);
 });
@@ -35,7 +33,7 @@ afterEach(() => {
   FS.rmSync(root, { recursive: true, force: true });
 });
 
-async function scan(extra: { indexOutput?: string; baselineIndex?: string } = {}): Promise<ScanSnapshot> {
+async function scan(extra: { rootPath?: string; indexOutput?: string; baselineIndex?: string } = {}): Promise<ScanSnapshot> {
   let snapshot: ScanSnapshot | undefined;
   await runScan({ rootPath: root, options: {}, limits: { topFileLimit: 100, topDirectoryLimit: 1 }, ...extra }, (m) => {
     if (m.type === "done") snapshot = m.snapshot;
@@ -73,6 +71,15 @@ it.skipIf(platform === "win32")("shows denied stores as unavailable and partial 
   const snapshot = await scan();
   expect(snapshot.macSystemMetadata![0]).toMatchObject({ status: "incomplete", bytes: FS.statSync(`${root}/.fseventsd/log`).blocks * 512 });
   expect(snapshot.macSystemMetadata![1]).toMatchObject({ status: "unavailable", bytes: null });
+});
+
+it.skipIf(platform === "win32")("keeps a custom volume's stores outside a descendant scan", async () => {
+  FS.mkdirSync(`${root}/photos`);
+  const snapshot = await scan({ rootPath: `${root}/photos` });
+  expect(snapshot.macSystemMetadata).toEqual([
+    { kind: "fsevents", path: `${root}/.fseventsd`, bytes: null, status: "outside-scan" },
+    { kind: "spotlight", path: `${root}/.Spotlight-V100`, bytes: null, status: "outside-scan" },
+  ]);
 });
 
 it.skipIf(platform === "win32")("recounts changing stores even when directory mtimes match the baseline", async () => {

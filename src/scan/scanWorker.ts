@@ -15,7 +15,7 @@ import {
   type ScanSnapshot,
   type WorkerToMainMessage,
 } from "../shared/contracts";
-import { MacSystemMetadataTracker } from "../shared/macSystemMetadata";
+import { MacSystemMetadataTracker, macSystemMetadataPaths } from "../shared/macSystemMetadata";
 import { occupancyBytes } from "../shared/allocatedSize";
 import { compareEntryNames, HardlinkTracker, type LinkStat } from "../shared/hardlinkTracker";
 import {
@@ -99,7 +99,9 @@ export async function runScan(
   // `/Volumes/USB`, a bind's source, or the Data volume twice.
   const prunePlan = await loadScanPrunePlan(rootPath);
   const skippedMounts = new Set<string>();
-  const systemMetadata = process.platform === "darwin" ? new MacSystemMetadataTracker(rootPath) : null;
+  const systemMetadata = process.platform === "darwin"
+    ? new MacSystemMetadataTracker(rootPath, macSystemMetadataPaths(rootPath, prunePlan.macMetadataVolume),
+      prunePlan.macMetadataVolume !== undefined) : null;
   const scanOptions = input.options;
   const TOP_FILE_LIMIT = input.limits?.topFileLimit ?? DEFAULT_TOP_FILE_LIMIT;
   const TOP_DIRECTORY_LIMIT = input.limits?.topDirectoryLimit ?? DEFAULT_TOP_DIRECTORY_LIMIT;

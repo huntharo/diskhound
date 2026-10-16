@@ -194,7 +194,7 @@ export interface MacSystemMetadataUsage {
   bytes: number | null;
   status: "complete" | "incomplete" | "unavailable" | "outside-scan";
   /** Unknown-path native enumeration errors conservatively affect both categories. */
-  issue?: "scan-errors" | "not-observed";
+  issue?: "scan-errors" | "not-observed" | "volume-unresolved";
 }
 
 // ── Storage accounting (snapshots + clones) ─────────────────

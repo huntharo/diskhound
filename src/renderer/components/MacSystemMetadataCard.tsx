@@ -17,7 +17,9 @@ export function MacSystemMetadataCard({ snapshot }: { snapshot: ScanSnapshot }) 
   if (nativeApi.platform !== "darwin" || snapshot.status !== "done" || !snapshot.rootPath) return null;
   // Old history has no coverage evidence. Never infer zero from a missing hotspot.
   const rows: MacSystemMetadataUsage[] = snapshot.macSystemMetadata
-    ?? new MacSystemMetadataTracker(snapshot.rootPath).snapshot(false);
+    ?? new MacSystemMetadataTracker(snapshot.rootPath).snapshot(false).map((row) => ({
+      ...row, status: "unavailable", issue: "not-observed",
+    }));
   const needsAccess = rows.some((r) => r.status === "unavailable" || r.status === "incomplete");
 
   return (
@@ -43,7 +45,10 @@ export function MacSystemMetadataCard({ snapshot }: { snapshot: ScanSnapshot }) 
             <div className={`storage-card-value ${row.bytes === null ? "muted" : ""}`}>
               {usageLabel(row)}
             </div>
-            <div className="storage-card-meta system-metadata-path"><code>{row.path}</code></div>
+            <div className="storage-card-meta system-metadata-path">
+              {row.issue === "volume-unresolved" ? "Could not resolve the volume mount; scan again"
+                : snapshot.macSystemMetadata ? <code>{row.path}</code> : "Volume paths not recorded in this scan"}
+            </div>
             {expanded && (
               <p className="storage-card-guide">
                 {row.kind === "fsevents" ? (

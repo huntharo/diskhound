@@ -23,6 +23,7 @@ struct Row {
 pub struct Tracker {
     root: String,
     rows: [Row; 2],
+    volume_resolved: bool,
 }
 
 fn under(parent: &str, path: &str) -> bool {
@@ -32,24 +33,33 @@ fn under(parent: &str, path: &str) -> bool {
 }
 
 impl Tracker {
-    pub fn new(root: &str) -> Self {
-        let volume = if let Some(tail) = root.strip_prefix("/Volumes/") {
-            let name = tail.split('/').next().unwrap_or("");
-            format!("/Volumes/{name}")
-        } else if let Some(parent) = root
+    pub fn new(root: &str, mount_point: Option<&str>) -> Self {
+        let volume = if let Some(parent) = root
             .strip_suffix("/.fseventsd")
             .or_else(|| root.strip_suffix("/.Spotlight-V100"))
         {
             parent.to_owned()
+        } else if let Some(point) = mount_point {
+            if point == "/" {
+                "/System/Volumes/Data".to_owned()
+            } else {
+                point.to_owned()
+            }
+        } else if let Some(tail) = root.strip_prefix("/Volumes/") {
+            let name = tail.split('/').next().unwrap_or("");
+            format!("/Volumes/{name}")
         } else {
             "/System/Volumes/Data".to_owned()
         };
-        Self::for_volume(root, &volume)
+        let mut tracker = Self::for_volume(root, &volume);
+        tracker.volume_resolved = mount_point.is_some();
+        tracker
     }
 
     fn for_volume(root: &str, volume: &str) -> Self {
         Self {
             root: root.to_owned(),
+            volume_resolved: true,
             rows: [("fsevents", ".fseventsd"), ("spotlight", ".Spotlight-V100")].map(
                 |(kind, name)| Row {
                     kind,
@@ -96,6 +106,15 @@ impl Tracker {
         self.rows
             .iter()
             .map(|row| {
+                if !self.volume_resolved {
+                    return Usage {
+                        kind: row.kind,
+                        path: row.path.clone(),
+                        bytes: None,
+                        status: "unavailable",
+                        issue: Some("volume-unresolved"),
+                    };
+                }
                 let covered = under(&self.root, &row.path);
                 let complete = covered && done && row.observed && !row.failed;
                 let bytes = (complete || row.bytes > 0).then_some(row.bytes);
@@ -131,7 +150,7 @@ mod tests {
 
     #[test]
     fn unavailable_is_not_zero_and_partial_is_not_complete() {
-        let mut t = Tracker::new("/");
+        let mut t = Tracker::new("/", Some("/"));
         assert_eq!(t.snapshot(true)[0].bytes, None);
         t.directory("/System/Volumes/Data/.fseventsd");
         t.uncertain(None);
@@ -145,26 +164,51 @@ mod tests {
 
     #[test]
     fn canonical_paths_and_scan_scope() {
-        let mut t = Tracker::new("/");
+        let mut t = Tracker::new("/", Some("/"));
         t.file("/System/Volumes/Data/.Spotlight-V100/store", 8_597_852_160);
         t.file("/.Spotlight-V100/store", 8_597_852_160);
         t.file("/System/Volumes/Data/.Spotlight-V100-extra/store", 99);
         assert_eq!(t.snapshot(true)[1].bytes, Some(8_597_852_160));
         assert_eq!(t.snapshot(true)[1].status, "complete");
         assert_eq!(
-            Tracker::new("/Users/me").snapshot(true)[0].status,
+            Tracker::new("/Users/me", Some("/")).snapshot(true)[0].status,
             "outside-scan"
         );
         assert_eq!(
-            Tracker::new("/Volumes/USB/photos").snapshot(true)[1].path,
+            Tracker::new("/Volumes/USB/photos", None).snapshot(true)[1].path,
             "/Volumes/USB/.Spotlight-V100"
+        );
+    }
+
+    #[test]
+    fn custom_mount_and_nested_volume_paths_use_the_resolved_owner() {
+        for volume in ["/Users/me/mnt/image", "/Volumes/Outer/inner"] {
+            let mut tracker = Tracker::new(volume, Some(volume));
+            tracker.file(&format!("{volume}/.fseventsd/log"), 4096);
+            tracker.file(&format!("{volume}/.Spotlight-V100/store"), 8192);
+            let rows = tracker.snapshot(true);
+            assert_eq!(rows[0].bytes, Some(4096));
+            assert_eq!(rows[1].bytes, Some(8192));
+            assert!(rows.iter().all(|row| row.status == "complete"));
+            let nested = Tracker::new(&format!("{volume}/photos"), Some(volume)).snapshot(true);
+            assert_eq!(nested[0].path, format!("{volume}/.fseventsd"));
+            assert!(nested.iter().all(|row| row.status == "outside-scan"));
+        }
+    }
+
+    #[test]
+    fn unresolved_mount_is_unavailable_instead_of_outside_the_scan() {
+        let rows = Tracker::new("/Users/me/mnt/image", None).snapshot(true);
+        assert!(
+            rows.iter()
+                .all(|row| row.status == "unavailable" && row.bytes.is_none())
         );
     }
 
     #[test]
     fn metadata_tracking_scales_linearly() {
         let run = |n| {
-            let mut t = Tracker::new("/");
+            let mut t = Tracker::new("/", Some("/"));
             crate::work::take();
             for _ in 0..n {
                 t.file("/System/Volumes/Data/.fseventsd/log", 4096);
@@ -193,8 +237,8 @@ mod tests {
         let root_str = crate::normalize_path(&root);
         let mut state = test_state(&root, &index);
         state.input.top_directory_limit = 1;
-        state.mac_system_metadata = Some(Tracker::for_volume(&root_str, &root_str));
-        crate::scan_generic(&root, &mut state).unwrap();
+        let plan = crate::walk_prune::mac_prune_plan(&root_str, &[root_str.clone()], &[]);
+        crate::scan_generic_with_plan(&root, &mut state, plan).unwrap();
         finish_index(&mut state, &index);
         let rows = state.mac_system_metadata.as_ref().unwrap().snapshot(true);
         let total = (std::fs::metadata(log).unwrap().blocks()

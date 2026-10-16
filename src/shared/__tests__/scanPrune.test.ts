@@ -139,6 +139,26 @@ describe("macPrunePlan", () => {
     expect(macPrunePlan("/Volumes/Storage/", mounts(), firmlinks()).otherMounts.size).toBe(0);
   });
 
+  it("resolves metadata stores on custom and nested mounts through either firmlink name", () => {
+    const image = "/Users/me/mnt/image";
+    const dataImage = `/System/Volumes/Data${image}`;
+    for (const mounted of [image, dataImage]) {
+      for (const scanned of [image, dataImage]) {
+        for (const suffix of ["", "/photos"]) {
+          const plan = macPrunePlan(scanned + suffix, ["/", "/System/Volumes/Data", mounted], firmlinks());
+          expect(plan.macMetadataVolume).toBe(scanned);
+          expect(plan.otherMounts.size).toBe(0);
+        }
+      }
+    }
+    const nested = "/Volumes/Storage/nested";
+    expect(macPrunePlan(`${nested}/photos`, [...mounts(), nested], firmlinks()).macMetadataVolume)
+      .toBe(nested);
+    expect(macPrunePlan("/Users/me/mnt/image-copy", mounts(), firmlinks()).macMetadataVolume)
+      .toBe("/System/Volumes/Data");
+    expect(macPrunePlan("/", mounts(), firmlinks()).macMetadataVolume).toBe("/System/Volumes/Data");
+  });
+
   it("skips the twins of firmlinks below /System", () => {
     const plan = macPrunePlan("/System", mounts(), firmlinks());
     expect([...plan.firmlinkTwins].sort()).toEqual([
