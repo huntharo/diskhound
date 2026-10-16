@@ -1,6 +1,7 @@
 import { Worker } from "node:worker_threads";
 
 import { resolveBundledWorkerScript } from "./bundledWorkerPath";
+import { trackWorker } from "./workerHeapRegistry";
 
 import type { DevArtifactReport } from "./contracts";
 import type { DevArtifactsRescanProgress } from "./devArtifactSidecar";
@@ -45,6 +46,7 @@ function runDevArtifactsRequest(
       maxYoungGenerationSizeMb: DEV_ARTIFACTS_WORKER_YOUNG_HEAP_MB,
     },
   });
+  trackWorker(worker, "dev-artifacts");
 
   return new Promise<DevArtifactReport>((resolve, reject) => {
     let settled = false;
