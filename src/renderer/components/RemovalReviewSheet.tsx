@@ -196,10 +196,16 @@ export function RemovalReviewSheet() {
   const resultText = (() => {
     if (!result) return null;
     const removed = result.moved.items + result.deleted.items + result.partial;
+    // From this approval's own counts: the pushed list can lag the result,
+    // and it also holds items decided in an earlier approval.
+    const sized = (count: RemovalApprovalResult["moved"]) =>
+      count.items > count.unsized ? `${count.unsized > 0 ? "at least " : ""}${formatBytes(count.bytes)}` : null;
+    const deletedSize = sized(result.deleted);
+    const movedSize = sized(result.moved);
     return [
       removed ? `Removed ${plural(removed, "item")} for ${plural(result.sessions, "agent")}.` : "Nothing was removed.",
-      result.deleted.items ? `Deleted ${result.deleted.items}${result.deleted.items > result.deleted.unsized ? `: ${sizeText(rows.filter((row) => row.item.status === "deleted").map((row) => row.item))} free now` : ""}.` : null,
-      result.moved.items ? `Moved ${result.moved.items} to the ${bin}${result.moved.items > result.moved.unsized ? `: ${sizeText(rows.filter((row) => row.item.status === "moved").map((row) => row.item))} more once you empty it` : ""}.` : null,
+      result.deleted.items ? `Deleted ${result.deleted.items}${deletedSize ? `: ${deletedSize} free now` : ""}.` : null,
+      result.moved.items ? `Moved ${result.moved.items} to the ${bin}${movedSize ? `: ${movedSize} more once you empty it` : ""}.` : null,
       result.failed ? `${result.failed} not removed.` : null,
       result.refused ? `${result.refused} not allowed any more.` : null,
       result.gone ? `${result.gone} already gone.` : null,
