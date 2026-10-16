@@ -86,12 +86,13 @@ export function StorageAccountingCard({ snapshot, onViewDev }: {
   const tmCount = snapshots.filter((s) => s.kind === "time-machine").length;
   const newest = snapshots.find((s) => s.createdAt !== null);
   const oldest = [...snapshots].reverse().find((s) => s.createdAt !== null);
-  const purgeable = report.purgeableBytes ?? 0;
-  const snapshotLabel = snapshots.length === 0
-    ? "No local snapshots"
+  const purgeable = report.purgeableBytes;
+  const snapshotLabel = (snapshots.length === 0
+    ? report.snapshotStatus === "complete" ? "No local snapshots" : "Snapshot list unavailable or incomplete"
     : tmCount === snapshots.length
       ? `${formatCount(tmCount)} local Time Machine snapshot${tmCount === 1 ? "" : "s"}`
-      : `${formatCount(snapshots.length)} local snapshot${snapshots.length === 1 ? "" : "s"}`;
+      : `${formatCount(snapshots.length)} local snapshot${snapshots.length === 1 ? "" : "s"}`)
+    + (snapshots.length > 0 && report.snapshotStatus !== "complete" ? " · list incomplete" : "");
 
   const copyThinCommand = () => {
     void navigator.clipboard?.writeText(THIN_SNAPSHOTS_COMMAND).then(
@@ -147,7 +148,8 @@ export function StorageAccountingCard({ snapshot, onViewDev }: {
             className="storage-card-value"
             title="Finder “Available” minus free space: blocks local snapshots still reference, plus caches macOS can clear on demand. macOS does not report how much each snapshot holds."
           >
-            {purgeable > 0 ? `≈ ${formatBytes(purgeable)} purgeable` : "Nothing purgeable"}
+            {purgeable === null ? "Purgeable size unavailable"
+              : purgeable > 0 ? `≈ ${formatBytes(purgeable)} purgeable` : "Nothing purgeable"}
           </div>
           <div className="storage-card-meta">
             {snapshotLabel}
@@ -157,7 +159,9 @@ export function StorageAccountingCard({ snapshot, onViewDev }: {
           <p className="storage-card-guide">
             {snapshots.length > 0
               ? "Files deleted after a snapshot keep their space until the snapshot goes. Time Machine removes local snapshots after about 24 hours, or sooner when the disk runs low. To reclaim it now, thin them from Terminal — this removes local restore points only; backups on your Time Machine disk stay."
-              : "Deleting files frees space right away. Purgeable space here is caches macOS clears when it needs room."}
+              : report.snapshotStatus === "complete"
+                ? "No local data snapshots were listed. Shared APFS clones can still hold blocks after deletion. Purgeable space includes caches macOS clears when it needs room."
+                : "Local snapshot collection failed or was incomplete. An empty list does not rule out snapshots holding deleted blocks; purgeable capacity, when available, includes snapshots and caches."}
           </p>
           {snapshots.length > 0 && (
             <div className="storage-card-command">

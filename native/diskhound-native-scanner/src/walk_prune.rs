@@ -75,6 +75,8 @@ pub struct PrunePlan {
     /// Data-volume names of directories the walk reaches through a
     /// firmlink below the root.
     pub firmlink_twins: HashSet<String>,
+    /// Owning macOS volume in the scan's path spelling; startup stores use Data.
+    pub mac_metadata_volume: Option<String>,
 }
 
 impl PrunePlan {
@@ -229,11 +231,26 @@ fn firmlink_aliases(path: &str, firmlinks: &[Firmlink]) -> Vec<String> {
 fn owning_mount<'a>(path: &str, mounts: &'a [String], firmlinks: &[Firmlink]) -> Option<&'a str> {
     let mut names = firmlink_aliases(path, firmlinks);
     names.push(path.to_string());
-    mounts
-        .iter()
-        .filter(|point| names.iter().any(|name| is_at_or_under(point, name)))
-        .max_by_key(|point| point.len())
-        .map(String::as_str)
+    let mut best: Option<&str> = None;
+    let mut best_distance = usize::MAX;
+    for point in mounts {
+        for name in &names {
+            crate::work::step();
+            if !is_at_or_under(point, name) {
+                continue;
+            }
+            // Compare unmatched suffixes: absolute prefix lengths from
+            // different firmlink aliases do not establish specificity.
+            let distance = if name == point { 0 }
+                else { name.len() - point.len() - usize::from(point != "/") };
+            if distance < best_distance
+                || (distance == best_distance && point.len() > best.map_or(0, str::len)) {
+                best = Some(point);
+                best_distance = distance;
+            }
+        }
+    }
+    best
 }
 
 /// The sealed System volume and its Data volume are one startup disk.
@@ -258,7 +275,17 @@ pub fn mac_prune_plan(root: &str, mounts: &[String], firmlinks: &[Firmlink]) -> 
     let Some(root_mount) = owning_mount(root, mounts, firmlinks) else {
         return plan;
     };
+    plan.mac_metadata_volume = Some(if is_startup_volume(root_mount) {
+        MAC_DATA_VOLUME.to_owned()
+    } else {
+        // Use the name through which this scan will emit file paths.
+        let mut names = vec![root_mount.to_owned()];
+        names.extend(firmlink_aliases(root_mount, firmlinks));
+        names.into_iter().find(|point| is_at_or_under(point, root))
+            .unwrap_or_else(|| root_mount.to_owned())
+    });
     for point in mounts {
+        crate::work::step();
         let same_disk = point == root_mount
             || (is_startup_volume(point) && is_startup_volume(root_mount));
         if same_disk {
@@ -571,6 +598,7 @@ pub fn plan_for(root: &Path) -> PrunePlan {
         other_mounts: foreign_mount_points(&mounts, &root),
         duplicate_mounts: duplicate_mount_paths(&mounts, &root),
         firmlink_twins: HashSet::new(),
+        mac_metadata_volume: None,
     }
 }
 
@@ -603,6 +631,7 @@ mod tests {
             other_mounts: set(&["/Volumes/USB"]),
             duplicate_mounts: set(&["/mnt/bind"]),
             firmlink_twins: set(&["/System/Volumes/Data/Users"]),
+            ..PrunePlan::default()
         };
         assert_eq!(plan.skip_reason("/Volumes/USB", true), Some(Prune::OtherMount));
         assert_eq!(plan.skip_reason("/mnt/bind", true), Some(Prune::DuplicateMount));
@@ -781,6 +810,50 @@ mod tests {
         assert!(plan.firmlink_twins.is_empty());
         let plan = mac_prune_plan("/Volumes/Storage/", &mounts(), &firmlinks());
         assert!(plan.other_mounts.is_empty());
+    }
+
+    #[test]
+    fn metadata_mount_resolves_custom_nested_and_firmlinked_mounts() {
+        let image = "/Users/me/mnt/image";
+        let data_image = format!("{MAC_DATA_VOLUME}{image}");
+        for mounted in [image, data_image.as_str()] {
+            for scanned in [image, data_image.as_str()] {
+                for suffix in ["", "/photos"] {
+                    let plan = mac_prune_plan(&format!("{scanned}{suffix}"),
+                        &["/".into(), MAC_DATA_VOLUME.into(), mounted.into()], &firmlinks());
+                    assert_eq!(plan.mac_metadata_volume.as_deref(), Some(scanned));
+                    assert!(plan.other_mounts.is_empty());
+                }
+            }
+        }
+        let nested = "/Volumes/Storage/nested";
+        let mut mounted = mounts();
+        mounted.push(nested.into());
+        assert_eq!(mac_prune_plan(&format!("{nested}/photos"), &mounted, &firmlinks())
+            .mac_metadata_volume.as_deref(), Some(nested));
+        assert_eq!(mac_prune_plan("/Users/me/mnt/image-copy", &mounts(), &firmlinks())
+            .mac_metadata_volume.as_deref(), Some(MAC_DATA_VOLUME));
+        assert_eq!(mac_prune_plan("/", &mounts(), &firmlinks())
+            .mac_metadata_volume.as_deref(), Some(MAC_DATA_VOLUME));
+    }
+
+    #[test]
+    fn metadata_mount_resolution_scales_with_mount_count() {
+        let run = |n| {
+            let mut mounted = vec!["/".to_owned(), MAC_DATA_VOLUME.to_owned()];
+            mounted.extend((0..n).map(|i| format!("/Users/me/mnt/image-{i}")));
+            let root = format!("/Users/me/mnt/image-{}", n - 1);
+            let links = parse_firmlinks("/Users\tUsers");
+            crate::work::take();
+            let plan = mac_prune_plan(&root, &mounted, &links);
+            let steps = crate::work::take();
+            assert_eq!(plan.mac_metadata_volume.as_deref(), Some(root.as_str()));
+            steps
+        };
+        let small = run(1000);
+        let large = run(8000);
+        assert!(large <= small * 16);
+        assert!(large <= 50_000);
     }
 
     #[test]

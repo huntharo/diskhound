@@ -183,6 +183,18 @@ export interface ScanSnapshot {
    * another disk (/Volumes/Storage, /mnt/windows). Omitted when none were.
    */
   skippedMounts?: string[];
+  /** macOS metadata categories from the same walk, without another size scan. */
+  macSystemMetadata?: MacSystemMetadataUsage[];
+}
+
+export interface MacSystemMetadataUsage {
+  kind: "fsevents" | "spotlight";
+  path: string;
+  /** Allocated regular-file bytes, hardlinks counted once with the scan. */
+  bytes: number | null;
+  status: "complete" | "incomplete" | "unavailable" | "outside-scan";
+  /** Unknown-path native enumeration errors conservatively affect both categories. */
+  issue?: "scan-errors" | "not-observed" | "volume-unresolved";
 }
 
 // ── Storage accounting (snapshots + clones) ─────────────────
@@ -274,6 +286,8 @@ export interface StorageAccountingReport {
   } | null;
   /** Local snapshots on the data volume, newest first. */
   snapshots: LocalSnapshotInfo[];
+  /** A Time Machine fallback cannot rule out other APFS snapshots. */
+  snapshotStatus?: "complete" | "incomplete" | "unavailable";
   /** Caveats worth showing next to the numbers. */
   notes: string[];
 }

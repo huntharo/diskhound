@@ -1848,6 +1848,28 @@
     "worker": 0,
     "observedBytesWritten": 0
   },
+  "renderer-system-metadata-guidance": {
+    "note": "Expand, collapse and remount scan-backed macOS metadata guidance: 0 reads, writes or subprocesses. Projects 0 writes/day and 0 MB/day at the 60-minute default and 1-minute minimum; no polling or new persisted state.",
+    "writeFile": 0,
+    "appendFile": 0,
+    "rename": 0,
+    "copyFile": 0,
+    "link": 0,
+    "mkdir": 0,
+    "createWriteStream": 0,
+    "unlink": 0,
+    "readFile": 0,
+    "readdir": 0,
+    "stat": 0,
+    "lstat": 0,
+    "access": 0,
+    "existsSync": 0,
+    "createReadStream": 0,
+    "open": 0,
+    "spawn": 0,
+    "worker": 0,
+    "observedBytesWritten": 0
+  },
   "scan-completed-json-files": {
     "note": "one completed scan's JSON: the history snapshot and last-scan.json hold the same ~2.8 MB, 5.6 MB per scan and ~22 MB/day at the 6 h default, half of it the duplicate; the NDJSON index and sidecar renames are not in this scenario",
     "writeFile": 3,

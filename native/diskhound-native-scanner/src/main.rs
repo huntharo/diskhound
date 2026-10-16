@@ -30,6 +30,7 @@ mod mft;
 mod mft_runs;
 
 mod sample;
+mod mac_system_metadata;
 mod clone_attrs;
 mod dev_artifacts;
 mod index_line;
@@ -618,6 +619,9 @@ struct ScanSnapshot {
     /// `ScanStorageAccounting` in src/shared/contracts.ts.
     #[serde(skip_serializing_if = "Option::is_none")]
     storage_accounting: Option<StorageAccountingOut>,
+    /// macOS stores measured by the normal walk, including coverage failures.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mac_system_metadata: Option<Vec<mac_system_metadata::Usage>>,
     /// Mount points below the root the walk left out because they are
     /// another disk. The UI links the ones with a drive pill.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -731,6 +735,7 @@ struct ScanState {
     io: Arc<IoStats>,
     /// Other disks the walk left out. See walk_prune.
     skipped_mounts: Vec<String>,
+    mac_system_metadata: Option<mac_system_metadata::Tracker>,
 }
 
 impl ScanState {
@@ -755,6 +760,8 @@ impl ScanState {
             largest_files: LargestFiles::new(input.top_file_limit),
             hottest_directories: Vec::with_capacity(input.top_directory_limit),
             hottest_directories_due_at: 0,
+            mac_system_metadata: cfg!(target_os = "macos")
+                .then(|| mac_system_metadata::Tracker::new(&root_path_string, None)),
             input,
             root_path_string,
             started_at_ms: unix_timestamp_ms(SystemTime::now()),
@@ -1584,6 +1591,12 @@ fn scan_generic_with_plan_mode(
 ) -> Result<(), String> {
     state.scan_phase = ScanPhase::Indexing;
     state.expected_total_files = state.input.expected_total_files;
+    // Reuse the mount table and firmlink resolution already read for pruning.
+    if let Some(volume) = plan.mac_metadata_volume.as_deref() {
+        state.mac_system_metadata = Some(mac_system_metadata::Tracker::new(
+            &state.root_path_string, Some(volume),
+        ));
+    }
 
     // Parallelism: dua-core reads directories on a work-stealing pool.
     // Directory enumeration is embarrassingly parallel at the I/O layer,
@@ -1692,6 +1705,9 @@ fn scan_generic_with_plan_mode(
             // that could not be read.
             Err(_) => {
                 state.skipped_entries += 1;
+                if let Some(t) = state.mac_system_metadata.as_mut() {
+                    t.uncertain(None);
+                }
                 maybe_emit_progress(state)?;
                 continue;
             }
@@ -1713,6 +1729,9 @@ fn scan_generic_with_plan_mode(
         let metadata = entry.metadata.and_then(Result::ok);
 
         if is_dir {
+            if let Some(t) = state.mac_system_metadata.as_mut() {
+                t.directory(&normalize_path(&path));
+            }
             state.directories_visited += 1;
             // Emit dir mtime entry so this scan is a valid baseline for the
             // next one. The Phase-1 inherit optimization isn't wired into
@@ -1731,6 +1750,9 @@ fn scan_generic_with_plan_mode(
 
         let Some(metadata) = metadata else {
             state.skipped_entries += 1;
+            if let Some(t) = state.mac_system_metadata.as_mut() {
+                t.uncertain(Some(&normalize_path(&path)));
+            }
             maybe_emit_progress(state)?;
             continue;
         };
@@ -3821,6 +3843,9 @@ fn record_file_with_link_flag(
     let occupancy = if extra_hardlink { 0 } else { file_record.size };
     state.files_visited += 1;
     state.bytes_seen += occupancy;
+    if let Some(t) = state.mac_system_metadata.as_mut() {
+        t.file(&file_record.path, occupancy);
+    }
     if let (Some(attrs), false) = (clone.as_ref(), extra_hardlink) {
         state.clone_totals.add(occupancy, attrs);
     }
@@ -3975,6 +4000,8 @@ impl ScanState {
             scan_phase: self.scan_phase,
             expected_total_files: self.expected_total_files,
             storage_accounting: self.storage_accounting(),
+            mac_system_metadata: self.mac_system_metadata.as_ref()
+                .map(|t| t.snapshot(matches!(status, ScanStatus::Done))),
             skipped_mounts: self.skipped_mounts.clone(),
         }
     }
@@ -4026,6 +4053,7 @@ fn early_running_snapshot(root_path: &str, started_at_ms: u64, elapsed_ms: u64) 
         scan_phase: ScanPhase::Starting,
         expected_total_files: None,
         storage_accounting: None,
+        mac_system_metadata: None,
         skipped_mounts: Vec::new(),
     }
 }

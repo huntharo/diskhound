@@ -15,6 +15,7 @@ import {
   type ScanSnapshot,
   type WorkerToMainMessage,
 } from "../shared/contracts";
+import { MacSystemMetadataTracker, macSystemMetadataPaths } from "../shared/macSystemMetadata";
 import { occupancyBytes } from "../shared/allocatedSize";
 import { compareEntryNames, HardlinkTracker, type LinkStat } from "../shared/hardlinkTracker";
 import {
@@ -98,6 +99,9 @@ export async function runScan(
   // `/Volumes/USB`, a bind's source, or the Data volume twice.
   const prunePlan = await loadScanPrunePlan(rootPath);
   const skippedMounts = new Set<string>();
+  const systemMetadata = process.platform === "darwin"
+    ? new MacSystemMetadataTracker(rootPath, macSystemMetadataPaths(rootPath, prunePlan.macMetadataVolume),
+      prunePlan.macMetadataVolume !== undefined) : null;
   const scanOptions = input.options;
   const TOP_FILE_LIMIT = input.limits?.topFileLimit ?? DEFAULT_TOP_FILE_LIMIT;
   const TOP_DIRECTORY_LIMIT = input.limits?.topDirectoryLimit ?? DEFAULT_TOP_DIRECTORY_LIMIT;
@@ -266,6 +270,7 @@ export async function runScan(
         .slice(0, TOP_EXTENSION_LIMIT),
       errorMessage,
       lastUpdatedAt: now,
+      ...(systemMetadata ? { macSystemMetadata: systemMetadata.snapshot(status === "done") } : {}),
       ...(skippedMounts.size > 0 ? { skippedMounts: [...skippedMounts].sort() } : {}),
     };
 
@@ -299,19 +304,22 @@ export async function runScan(
       currentDirMtime = st.mtimeMs;
     } catch {
       skippedEntries += 1;
+      systemMetadata?.uncertain(directoryPath);
       maybeEmitProgress();
       continue;
     }
 
     if (baseline) {
       const baselineMtime = baseline.dirMtimes.get(Path.resolve(directoryPath));
-      if (baselineMtime !== undefined && Math.abs(baselineMtime - currentDirMtime) < 2) {
+      if (baselineMtime !== undefined && Math.abs(baselineMtime - currentDirMtime) < 2
+        && !systemMetadata?.requiresWalk(directoryPath)) {
         // mtime unchanged (within 2ms tolerance for FS quirks) — inherit
         const inherited = inheritSubtree(directoryPath, baseline);
         for (const fileRecord of inherited) {
           filesVisited += 1;
           const occupancy = fileRecord.extraHardlink ? 0 : fileRecord.size;
           bytesSeen += occupancy;
+          systemMetadata?.file(fileRecord.path, occupancy);
           if (!fileRecord.extraHardlink) {
             largestFiles.offer(fileRecord);
             rollupExtension(extensionTotals, fileRecord.extension, occupancy);
@@ -350,10 +358,12 @@ export async function runScan(
       entries = await FS.readdir(directoryPath, { withFileTypes: true });
     } catch {
       skippedEntries += 1;
+      systemMetadata?.uncertain(directoryPath);
       maybeEmitProgress();
       continue;
     }
 
+    systemMetadata?.directory(directoryPath);
     const fileEntries: Dirent[] = [];
     const subdirectories: string[] = [];
     // Files before subdirectories, each by name: the Rust walker's order,
@@ -370,6 +380,7 @@ export async function runScan(
       if (entry.isDirectory()) {
         const pruned = skipReason(prunePlan, fullPath);
         if (pruned) {
+          systemMetadata?.uncertain(fullPath);
           if (pruned === "other-mount") skippedMounts.add(fullPath);
           continue;
         }
@@ -405,6 +416,7 @@ export async function runScan(
           try {
             stat = await FS.stat(fullPath);
           } catch {
+            systemMetadata?.uncertain(fullPath);
             return null;
           }
 
@@ -436,6 +448,7 @@ export async function runScan(
 
         filesVisited += 1;
         bytesSeen += occupancy;
+        systemMetadata?.file(fileRecord.path, occupancy);
 
         if (extraHardlink) {
           hardlinkBytesDeduped += fileRecord.size;
