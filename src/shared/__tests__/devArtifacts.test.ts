@@ -43,7 +43,7 @@ describe("classifyArtifactPath", () => {
             // UNC paths are normalized to backslashes by both classifiers.
             const root = prefix.startsWith("//") ? expectedRoot?.replaceAll("/", "\\") : expectedRoot;
             expect(classifyArtifactPath(path), path).toEqual(root ? { root, kind: fixture.kind } : null);
-            if (root) expect(classifyArtifactPath(root), root).toEqual({ root, kind: fixture.kind });
+            if (root) expect(classifyArtifactPath(root, true), root).toEqual({ root, kind: fixture.kind });
           }
         }
       }

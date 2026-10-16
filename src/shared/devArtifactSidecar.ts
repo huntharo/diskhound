@@ -245,6 +245,8 @@ function nearestProject(artifactPath: string, projects: Map<string, string>): st
 // Old sidecars can include name-only guesses and whole tool homes.
 // Do not keep displaying or refreshing those guesses after rules change.
 function keepArtifact(rec: DevArtifactRootRec): boolean {
+  // Native scans resolve linked worktrees from their .git pointer file, so
+  // these verified roots need not have the conventional .worktrees name.
   if (rec.kind === "worktree" && rec.worktree) return true;
   const match = classifyArtifactPath(rec.path, true);
   return match?.kind === rec.kind && dirsEqual(match.root, rec.path);
@@ -351,8 +353,7 @@ export function reportFromSidecar(
   const artifacts: DevArtifact[] = [];
   for (const rec of current.roots) {
     if (!keepArtifact(rec)) continue;
-    // A repo belongs to its checkout, marker file or not, and a linked
-    // worktree to the main checkout its `.git` file points at.
+    // Repos belong to their checkout; worktrees to the checkout their .git points at.
     const projectPath = rec.kind === "git-repo"
       ? dirnameOf(rec.path)
       : rec.worktree?.project ?? nearestProject(rec.path, projects);

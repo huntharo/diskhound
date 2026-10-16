@@ -783,7 +783,8 @@ fn classify(path: &str) -> Option<(String, Kind)> {
     classify_parts(&parts, 0).map(|(depth, kind)| (join_segments(path, &parts, depth), kind))
 }
 
-// Classify nested output without splitting or reconstructing the path again.
+// Start at the enclosing worktree's end to classify nested output without
+// splitting or reconstructing each file path again.
 fn classify_parts(parts: &[&str], start: usize) -> Option<(usize, Kind)> {
     for i in start..parts.len() {
         crate::work::step();
@@ -1272,8 +1273,15 @@ mod tests {
                             (root, case["kind"].as_str().unwrap().to_string())
                         });
                         if let Some((root, kind)) = &expected {
+                            // classify accepts file paths; a bare .git may be a pointer
+                            // file, so validate this directory root through a child.
+                            let root_probe = if kind == "git-repo" {
+                                format!("{root}/HEAD")
+                            } else {
+                                root.clone()
+                            };
                             assert_eq!(
-                                classify(root).map(|(r, k)| (r, k.as_str().to_string())),
+                                classify(&root_probe).map(|(r, k)| (r, k.as_str().to_string())),
                                 Some((root.clone(), kind.clone())),
                                 "root: {root}"
                             );
@@ -1518,7 +1526,7 @@ mod tests {
             (format!("{wt}/src/main.ts"), 4_000),
             (format!("{wt}/node_modules/react/index.js"), 50_000),
             (format!("{wt}/packages/ui/node_modules/x/y.js"), 30_000),
-            (format!("{wt}/target/debug/app"), 900_000),
+            (format!("{wt}/target/debug/deps/libapp.rlib"), 900_000),
             (format!("{wt}/.git"), 4_096),
             (format!("{wt}/package.json"), 1_000),
             // A submodule inside it: part of the worktree, not its own.
@@ -1526,11 +1534,19 @@ mod tests {
             (format!("{wt}/vendor/lib/lib.c"), 2_000),
             // Elsewhere: a plain project with its own node_modules.
             ("/Users/dev/github/app/node_modules/a/b.js".to_string(), 7_000),
+            (format!("{wt}/jvm/target/scala-2.13/classes/App.class"), 20_000),
+            // Part of the worktree, but no language evidence for this target.
+            (format!("{wt}/unknown/target/notes.txt"), 3_000),
         ];
         let files: Vec<(&str, u64)> = files.iter().map(|(p, s)| (p.as_str(), *s)).collect();
         let tree_size: u64 = files.iter().filter(|(p, _)| p.starts_with(wt)).map(|(_, s)| s).sum();
         // The `.git` file first, last, and in the middle.
-        for order in [vec![4, 0, 1, 2, 3, 5, 6, 7, 8], vec![0, 1, 2, 3, 5, 6, 7, 8, 4], (0..9).collect()] {
+        let without_git: Vec<usize> = (0..files.len()).filter(|i| *i != 4).collect();
+        for order in [
+            [vec![4], without_git.clone()].concat(),
+            [without_git, vec![4]].concat(),
+            (0..files.len()).collect(),
+        ] {
             let mut acc = DevArtifactAcc::with_git_reader(fake_git_file);
             for i in &order {
                 let (path, size) = files[*i];
@@ -1540,15 +1556,16 @@ mod tests {
             let rec = &acc.artifacts[wt];
             assert!(matches!(rec.kind, Kind::Worktree));
             assert_eq!(rec.size, tree_size);
-            assert_eq!(rec.files, 8);
+            assert_eq!(rec.files, 10);
             assert_eq!(rec.project.as_deref(), Some("/Users/dev/github/feat"));
             assert_eq!(
                 rec.nested,
-                BTreeMap::from([("node-modules", 80_000), ("rust-target", 900_000)]),
+                BTreeMap::from([("node-modules", 80_000), ("rust-target", 900_000), ("jvm", 20_000)]),
             );
             // Folded in, so no byte is listed twice.
             assert!(!acc.artifacts.contains_key(&format!("{wt}/node_modules")));
-            assert!(!acc.artifacts.contains_key(&format!("{wt}/target/debug")));
+            assert!(!acc.artifacts.contains_key(&format!("{wt}/target/debug/deps")));
+            assert!(!acc.artifacts.contains_key(&format!("{wt}/jvm/target/scala-2.13")));
             assert!(!acc.artifacts.contains_key(&format!("{wt}/vendor/lib")));
             assert!(acc.artifacts.contains_key("/Users/dev/github/app/node_modules"));
             // The worktree's .git and the submodule's: both outside every tree.
@@ -1577,7 +1594,7 @@ mod tests {
     fn git_files_inside_another_tree_are_not_read() {
         let mut acc = DevArtifactAcc::with_git_reader(|_| panic!("read a .git inside a tree"));
         acc.add("/Users/dev/app/node_modules/dep/.git", 100, false, None);
-        acc.add("/Users/dev/app/target/debug/build/x/.git", 100, false, None);
+        acc.add("/Users/dev/app/target/debug/build/x-0123456789abcdef/.git", 100, false, None);
         acc.add("/Users/dev/app/.git/modules/lib/.git", 100, false, None);
         assert_eq!(acc.git_file_reads(), 0);
     }
@@ -1608,6 +1625,9 @@ mod tests {
             (r"C:\src\app\.worktrees\feat\.git", 4_096u64),
             (r"C:\src\app\.worktrees\feat\node_modules\x\i.js", 20_000),
             (r"C:\src\app\.worktrees\feat\src\a.rs", 1_000),
+            (r"C:\src\app\.worktrees\feat\target\debug\deps\libapp.rlib", 30_000),
+            (r"C:\src\app\.worktrees\feat\jvm\target\scala-3.3\classes\App.class", 5_000),
+            (r"C:\src\app\.worktrees\feat\unknown\target\notes.txt", 2_000),
         ];
         fn windows_git_file(_: &str) -> Option<String> {
             Some("gitdir: C:/src/app/.git/worktrees/feat\n".to_string())
@@ -1619,9 +1639,9 @@ mod tests {
         // No folder rollups: the per-file sums already cover the tree.
         acc.resolve_worktrees(&|_| None);
         let rec = &acc.artifacts[r"C:\src\app\.worktrees\feat"];
-        assert_eq!(rec.size, 25_096);
+        assert_eq!(rec.size, 62_096);
         assert_eq!(rec.project.as_deref(), Some(r"C:\src\app"));
-        assert_eq!(rec.nested, BTreeMap::from([("node-modules", 20_000)]));
+        assert_eq!(rec.nested, BTreeMap::from([("node-modules", 20_000), ("rust-target", 30_000), ("jvm", 5_000)]));
         assert_eq!(acc.git_file_reads(), 1);
     }
 
