@@ -20,13 +20,33 @@ import { findExcludedFolderActionBlocker } from "../shared/pathProtection";
  * listing. Throws if nothing exists at `target`.
  */
 export async function canonicalPath(target: string): Promise<string> {
-  const stat = await FS.lstat(target);
-  if (!stat.isSymbolicLink()) return FS.realpath(target);
+  return (await canonicalTarget(target)).path;
+}
+
+/**
+ * Which file system object this is: device, inode (the file ID on
+ * Windows) and creation time. A file deleted and made again at the same
+ * path differs, even where the file system reuses the inode number at
+ * once (ext4). Linux statx reports a zero birth time when the filesystem
+ * has no creation time, and Node copies that zero instead of falling
+ * back to ctime. A zero birth time uses the change time, so a metadata
+ * change reads as another file and DiskHound leaves the path alone.
+ */
+export function fileIdentity(stat: { dev: bigint; ino: bigint; birthtimeNs: bigint; ctimeNs: bigint }): string {
+  const born = stat.birthtimeNs === 0n ? stat.ctimeNs : stat.birthtimeNs;
+  return `${stat.dev}:${stat.ino}:${born}`;
+}
+
+/** {@link canonicalPath}, plus the {@link fileIdentity} of what is there now, from the same lstat. */
+export async function canonicalTarget(target: string): Promise<{ path: string; fileId: string }> {
+  const stat = await FS.lstat(target, { bigint: true });
+  const fileId = fileIdentity(stat);
+  if (!stat.isSymbolicLink()) return { path: await FS.realpath(target), fileId };
   const parent = await FS.realpath(Path.dirname(target));
   const name = Path.basename(target);
   const entries = await FS.readdir(parent);
   const onDisk = entries.includes(name) ? name : entries.find((entry) => entry.toLowerCase() === name.toLowerCase());
-  return Path.join(parent, onDisk ?? name);
+  return { path: Path.join(parent, onDisk ?? name), fileId };
 }
 
 function key(path: string, platform: NodeJS.Platform): string {

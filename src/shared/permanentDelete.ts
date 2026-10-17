@@ -89,12 +89,17 @@ export async function permanentlyDeleteOnDisk(
   });
   emit(resolved, null, "preparing");
 
-  async function openDirectory(path: string): Promise<DirectoryFrame | "file" | null> {
+  // Device of the folder the user asked to delete. A child on another
+  // device is a volume mounted inside it; leave that child alone.
+  let rootDev: number | undefined;
+  async function openDirectory(path: string): Promise<DirectoryFrame | "file" | "other-volume" | null> {
     try {
       // Recheck directory entries before descending; do not follow directory
-      // symlinks or junctions. This does not promise path-race containment.
+      // symlinks or junctions. A different device is another volume.
       const stat = await FSP.lstat(path);
       if (stat.isSymbolicLink() || !stat.isDirectory()) return "file";
+      if (rootDev === undefined) rootDev = stat.dev;
+      else if (stat.dev !== rootDev) return "other-volume";
       return { path, handle: await FSP.opendir(path, { bufferSize: 32 }), pending: 0 };
     } catch (error) {
       if (isEnoentFsError(error)) return null;
@@ -112,7 +117,7 @@ export async function permanentlyDeleteOnDisk(
     const stack: DirectoryFrame[] = [];
     try {
       const root = await openDirectory(resolved);
-      if (root === null) return;
+      if (root === null || root === "other-volume") return;
       if (root === "file") {
         yield { path: resolved, directory: false };
         return;
@@ -132,7 +137,7 @@ export async function permanentlyDeleteOnDisk(
           const path = Path.join(frame.path, entry.name);
           if (entry.isDirectory() && !entry.isSymbolicLink()) {
             const child = await openDirectory(path);
-            if (child === null) continue;
+            if (child === null || child === "other-volume") continue;
             if (child !== "file") {
               frame.pending++;
               stack.push(child);

@@ -16,6 +16,7 @@ import type {
   UpdateStatus,
 } from "./shared/contracts";
 import type { AgentAccessSnapshot, AgentActivityEntry, AgentConsentState, AgentSecurityEvent } from "./shared/agentAccess";
+import type { AgentRemovalList } from "./shared/agentRemovals";
 
 // Normalize node's rich NodeJS.Platform union down to the three
 // platforms we actually ship binaries for. FreeBSD / AIX / SunOS are
@@ -44,6 +45,8 @@ const AGENT_ACCESS_CHANGED_CHANNEL = "diskhound:agent-access-changed";
 const AGENT_ACTIVITY_CHANNEL = "diskhound:agent-activity";
 const AGENT_SECURITY_CHANNEL = "diskhound:agent-security";
 const AGENT_CONSENT_STATE_CHANNEL = "diskhound:agent-consent-state";
+const AGENT_REMOVALS_CHANNEL = "diskhound:agent-removals-changed";
+const AGENT_REVIEW_OPEN_CHANNEL = "diskhound:agent-review-open";
 
 const api: DiskhoundNativeApi = {
   platform,
@@ -328,6 +331,22 @@ const api: DiskhoundNativeApi = {
     };
     ipcRenderer.on(AGENT_CONSENT_STATE_CHANNEL, wrapped);
     return () => { ipcRenderer.removeListener(AGENT_CONSENT_STATE_CHANNEL, wrapped); };
+  },
+  approveAgentRemovals: (decisions) => ipcRenderer.invoke("diskhound:agent-removals-approve", decisions),
+  measureAgentRemovals: (itemIds) => ipcRenderer.invoke("diskhound:agent-removals-measure", itemIds),
+  onAgentRemovalsChanged: (listener) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, list: AgentRemovalList) => {
+      listener(list);
+    };
+    ipcRenderer.on(AGENT_REMOVALS_CHANNEL, wrapped);
+    return () => { ipcRenderer.removeListener(AGENT_REMOVALS_CHANNEL, wrapped); };
+  },
+  onAgentReviewOpen: (listener) => {
+    const wrapped = () => {
+      listener();
+    };
+    ipcRenderer.on(AGENT_REVIEW_OPEN_CHANNEL, wrapped);
+    return () => { ipcRenderer.removeListener(AGENT_REVIEW_OPEN_CHANNEL, wrapped); };
   },
 };
 

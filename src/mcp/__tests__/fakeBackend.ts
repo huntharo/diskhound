@@ -17,6 +17,7 @@ import type {
   ScanSnapshot,
 } from "../../shared/contracts";
 import { BUILT_IN_MCP_ROLES, type AgentActivityEntry } from "../../shared/agentAccess";
+import type { RemovalRequest, RemovalVolumeCheck } from "../../shared/agentRemovals";
 import type { McpAuthorization } from "../accessPolicy";
 import type { AgentActivitySink, DiskhoundAgentBackend, DuplicateState, FolderChildren } from "../backend";
 import type { RemovalMeasurement } from "../removalMeasure";
@@ -268,6 +269,8 @@ const NO_DUPLICATES: DuplicateState = { running: false, progress: null, analysis
  * calls or override one result with `mockResolvedValueOnce`.
  */
 export function createFakeBackend() {
+  /** What queueRemoval added, as removalRequests returns it. */
+  const requests: RemovalRequest[] = [];
   const backend = {
     platform: "darwin" as NodeJS.Platform,
     appVersion: "9.9.9-test",
@@ -300,19 +303,39 @@ export function createFakeBackend() {
     navigate: vi.fn<DiskhoundAgentBackend["navigate"]>(async () => undefined),
     revealPath: vi.fn<DiskhoundAgentBackend["revealPath"]>(async () => ({ ok: true, message: "Revealed." })),
     measureRemoval: vi.fn<NonNullable<DiskhoundAgentBackend["measureRemoval"]>>(async () => MEASUREMENT),
-    confirmAndTrash: vi.fn<DiskhoundAgentBackend["confirmAndTrash"]>(async (request) => ({
-      confirmed: true,
-      results: request.paths.map((path) => ({ path, ok: true, message: "Moved to Trash.", sizeBytes: 100 * MB })),
-    })),
-    confirmAndDelete: vi.fn<DiskhoundAgentBackend["confirmAndDelete"]>(async (request) => ({
-      confirmed: true,
-      results: request.paths.map((path) => ({ path, ok: true, message: "Deleted.", sizeBytes: 100 * MB })),
-    })),
+    // Queues every path at 100 MB on a volume whose Trash takes it.
+    queueRemoval: vi.fn<DiskhoundAgentBackend["queueRemoval"]>(async (request) => {
+      const queued: RemovalRequest = {
+        id: `rq_${requests.length + 1}`,
+        sessionId: request.sessionId,
+        sessionName: request.sessionName,
+        roleName: request.roleName,
+        asked: request.asked,
+        reason: request.reason ?? null,
+        requestedAt: NOW,
+        decidedAt: null,
+        items: request.paths.map((path, index) => ({
+          id: `it_${requests.length + 1}_${index}`,
+          path,
+          asked: request.asked,
+          sizeBytes: 100 * MB,
+          check: TRASH_OK,
+          status: "waiting",
+        })),
+      };
+      requests.push(queued);
+      return { request: queued, refused: [], replaced: 0 };
+    }),
+    removalRequests: vi.fn<NonNullable<DiskhoundAgentBackend["removalRequests"]>>((sessionId) =>
+      requests.filter((request) => request.sessionId === sessionId)),
   } satisfies DiskhoundAgentBackend;
   return backend;
 }
 
 export type FakeBackend = ReturnType<typeof createFakeBackend>;
+
+/** A volume check for an item the Trash takes whole. */
+export const TRASH_OK: RemovalVolumeCheck = { volume: "the startup disk", trash: "yes", readOnly: false, mountsInside: [], checkedAt: NOW };
 
 /** Authorization for one of the built-in roles, as FixedMcpAuthorizer expects. */
 export function roleAuthorization(roleId: string, sessionName = "Test Agent"): McpAuthorization {

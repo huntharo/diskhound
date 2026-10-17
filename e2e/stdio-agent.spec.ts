@@ -6,7 +6,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import { unzip } from "../src/test/zipReader";
-import { callTool, resultText, stubTrash, waitForAgentServer } from "./fixtures/agent";
+import { BIN, callTool, openReview, resultText, reviewRow, stubTrash, waitForAgentServer } from "./fixtures/agent";
 import { expect, test, type AppHandle } from "./fixtures/electron-app";
 import { openTab, scanFolderFromPicker } from "./fixtures/steps";
 
@@ -209,32 +209,32 @@ test("stdio EOF exits while approval is pending, and withdraws it", async ({ lau
 });
 
 
-test("closing stdio cancels a pending Trash request", async ({ launch, scanTree }, testInfo) => {
+test("a Trash request outlives the agent's connection", async ({ launch, scanTree }, testInfo) => {
   const handle = await launch({ settings: { agents: { enabled: true } } });
   await scanFolderFromPicker(handle, scanTree.root);
   const trashDir = testInfo.outputPath("stdio-trash");
-  await stubTrash(handle, trashDir);
+  const trash = await stubTrash(handle, trashDir);
   const agent = await connect(handle, "Approve");
   const target = join(scanTree.root, "docs");
   try {
     expect(agent.error, agent.diagnostics()).toBeNull();
     await openTab(handle.page, "Settings");
     await handle.page.locator("#settings-ai-agents .agent-session-row select").selectOption("builtin.operator");
-    await handle.app.evaluate(({ dialog }) => {
-      const stub = dialog as unknown as { showMessageBox: () => Promise<unknown>; __release?: () => void };
-      stub.showMessageBox = () => new Promise((resolve) => {
-        stub.__release = () => resolve({ response: 0, checkboxChecked: false });
-      });
-    });
-    const pending = callTool(agent.client, "diskhound_move_to_trash", { paths: [target], reason: "Test disconnect" }).catch(() => null);
-    await expect.poll(() => handle.app.evaluate(({ dialog }) => typeof (dialog as unknown as { __release?: () => void }).__release)).toBe("function");
+    // The call returns as soon as the item is on the list, then the agent hangs up.
+    const queued = await callTool(agent.client, "diskhound_move_to_trash", { paths: [target], reason: "Test disconnect" });
+    expect(queued.isError, resultText(queued)).not.toBe(true);
+    expect(queued.structuredContent).toMatchObject({ queued: true, items: [{ path: target }] });
     await agent.client.close();
-    await pending;
-    await handle.app.evaluate(({ dialog }) => { (dialog as unknown as { __release: () => void }).__release(); });
-    // Wait for the tool to finish after its dialog resolves; the file must stay.
-    await expect.poll(() => handle.page.locator(".agent-activity-row").first().textContent()).toMatch(/cancel|disconnect|closed/i);
+    await expect(handle.page.locator(".agent-activity-row").first()).toContainText(`Asked to move 1 item to the ${BIN}`);
     expect(existsSync(target)).toBe(true);
-    expect(existsSync(trashDir)).toBe(false);
+
+    // The user approves later; the request is still there.
+    const sheet = await openReview(handle.page);
+    await sheet.getByRole("button", { name: `Move 1 to ${BIN}` }).click();
+    await expect(reviewRow(sheet, target).locator(".rv-result")).toHaveText(`Moved to the ${BIN}`);
+    expect(existsSync(target)).toBe(false);
+    expect(existsSync(join(trashDir, "docs"))).toBe(true);
+    expect(await trash.dialogs()).toEqual([]);
   } finally {
     await agent.client.close();
     rmSync(trashDir, { recursive: true, force: true });

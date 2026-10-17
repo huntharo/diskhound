@@ -15,6 +15,7 @@ import {
   SKILLS_EXTENSION_ID,
   type McpAgentCapability,
 } from "../../shared/agentAccess";
+import type { RemovalItem, RemovalItemStatus } from "../../shared/agentRemovals";
 import { FixedMcpAuthorizer, McpPolicyStore, PolicyFileAuthorizer, type McpAuthorizer } from "../accessPolicy";
 import { AgentActivityLog } from "../activityLog";
 import { createDiskhoundMcpServer, FREE_UP_SPACE_SKILL, INVESTIGATE_GROWTH_SKILL, TOOL_CAPABILITIES } from "../server";
@@ -28,6 +29,7 @@ import {
   roleAuthorization,
   ROOT,
   SKILLS_DIR,
+  TRASH_OK,
   type FakeBackend,
 } from "./fakeBackend";
 
@@ -345,7 +347,7 @@ describe("authorization", () => {
     expect(result.isError).toBe(true);
     expect(text(result)).toContain("files.trash");
     expect(result.structuredContent).toBeUndefined();
-    expect(backend.confirmAndTrash).not.toHaveBeenCalled();
+    expect(backend.queueRemoval).not.toHaveBeenCalled();
   });
 
   it("tells the agent to ask the user to change the role in Settings (policy-file authorizer)", async () => {
@@ -363,7 +365,7 @@ describe("authorization", () => {
     expect(trash.isError).toBe(true);
     expect(text(trash)).toContain("files.trash");
     expect(text(trash)).toContain("Settings");
-    expect(backend.confirmAndTrash).not.toHaveBeenCalled();
+    expect(backend.queueRemoval).not.toHaveBeenCalled();
   });
 
   it("applies a revoke in Settings to the very next tool call", async () => {
@@ -479,33 +481,45 @@ describe("showInApp", () => {
 });
 
 describe("diskhound_move_to_trash", () => {
-  it("passes the Session name, de-duplicated absolute paths, and reason to confirmAndTrash", async () => {
-    const { client, backend } = await connect({ roleId: "builtin.operator" });
+  it("adds de-duplicated absolute paths to the review list and returns without claiming anything moved", async () => {
+    const { client, backend, activity } = await connect({ roleId: "builtin.operator" });
     const result = await call(client, "diskhound_move_to_trash", {
       paths: [`${ROOT}/Downloads/ubuntu.iso`, `${ROOT}/Downloads/../Downloads/ubuntu.iso`, `${ROOT}/Downloads/installer.dmg`],
       reason: "Old installers",
     });
-    expect(backend.confirmAndTrash).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionName: "Test Agent",
-        paths: [`${ROOT}/Downloads/ubuntu.iso`, `${ROOT}/Downloads/installer.dmg`],
-        reason: "Old installers",
-      }),
-    );
-    // The host re-checks the Session right before its dialog.
-    const [request] = backend.confirmAndTrash.mock.calls[0]!;
-    await expect(request.recheck?.()).resolves.toBeUndefined();
-    const value = structured(result);
-    expect(value).toMatchObject({ confirmed: true, movedCount: 2, movedBytes: 200 * 1024 ** 2, moved: "200 MB" });
-    expect(text(result)).toContain("Moved 2 of 2 items (200 MB)");
-    expect(text(result)).toContain("Trash");
+    expect(result.isError).not.toBe(true);
+    expect(backend.queueRemoval).toHaveBeenCalledWith({
+      sessionId: expect.any(String),
+      sessionName: "Test Agent",
+      roleName: "Cleanup Operator",
+      asked: "trash",
+      paths: [`${ROOT}/Downloads/ubuntu.iso`, `${ROOT}/Downloads/installer.dmg`],
+      reason: "Old installers",
+    });
+    expect(structured(result)).toMatchObject({
+      queued: true,
+      waitingForUser: true,
+      action: "trash",
+      items: [
+        { path: `${ROOT}/Downloads/ubuntu.iso`, size: "100 MB", trash: "yes" },
+        { path: `${ROOT}/Downloads/installer.dmg`, size: "100 MB", trash: "yes" },
+      ],
+      notAdded: [],
+    });
+    const summary = text(result);
+    expect(summary).toMatch(/^Added 2 items \(200 MB\) to DiskHound's review list\. Nothing has moved yet\. The user reviews the list in DiskHound when they're ready, so tell them it's waiting\./);
+    expect(summary).toContain(`• ${ROOT}/Downloads/ubuntu.iso (100 MB)`);
+    expect(summary).toContain("diskhound_status shows what the user decided.");
+    // Never "Moved 2 …" before anything moved.
+    expect(summary).not.toMatch(/\bMoved \d/);
+    expect(activity.entries.at(-1)).toMatchObject({ tool: "diskhound_move_to_trash", ok: true, summary: "Asked to move 2 items to the Trash" });
   });
 
-  it("asks the user to confirm a path whose filename ends with a space", async () => {
+  it("lists a path whose filename ends with a space as given", async () => {
     const { client, backend } = await connect({ roleId: "builtin.operator" });
     const path = `${ROOT}/Downloads/report.txt `;
     await call(client, "diskhound_move_to_trash", { paths: [path] });
-    expect(backend.confirmAndTrash).toHaveBeenCalledWith(expect.objectContaining({ paths: [path] }));
+    expect(backend.queueRemoval).toHaveBeenCalledWith(expect.objectContaining({ paths: [path] }));
   });
 
   it("reports sizes in the units the user picked, so they match the window", async () => {
@@ -514,7 +528,7 @@ describe("diskhound_move_to_trash", () => {
     const { client } = await connect({ roleId: "builtin.operator", backend });
     const result = await call(client, "diskhound_move_to_trash", { paths: [`${ROOT}/Downloads/ubuntu.iso`, `${ROOT}/Downloads/installer.dmg`] });
     // 200 MiB is 210 MB in decimal units (macOS Finder's default).
-    expect(text(result)).toContain("Moved 2 of 2 items (210 MB)");
+    expect(text(result)).toContain("Added 2 items (210 MB)");
   });
 
   it("refuses a tool call with more argument elements than the cap", async () => {
@@ -524,99 +538,104 @@ describe("diskhound_move_to_trash", () => {
     });
     expect(result.isError).toBe(true);
     expect(text(result)).toContain("2048");
-    expect(backend.confirmAndTrash).not.toHaveBeenCalled();
+    expect(backend.queueRemoval).not.toHaveBeenCalled();
   });
 
-  it("reports a declined confirmation without claiming anything moved", async () => {
-    const { client, backend, activity } = await connect({ roleId: "builtin.operator" });
-    backend.confirmAndTrash.mockResolvedValueOnce({ confirmed: false, results: [] });
-    const result = await call(client, "diskhound_move_to_trash", { paths: [`${ROOT}/Movies/trip.mov`] });
-    expect(result.isError).not.toBe(true);
-    expect(structured(result)).toEqual({ confirmed: false, results: [] });
-    expect(text(result)).toBe("The user declined. Nothing was moved.");
-    expect(activity.entries.at(-1)).toMatchObject({ tool: "diskhound_move_to_trash", ok: true, summary: expect.stringContaining("declined") });
+  it("says when the Trash can't take an item, or only part of it", async () => {
+    const queued = async (roleId: string) => {
+      const { client, backend } = await connect({ roleId });
+      backend.queueRemoval.mockImplementationOnce(async (request) => ({
+        request: {
+          id: "rq_x", sessionId: request.sessionId, sessionName: request.sessionName, roleName: request.roleName,
+          asked: "trash", reason: null, requestedAt: NOW, decidedAt: null,
+          items: [
+            {
+              id: "it_1", path: "/Volumes/team-share/renders/old", asked: "trash", sizeBytes: 14 * 1024 ** 3, status: "waiting",
+              check: { ...TRASH_OK, volume: "team-share", trash: "no", trashWhy: "team-share is a network volume with no Trash." },
+            },
+            {
+              id: "it_2", path: `${ROOT}/datasets`, asked: "trash", sizeBytes: null, status: "waiting",
+              check: { ...TRASH_OK, mountsInside: [{ path: `${ROOT}/datasets/archive`, volume: "Archive" }] },
+            },
+          ],
+        },
+        refused: [],
+        replaced: 0,
+      }));
+      const result = await call(client, "diskhound_move_to_trash", { paths: ["/Volumes/team-share/renders/old", `${ROOT}/datasets`] });
+      return { summary: text(result), value: structured(result) };
+    };
+    const operator = await queued("builtin.operator");
+    expect(operator.summary).toContain("• /Volumes/team-share/renders/old (14.0 GB): team-share is a network volume with no Trash, so the user can only skip it.");
+    expect(operator.summary).toContain(`• ${ROOT}/datasets (size unknown): archive/ (Archive) inside it is another volume, which DiskHound leaves alone; the user decides about the rest.`);
+    expect(operator.summary).toContain("Added 2 items (at least 14.0 GB)");
+    expect(operator.value.items).toMatchObject([
+      { trash: "no", trashNote: "team-share is a network volume with no Trash." },
+      { trash: "partly", otherVolumesInside: [{ path: `${ROOT}/datasets/archive`, volume: "Archive" }] },
+    ]);
+    // A Cleanup Admin's user may delete it permanently instead.
+    const admin = await queued("builtin.admin");
+    expect(admin.summary).toContain("so the user can only skip it or delete it permanently.");
   });
 
-  it("lists items the backend could not move", async () => {
+  it("lists what wasn't added and why, and fails when nothing was", async () => {
     const { client, backend } = await connect({ roleId: "builtin.operator" });
-    backend.confirmAndTrash.mockResolvedValueOnce({
-      confirmed: true,
-      results: [
-        { path: "/a", ok: true, message: "Moved.", sizeBytes: 1024 },
-        { path: "/b", ok: false, message: "Protected folder", sizeBytes: null },
-      ],
-    });
-    const result = await call(client, "diskhound_move_to_trash", { paths: ["/a", "/b"] });
-    expect(structured(result)).toMatchObject({ movedCount: 1, movedBytes: 1024 });
-    expect(text(result)).toContain("Not moved: /b (Protected folder)");
-  });
+    backend.queueRemoval.mockImplementationOnce(async (request) => ({
+      request: {
+        id: "rq_y", sessionId: request.sessionId, sessionName: request.sessionName, roleName: request.roleName,
+        asked: "trash", reason: null, requestedAt: NOW, decidedAt: null,
+        items: [{ id: "it_1", path: "/a", asked: "trash", sizeBytes: 1024, status: "waiting", check: TRASH_OK }],
+      },
+      refused: [{ path: `${ROOT}/Documents`, message: "Refused: DiskHound never lets agents remove this folder." }],
+      replaced: 1,
+    }));
+    const result = await call(client, "diskhound_move_to_trash", { paths: ["/a", `${ROOT}/Documents`] });
+    expect(text(result)).toContain(`Not added:\n• ${ROOT}/Documents: DiskHound never lets agents remove this folder.`);
+    expect(text(result)).toContain("1 item you had already asked for is listed once, in this request.");
+    expect(structured(result)).toMatchObject({ notAdded: [{ path: `${ROOT}/Documents` }], replaced: 1 });
 
-  it("never reports an unknown size as 0 B", async () => {
-    const { client, backend } = await connect({ roleId: "builtin.operator" });
-    backend.confirmAndTrash.mockResolvedValueOnce({
-      confirmed: true,
-      results: [{ path: "/outside", ok: true, message: "Moved.", sizeBytes: null }],
-    });
-    const unknown = await call(client, "diskhound_move_to_trash", { paths: ["/outside"] });
-    expect(structured(unknown)).toMatchObject({ movedCount: 1, moved: "size unknown" });
-    expect(text(unknown)).toContain("(size unknown)");
-    backend.confirmAndTrash.mockResolvedValueOnce({
-      confirmed: true,
-      results: [
-        { path: "/a", ok: true, message: "Moved.", sizeBytes: 1024 },
-        { path: "/outside", ok: true, message: "Moved.", sizeBytes: null },
-      ],
-    });
-    const partly = await call(client, "diskhound_move_to_trash", { paths: ["/a", "/outside"] });
-    expect(structured(partly)).toMatchObject({ movedCount: 2, moved: "at least 1.0 KB" });
+    backend.queueRemoval.mockRejectedValueOnce(new Error("Nothing was added to DiskHound's review list. /x: Nothing exists at this path."));
+    const none = await call(client, "diskhound_move_to_trash", { paths: ["/x"] });
+    expect(none.isError).toBe(true);
+    expect(text(none)).toContain("Nothing was added to DiskHound's review list.");
   });
 
   it("rejects an empty path list at the schema", async () => {
     const { client, backend } = await connect({ roleId: "builtin.operator" });
     const result = await call(client, "diskhound_move_to_trash", { paths: [] });
     expect(result.isError).toBe(true);
-    expect(backend.confirmAndTrash).not.toHaveBeenCalled();
+    expect(backend.queueRemoval).not.toHaveBeenCalled();
   });
 });
 
 describe("diskhound_delete_permanently", () => {
-  it("passes the Session, de-duplicated paths and reason to confirmAndDelete, and rechecks files.delete", async () => {
-    const { client, backend } = await connect({ roleId: "builtin.admin" });
+  it("adds the Session's de-duplicated paths and reason to the review list as a permanent delete", async () => {
+    const { client, backend, activity } = await connect({ roleId: "builtin.admin" });
     const result = await call(client, "diskhound_delete_permanently", {
       paths: [`${ROOT}/Downloads/ubuntu.iso`, `${ROOT}/Downloads/./ubuntu.iso`],
       reason: "Too big for the Trash",
     });
-    expect(backend.confirmAndDelete).toHaveBeenCalledWith(
-      expect.objectContaining({ sessionName: "Test Agent", roleName: "Cleanup Admin", paths: [`${ROOT}/Downloads/ubuntu.iso`], reason: "Too big for the Trash" }),
+    expect(backend.queueRemoval).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionName: "Test Agent", roleName: "Cleanup Admin", asked: "delete", paths: [`${ROOT}/Downloads/ubuntu.iso`], reason: "Too big for the Trash" }),
     );
-    const [request] = backend.confirmAndDelete.mock.calls[0]!;
-    await expect(request.recheck?.()).resolves.toBeUndefined();
-    expect(backend.confirmAndTrash).not.toHaveBeenCalled();
-    expect(structured(result)).toMatchObject({ confirmed: true, deletedCount: 1 });
-    expect(text(result)).toMatch(/^Deleted 1 of 1 item \(.+\) permanently\./);
+    expect(structured(result)).toMatchObject({ queued: true, action: "delete", items: [{ path: `${ROOT}/Downloads/ubuntu.iso` }] });
+    expect(text(result)).toMatch(/^Added 1 item \(100 MB\) to DiskHound's review list to delete permanently\. Nothing has been deleted yet\./);
+    expect(activity.entries.at(-1)).toMatchObject({ tool: "diskhound_delete_permanently", ok: true, summary: "Asked to delete 1 item permanently" });
   });
 
-  it("asks the user to confirm a path whose filename ends with a space", async () => {
+  it("lists a path whose filename ends with a space as given", async () => {
     const { client, backend } = await connect({ roleId: "builtin.admin" });
     const path = `${ROOT}/Downloads/report.txt `;
     await call(client, "diskhound_delete_permanently", { paths: [path] });
-    expect(backend.confirmAndDelete).toHaveBeenCalledWith(expect.objectContaining({ paths: [path] }));
+    expect(backend.queueRemoval).toHaveBeenCalledWith(expect.objectContaining({ paths: [path] }));
   });
 
-  it("reports a declined confirmation without claiming anything was deleted", async () => {
-    const { client, backend, activity } = await connect({ roleId: "builtin.admin" });
-    backend.confirmAndDelete.mockResolvedValueOnce({ confirmed: false, results: [] });
-    const result = await call(client, "diskhound_delete_permanently", { paths: [`${ROOT}/Movies/trip.mov`] });
-    expect(text(result)).toBe("The user declined. Nothing was deleted.");
-    expect(activity.entries.at(-1)).toMatchObject({ tool: "diskhound_delete_permanently", ok: true, summary: expect.stringContaining("declined") });
-  });
-
-  it("refuses an operator session before any dialog, and logs it", async () => {
+  it("refuses an operator session before anything is queued, and logs it", async () => {
     const security = new RecordingSecurity();
     const { client, backend } = await connect({ roleId: "builtin.operator", security });
     const result = await call(client, "diskhound_delete_permanently", { paths: ["/a"] });
     expect(result.isError).toBe(true);
-    expect(backend.confirmAndDelete).not.toHaveBeenCalled();
+    expect(backend.queueRemoval).not.toHaveBeenCalled();
     expect(security.events).toEqual([
       expect.objectContaining({
         kind: "tool_not_allowed",
@@ -625,6 +644,67 @@ describe("diskhound_delete_permanently", () => {
         detail: "Tried to delete items permanently; Cleanup Operator doesn't allow it.",
       }),
     ]);
+  });
+});
+
+describe("removal requests in diskhound_status", () => {
+  const item = (path: string, status: RemovalItemStatus, extra: Partial<RemovalItem> = {}): RemovalItem => ({
+    id: `it_${path}`, path, asked: "trash", sizeBytes: 100 * 1024 ** 2, check: TRASH_OK, status, ...extra,
+  });
+
+  it("leaves the section out for a session that never asked", async () => {
+    const { client } = await connect({ roleId: "builtin.operator" });
+    const status = await call(client, "diskhound_status");
+    expect(structured(status).removalRequests).toBeUndefined();
+    expect(text(status)).not.toContain("Removal request");
+  });
+
+  it("says what is still waiting for the user", async () => {
+    const { client } = await connect({ roleId: "builtin.operator" });
+    await call(client, "diskhound_move_to_trash", { paths: [`${ROOT}/a`, `${ROOT}/b`] });
+    const status = await call(client, "diskhound_status");
+    expect(text(status)).toContain("Removal requests: 2 items (200 MB) waiting for the user to review in DiskHound (you asked just now).");
+    expect(structured(status).removalRequests).toMatchObject({ waiting: { items: 2, size: "200 MB" } });
+  });
+
+  it("reports item by item what the user decided, and never claims a move that didn't happen", async () => {
+    const { client, backend } = await connect({ roleId: "builtin.admin" });
+    const at = NOW - 2 * 60_000;
+    backend.removalRequests.mockReturnValue([
+      {
+        id: "rq_1", sessionId: "s", sessionName: "Test Agent", roleName: "Cleanup Admin", asked: "trash", reason: "Build output",
+        requestedAt: NOW - 18 * 60_000, decidedAt: at,
+        items: [
+          item("/a", "moved", { outcome: { action: "trash", message: "Moved to the Trash.", at } }),
+          item("/b", "skipped", { outcome: { action: null, message: "You skipped it.", at } }),
+          item("/c", "failed", { outcome: { action: null, message: "The Trash did not take this folder — it is still on disk.", at } }),
+        ],
+      },
+      {
+        id: "rq_2", sessionId: "s", sessionName: "Test Agent", roleName: "Cleanup Admin", asked: "delete", reason: null,
+        requestedAt: NOW - 10 * 60_000, decidedAt: at,
+        items: [
+          item("/d", "moved", { asked: "delete", outcome: { action: "trash", message: "Moved to the Trash instead of deleted, as you chose.", at } }),
+          item("/e", "deleted", { asked: "delete", outcome: { action: "delete", message: "Deleted permanently.", at } }),
+          item("/f", "refused", { asked: "delete", outcome: { action: null, message: "This path changed after the agent asked, so DiskHound left it alone.", at } }),
+        ],
+      },
+    ]);
+    const status = await call(client, "diskhound_status");
+    const summary = text(status);
+    expect(summary).toContain("Removal request decided 2 min ago (you asked 18 min ago): Moved 1 item to the Trash (100 MB). They free that space once the Trash is emptied. Not moved: /c (The Trash did not take this folder — it is still on disk.). Skipped by the user: /b.");
+    expect(summary).toContain("Removal request decided 2 min ago (you asked 10 min ago): The user moved 1 item to the Trash instead of deleting it (100 MB): /d. Deleted 1 item permanently (100 MB). Not done: /f (This path changed after the agent asked, so DiskHound left it alone.).");
+    expect(summary).not.toContain("waiting for the user");
+    // Freed space can lag: the agent hears why, as it did when the dialog removed things.
+    expect(summary).toContain("Trashed items keep using space until the Trash is emptied.");
+    expect(structured(status).removalRequests).toMatchObject({
+      note: expect.stringContaining("Trash is emptied"),
+      waiting: null,
+      recent: [
+        { requestId: "rq_1", items: [{ path: "/a", status: "moved", done: "trash" }, { path: "/b", status: "skipped", done: null }, { path: "/c", status: "failed" }] },
+        { requestId: "rq_2" },
+      ],
+    });
   });
 });
 
@@ -655,7 +735,7 @@ describe("role filtering", () => {
     const { client, names } = await listed("builtin.operator");
     expect(names).toContain("diskhound_move_to_trash");
     expect(names).not.toContain("diskhound_delete_permanently");
-    expect(client.getInstructions()).toContain("this session can't delete permanently");
+    expect(client.getInstructions()).toContain("This session can't delete permanently");
   });
 
   it("drops showInApp from a Disk Explorer's tools, since it can't steer the window", async () => {
@@ -674,7 +754,7 @@ describe("role filtering", () => {
     });
     const result = await call(client, "diskhound_move_to_trash", { paths: ["/a"] });
     expect(result.isError).toBe(true);
-    expect(backend.confirmAndTrash).not.toHaveBeenCalled();
+    expect(backend.queueRemoval).not.toHaveBeenCalled();
     expect(security.events).toEqual([
       expect.objectContaining({ kind: "tool_not_allowed", tool: "diskhound_move_to_trash", roleName: "Disk Explorer" }),
     ]);
