@@ -250,8 +250,8 @@ describe("Agent review list", () => {
       await tick(view, "dist");
       await click(withText(row(view, "huge.log"), ".rv-segb", BIN_BUTTON));
       await click(one(view, ".scan-btn-primary"));
-      // Main pushes the decided list at most every 100 ms.
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      // The approval pushes the decided list before this call returns,
+      // so the rows match the summary without a debounce wait.
       await ui.settle();
     });
 

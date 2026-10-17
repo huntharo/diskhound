@@ -40,6 +40,59 @@ describe("worktree removal when Git fails", () => {
       "worktree", "remove", "--", wt,
     ]);
   });
+
+  function linked(name: string, repo = "/repo") {
+    const wt = Path.resolve(`/wt/${name}`);
+    const admin = Path.resolve(`${repo}/.git/worktrees/${name}`);
+    return { wt, admin };
+  }
+
+  function texts(entries: Array<{ wt: string; admin: string }>): (path: string) => Promise<string | null> {
+    const files = new Map<string, string>();
+    for (const entry of entries) {
+      files.set(Path.join(entry.wt, ".git"), `gitdir: ${entry.admin}\n`);
+      files.set(Path.join(entry.admin, "HEAD"), "ref: refs/heads/feat\n");
+    }
+    return async (path) => files.get(path) ?? null;
+  }
+
+  /** A removal command that records how many run at the same time. */
+  function overlap(): { run: (cwd: string, args: string[]) => Promise<{ ok: boolean; stderr: string }>; max: () => number } {
+    let active = 0;
+    let max = 0;
+    return {
+      max: () => max,
+      run: async () => {
+        active += 1;
+        max = Math.max(max, active);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        active -= 1;
+        return { ok: true, stderr: "" };
+      },
+    };
+  }
+
+  it("removes worktrees of one repo one after another, and different repos together", async () => {
+    const same = [linked("a"), linked("b")];
+    const other = linked("c", "/other");
+    const git: GitCommand = async (_cwd, args) => args.includes("rev-parse") ? "feat\n"
+      : args.includes("rev-list") ? "0\n" : "";
+    const sameRemove = overlap();
+    const [left, right] = await Promise.all([
+      removeGitWorktree(same[0]!.wt, git, sameRemove.run, texts(same)),
+      removeGitWorktree(same[1]!.wt, git, sameRemove.run, texts(same)),
+    ]);
+    expect(left.ok).toBe(true);
+    expect(right.ok).toBe(true);
+    expect(sameRemove.max()).toBe(1);
+
+    const bothRemove = overlap();
+    await Promise.all([
+      removeGitWorktree(same[0]!.wt, clean, bothRemove.run, texts([same[0]!])),
+      removeGitWorktree(other.wt, clean, bothRemove.run, texts([other])),
+    ]);
+    expect(bothRemove.max()).toBe(2);
+  });
 });
 
 describe("worktree removal against real Git", () => {
