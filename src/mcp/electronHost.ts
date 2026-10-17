@@ -355,6 +355,16 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
       deps.removalsWaiting?.(waiting);
     }
   };
+  // The sheet paints the approval summary from this call's return value.
+  // A push still waiting on the 100 ms coalesce would leave a row on
+  // "Removing…" beside that finished summary.
+  const flushRemovalsNow = () => {
+    if (pushTimer) {
+      clearTimeout(pushTimer);
+      pushTimer = null;
+    }
+    pushRemovals();
+  };
   const queue = new RemovalQueue(Path.join(userData, "agent-removals.json"), {
     onChange: () => {
       pushTimer ??= setTimeout(pushRemovals, REMOVALS_PUSH_MS);
@@ -790,12 +800,16 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
   });
   // The review sheet sends one decision per item it showed: ticked items
   // run with the action picked, unticked ones are skipped.
-  ipcMain.handle("diskhound:agent-removals-approve", (event, input: unknown) => {
+  ipcMain.handle("diskhound:agent-removals-approve", async (event, input: unknown) => {
     requireMainWindow(event);
     const decisions = (Array.isArray(input) ? input : []).filter((decision): decision is RemovalDecision =>
       Boolean(decision) && typeof decision.itemId === "string" && typeof decision.run === "boolean" &&
       (decision.action === "trash" || decision.action === "delete"));
-    return approveRemovals(decisions);
+    try {
+      return await approveRemovals(decisions);
+    } finally {
+      flushRemovalsNow();
+    }
   });
   // What the ticked items free together. Only paths in the list are measured.
   ipcMain.handle("diskhound:agent-removals-measure", async (event, itemIds: unknown): Promise<RemovalMeasureResult> => {
