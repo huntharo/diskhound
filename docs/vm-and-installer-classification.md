@@ -15,6 +15,8 @@ snapshot/state formats and conventional VM bundles/paths:
 | Exported appliances | OVA, OVF, XVA |
 | Container VM backends | Docker Desktop `com.docker.docker/Data/vms`, Minikube machines, known Lima/Colima disk filenames |
 
+The named VM directory counts on its own. A folder such as `VirtualBox VMs/node_modules` or `.tart/vms/DiagOutputDir` stays in the VM inventory, so cleanup does not offer it as a cache or a log directory. The container above that name (`VirtualBox VMs`, `.tart/vms`) does not.
+
 File format recognition does not prove which hypervisor owns a standalone
 disk. A disk may have moved or be used by a compatible system. Ordinary
 `.img`, camera `.raw` and game `.sav` files require VM path context before

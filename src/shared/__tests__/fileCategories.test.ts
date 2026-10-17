@@ -11,6 +11,9 @@ const vmPaths = [
   "/VM/guest.vhd", "/VM/guest.vhdx", "/VM/guest.vmcx", "/VM/guest.vmrs",
   "/Users/me/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw",
   "/Users/me/.minikube/machines/dev/disk.img", "/Users/me/.lima/default/diffdisk",
+  "/Users/me/.tart/vms/DiagOutputDir", "/Users/me/VirtualBox VMs/node_modules",
+  "/Users/me/.minikube/machines/dev",
+  "/Users/me/Library/Containers/com.docker.docker/Data/vms/0",
   "/Users/me/.colima/_lima/colima/basedisk",
 ];
 
@@ -24,6 +27,9 @@ describe("VM and installer file inventory", () => {
     for (const path of [
       "/photos/camera.raw", "/downloads/image.img", "/games/save.sav", "/source/vms/disk.img",
       "/Users/me/.tart/config.json", "/Users/me/.tart/vms-notes/disk.img",
+      "/Users/me/.tart/vms", "/Users/me/VirtualBox VMs",
+      "/Users/me/.minikube/machines",
+      "/Users/me/Library/Containers/com.docker.docker/Data/vms",
       "/Users/me/.lima/_config/diffdisk", "/Users/me/.colima/default/config.yaml",
       "/VM/archive.vmwarevm-backup/disk.img", "/VM/disk.vmdk.txt",
       "/Users/me/.miniKube/machines/dev/disk.img",

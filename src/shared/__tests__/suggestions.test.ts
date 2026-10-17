@@ -153,6 +153,15 @@ it("agrees across index and snapshot: ISO/DMG installers, no VM cleanup", async 
   }
 });
 
+it("does not offer a VM directory root as cache or diagnostic cleanup", () => {
+  const dirs = [
+    { path: "/Users/me/.tart/vms/DiagOutputDir", size: 4_000_000_000, fileCount: 2, depth: 4 },
+    { path: "/Users/me/VirtualBox VMs/node_modules", size: 2_000_000_000, fileCount: 2, depth: 3 },
+    { path: "/Users/me/.minikube/machines/dev", size: 2_000_000_000, fileCount: 2, depth: 4 },
+  ];
+  expect(analyzeForCleanup("/", [], dirs, defaultSettings().cleanup).suggestions).toEqual([]);
+});
+
 it("bounds snapshot cleanup work as file and directory counts grow", () => {
   const count = (n: number) => {
     let reads = 0;

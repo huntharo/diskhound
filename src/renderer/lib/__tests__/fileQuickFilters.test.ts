@@ -30,6 +30,17 @@ it("gives VM-owned raw images and ISOs the VM category", () => {
 });
 
 
+it("sorts sampled extension buckets by total size", () => {
+  expect(filteredExtensionBuckets([
+    { extension: ".iso", size: 100 },
+    { extension: ".dmg", size: 60 },
+    { extension: ".dmg", size: 60 },
+  ])).toEqual([
+    { extension: ".dmg", size: 120, count: 2 },
+    { extension: ".iso", size: 100, count: 1 },
+  ]);
+});
+
 it("builds VM extension totals from filtered files with linear work", () => {
   const count = (n: number) => {
     let reads = 0;

@@ -28,11 +28,14 @@ export function isVirtualMachineFile(path: string, extension?: string, work?: Fi
     // individual extensions do not establish VM ownership.
     if (/\.(?:vmwarevm|pvm|utm|hdd)$/.test(part)) return true;
     const next = (parts[i + 1] ?? "").toLowerCase();
-    if (part === ".tart" && next === "vms" && i + 3 < parts.length) return true;
-    if (part === "virtualbox vms" && i + 2 < parts.length) return true;
-    if (part === ".minikube" && next === "machines" && i + 3 < parts.length) return true;
+    // The VM directory itself counts, not only a file inside it. Otherwise a
+    // hotspot named like a cache (node_modules, DiagOutputDir) is offered
+    // as cleanup. The container above the VM name does not count.
+    if (part === ".tart" && next === "vms" && i + 2 < parts.length) return true;
+    if (part === "virtualbox vms" && i + 1 < parts.length) return true;
+    if (part === ".minikube" && next === "machines" && i + 2 < parts.length) return true;
     if (part === "com.docker.docker" && next === "data"
-      && (parts[i + 2] ?? "").toLowerCase() === "vms" && i + 4 < parts.length) return true;
+      && (parts[i + 2] ?? "").toLowerCase() === "vms" && i + 3 < parts.length) return true;
     // Lima/Colima use extensionless disk files. Do not classify their
     // entire configuration/tool home as a VM.
     const limaDisk = part === ".lima" && !next.startsWith("_") && parts.length === i + 3;

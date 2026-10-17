@@ -81,7 +81,7 @@ export function filteredExtensionBuckets(files: readonly Pick<ScanFileRecord, "e
     bucket.size += file.size;
     bucket.count++;
   }
-  return [...buckets.values()];
+  return [...buckets.values()].sort((a, b) => b.size - a.size || a.extension.localeCompare(b.extension));
 }
 
 /** Scan-wide extension totals cannot express path-aware categories. Keep
