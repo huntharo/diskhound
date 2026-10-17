@@ -124,6 +124,10 @@ export interface AgentHost {
   pathsRemoved(): void;
   /** Write the review list now if it changed (quit; before-quit is synchronous). */
   flushRemovals(): void;
+  /** An approval is still deciding items, so quit has to wait for its write. */
+  removalsBusy(): boolean;
+  /** Resolves after the in-flight approval has written its decisions. */
+  whenRemovalsIdle(): Promise<void>;
   dispose(): Promise<void>;
 }
 
@@ -869,6 +873,8 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
     showRemovalReview,
     pathsRemoved: () => measurements?.invalidate(),
     flushRemovals: () => queue.flushSync(),
+    removalsBusy: () => queue.busy(),
+    whenRemovalsIdle: () => queue.whenIdle(),
     dispose: async () => {
       broker.close();
       measurements?.dispose();

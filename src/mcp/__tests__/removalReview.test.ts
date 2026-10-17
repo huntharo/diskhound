@@ -302,6 +302,57 @@ describe("RemovalReview.approve", () => {
     expect(first.result.moved.items).toBe(1);
     expect(second.result.moved.items).toBe(1);
   });
+
+  it("reads volume facts again immediately before each item", async () => {
+    const first = touch("first");
+    const later = folder("later");
+    const mount = folder("later", "usb");
+    touch("later", "keep.txt");
+    touch("later", "usb", "secret");
+    const mounted: RemovalVolumeCheck = { ...OK, mountsInside: [{ path: mount, volume: "USB" }] };
+    const h = harness({
+      deletePath: async (path) => {
+        if (path === first) h.checks.set(later, mounted);
+        FS.rmSync(path, { recursive: true, force: true });
+        h.removed.push({ path, action: "delete" });
+        return { ok: true, message: "ok" };
+      },
+    });
+    const [a] = ask(h, "s-admin", "delete", [{ path: first }]).items;
+    const [b] = ask(h, "s-admin", "delete", [{ path: later }]).items;
+    await h.review.approve([
+      { itemId: a!.id, run: true, action: "delete" },
+      { itemId: b!.id, run: true, action: "delete" },
+    ]);
+    expect(FS.existsSync(first)).toBe(false);
+    expect(FS.existsSync(Path.join(mount, "secret"))).toBe(true);
+    // The new mount is not what the user approved. It stays on the list.
+    expect(h.queue.find(b!.id)?.item.status).toBe("waiting");
+    expect(h.queue.find(b!.id)?.item.check.mountsInside).toEqual([{ path: mount, volume: "USB" }]);
+  });
+
+  it("does not remove a path that has become a mount point", async () => {
+    const h = harness();
+    const a = folder("volume");
+    const check: RemovalVolumeCheck = { ...OK, selfMount: true, volume: "USB" };
+    const [item] = ask(h, "s-admin", "delete", [{ path: a, check }]).items;
+    h.checks.set(a, check);
+    const { result } = await h.review.approve([{ itemId: item!.id, run: true, action: "delete" }]);
+    expect(result.refused).toBe(1);
+    expect(h.removed).toEqual([]);
+    expect(FS.existsSync(a)).toBe(true);
+    expect(h.queue.find(item!.id)?.item.outcome?.message).toContain("is a volume");
+  });
+});
+
+describe("fileIdentity", () => {
+  it("uses the change time when the filesystem reports no birth time", () => {
+    const base = { dev: 1n, ino: 2n, ctimeNs: 9n };
+    expect(fileIdentity({ ...base, birthtimeNs: 0n })).toBe("1:2:9");
+    expect(fileIdentity({ ...base, birthtimeNs: 0n, ctimeNs: 10n })).toBe("1:2:10");
+    // A real birth time stays, so a later metadata change is still the same file.
+    expect(fileIdentity({ ...base, birthtimeNs: 3n, ctimeNs: 10n })).toBe("1:2:3");
+  });
 });
 
 describe("removalUnits", () => {

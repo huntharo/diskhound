@@ -4976,7 +4976,17 @@ void (async () => {
     }
   });
 
-  app.on("before-quit", () => {
+  let deferQuitForRemovals = false;
+  app.on("before-quit", (event) => {
+    // An approval holds the review list until every ticked item is decided.
+    // Quitting in the middle would keep the partial snapshot and drop the
+    // rest, including items already removed. Wait, then quit for real.
+    if (!deferQuitForRemovals && agentHost?.removalsBusy()) {
+      event.preventDefault();
+      deferQuitForRemovals = true;
+      void agentHost.whenRemovalsIdle().finally(() => app.quit());
+      return;
+    }
     isQuitting = true;
     clearInterval(affinityInterval);
     updateScheduler?.stop();

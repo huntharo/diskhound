@@ -167,13 +167,10 @@ export class RemovalReview {
 
     const toRun = work.filter(({ decision }) => decision.run);
     const protection = toRun.length > 0 ? await this.deps.protection() : () => null;
-    const checks = toRun.length > 0
-      ? await this.deps.check(toRun.map(({ found }) => ({ path: found.item.path, sizeBytes: found.item.sizeBytes })))
-      : [];
     const sessionAccess = toRun.length > 0 ? this.deps.sessions() : () => null;
     queue.setRunning(toRun.map(({ found }) => found.item.id), true);
 
-    for (const [index, { decision, found }] of toRun.entries()) {
+    for (const { decision, found } of toRun) {
       const { item, request } = found;
       const action: RemovalAction = decision.action;
       try {
@@ -214,10 +211,12 @@ export class RemovalReview {
           decide(item, request.sessionId, "refused", { action: null, message: /^Refused|^Protected/.test(blocked) ? blocked : `Refused: ${blocked}.` });
           continue;
         }
-        const check = checks[index]!;
-        if (!sameVolumeFacts(item.check, check)) {
+        // One item can take minutes. Read this item's volumes now, not
+        // from a snapshot taken before the earlier items were removed.
+        const [check] = await this.deps.check([{ path: item.path, sizeBytes: item.sizeBytes }]);
+        if (!check || !sameVolumeFacts(item.check, check)) {
           // What the user saw is no longer true. Show them the new facts.
-          queue.updateCheck(item.id, check);
+          if (check) queue.updateCheck(item.id, check);
           queue.setRunning([item.id], false);
           result.changed++;
           continue;

@@ -72,6 +72,7 @@ function parseCheck(value: unknown): RemovalVolumeCheck | null {
     !Array.isArray(check.mountsInside) ||
     !check.mountsInside.every((mount) => mount && isText(mount.path, 4096) && isText(mount.volume, 4096)) ||
     !(check.volumesUnknown === undefined || typeof check.volumesUnknown === "boolean") ||
+    !(check.selfMount === undefined || typeof check.selfMount === "boolean") ||
     !isTime(check.checkedAt)
   ) {
     return null;
@@ -133,6 +134,8 @@ export class RemovalQueue {
   private dirty = false;
   private holds = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  /** Quit waits here until an in-flight approval has written its decisions. */
+  private idleWaiters: Array<() => void> = [];
 
   constructor(
     readonly filePath: string,
@@ -354,8 +357,37 @@ export class RemovalQueue {
       return await work();
     } finally {
       this.holds--;
-      if (this.holds === 0 && this.dirty) await this.flush();
+      try {
+        if (this.holds === 0 && this.dirty) await this.flush();
+      } finally {
+        if (this.holds === 0) this.releaseIdle();
+      }
     }
+  }
+
+  /** An approval is holding writes, so quit must wait for its last decision. */
+  busy(): boolean {
+    return this.holds > 0;
+  }
+
+  /**
+   * Resolves once no approval is holding writes, after that approval's
+   * flush. Quit uses this: a synchronous flush mid-approval would record
+   * only the decisions made so far and then let the process exit.
+   */
+  whenIdle(): Promise<void> {
+    if (this.holds === 0) {
+      this.flushSync();
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      this.idleWaiters.push(resolve);
+    });
+  }
+
+  private releaseIdle(): void {
+    const waiters = this.idleWaiters.splice(0);
+    for (const resolve of waiters) resolve();
   }
 
   /** Write now if anything changed. */
@@ -374,7 +406,9 @@ export class RemovalQueue {
       this.timer = null;
     }
     if (!this.dirty || !this.requests) return;
-    this.dirty = false;
+    // An approval still running will decide more items. Keep the file
+    // dirty so the write at the end of the batch is not skipped.
+    if (this.holds === 0) this.dirty = false;
     this.prune();
     const file: RemovalsFile = { protocol: REMOVALS_PROTOCOL, version: FILE_VERSION, requests: this.requests };
     const temporary = `${this.filePath}.${process.pid}.tmp`;

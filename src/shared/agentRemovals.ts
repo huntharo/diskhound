@@ -43,6 +43,8 @@ export interface RemovalVolumeCheck {
    * whether another volume is mounted inside. Nothing removes it then.
    */
   volumesUnknown?: boolean;
+  /** This path is the mount point of a volume. DiskHound never removes a volume. */
+  selfMount?: boolean;
   checkedAt: number;
 }
 
@@ -51,6 +53,7 @@ export function sameVolumeFacts(a: RemovalVolumeCheck, b: RemovalVolumeCheck): b
   return a.trash === b.trash &&
     a.readOnly === b.readOnly &&
     Boolean(a.volumesUnknown) === Boolean(b.volumesUnknown) &&
+    Boolean(a.selfMount) === Boolean(b.selfMount) &&
     a.mountsInside.map((mount) => mount.path).join("\0") === b.mountsInside.map((mount) => mount.path).join("\0");
 }
 
@@ -201,6 +204,9 @@ export function removalChoice(
   if (check.readOnly) return lock(`${check.volume ?? "This volume"} is read-only, so nothing can remove it.`);
   if (check.volumesUnknown) {
     return lock(`${check.trashWhy ?? "DiskHound couldn't read the list of volumes."} It removes nothing it can't check, so this can only be skipped; the agent can ask again.`);
+  }
+  if (check.selfMount) {
+    return lock(`${check.volume ?? "This path"} is a volume. DiskHound never removes one; ask for what's inside it.`);
   }
   const trash = check.trash !== "no" && granted.includes("files.trash");
   const del = granted.includes("files.delete") && (item.asked === "delete" || check.trash === "no");

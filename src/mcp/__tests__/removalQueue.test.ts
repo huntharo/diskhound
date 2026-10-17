@@ -263,4 +263,30 @@ describe("RemovalQueue", () => {
     q.decide(request.items[0]!.id, "moved", { action: "trash", message: "Moved.", at: now });
     expect(changes).toBe(3);
   });
+
+  it("waits out an approval before quit can treat the list as flushed", async () => {
+    const q = queue({ debounceMs: 0 });
+    const { request } = ask(q, "s1", ["/a"]);
+    await q.flush();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const running = q.batch(async () => {
+      await gate;
+      q.decide(request.items[0]!.id, "deleted", { action: "delete", message: "Deleted.", at: now });
+    });
+    const idle = q.whenIdle();
+    let settled = false;
+    void idle.then(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(settled).toBe(false);
+    expect(q.busy()).toBe(true);
+    // A flush while the approval is running must not be the last write.
+    q.flushSync();
+    expect(onDisk().requests[0].items[0].status).toBe("waiting");
+    release();
+    await idle;
+    await running;
+    expect(onDisk().requests[0].items[0].status).toBe("deleted");
+    expect(q.busy()).toBe(false);
+  });
 });

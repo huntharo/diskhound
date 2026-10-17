@@ -500,9 +500,10 @@ export class TrashProbe {
       .sort((a, b) => a.mountPoint.localeCompare(b.mountPoint))
       .map((candidate) => ({ path: candidate.mountPoint, volume: candidate.name }));
     if (!volume) {
-      return { volume: null, trash: "unknown", trashWhy: `DiskHound couldn't tell which volume this is on.`, readOnly: false, mountsInside, checkedAt };
+      return { volume: null, trash: "unknown", trashWhy: `DiskHound couldn't tell which volume this is on.`, readOnly: false, mountsInside, selfMount: false, checkedAt };
     }
-    const base = { volume: volume.name, readOnly: volume.readOnly, mountsInside, checkedAt };
+    const selfMount = pathKey(path, platform) === pathKey(volume.mountPoint, platform);
+    const base = { volume: volume.name, readOnly: volume.readOnly, mountsInside, selfMount, checkedAt };
 
     if (platform === "linux") {
       // gio puts anything on the home folder's device in the home Trash,

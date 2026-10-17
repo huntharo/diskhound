@@ -81,14 +81,14 @@ describe("parseMacMounts", () => {
 describe("TrashProbe on macOS", () => {
   it("says yes for a folder on the Data volume reached through a firmlink", async () => {
     const [check] = await macProbe().check([{ path: "/Users/sam/github/atlas/dist", sizeBytes: 1 }]);
-    expect(check).toEqual({ volume: "the startup disk", trash: "yes", readOnly: false, mountsInside: [], checkedAt: NOW });
+    expect(check).toEqual({ volume: "the startup disk", trash: "yes", readOnly: false, mountsInside: [], selfMount: false, checkedAt: NOW });
   });
 
   it("says the Data volume, not the read-only system volume, when both report one device", async () => {
     const probe = macProbe({ oneGroupDev: true });
     for (const path of ["/Users/sam/github/atlas/dist", "/Applications/Old.app"]) {
       const [check] = await probe.check([{ path, sizeBytes: 1 }]);
-      expect(check).toEqual({ volume: "the startup disk", trash: "yes", readOnly: false, mountsInside: [], checkedAt: NOW });
+      expect(check).toEqual({ volume: "the startup disk", trash: "yes", readOnly: false, mountsInside: [], selfMount: false, checkedAt: NOW });
     }
   });
 

@@ -27,12 +27,14 @@ export async function canonicalPath(target: string): Promise<string> {
  * Which file system object this is: device, inode (the file ID on
  * Windows) and creation time. A file deleted and made again at the same
  * path differs, even where the file system reuses the inode number at
- * once (ext4). Where Linux can't report a creation time, Node falls back
- * to the change time, so a changed file reads as another one: DiskHound
- * then leaves it alone, the safe way to be wrong.
+ * once (ext4). Linux statx reports a zero birth time when the filesystem
+ * has no creation time, and Node copies that zero instead of falling
+ * back to ctime. A zero birth time uses the change time, so a metadata
+ * change reads as another file and DiskHound leaves the path alone.
  */
-export function fileIdentity(stat: { dev: bigint; ino: bigint; birthtimeNs: bigint }): string {
-  return `${stat.dev}:${stat.ino}:${stat.birthtimeNs}`;
+export function fileIdentity(stat: { dev: bigint; ino: bigint; birthtimeNs: bigint; ctimeNs: bigint }): string {
+  const born = stat.birthtimeNs === 0n ? stat.ctimeNs : stat.birthtimeNs;
+  return `${stat.dev}:${stat.ino}:${born}`;
 }
 
 /** {@link canonicalPath}, plus the {@link fileIdentity} of what is there now, from the same lstat. */
