@@ -38,12 +38,18 @@ export interface DevArtifactSidecar {
   projects: string[];
   /** Paths the user deleted. Kept so a tab switch or hotspot merge cannot resurrect them. */
   droppedPaths?: string[];
+  /** Keep the incomplete-report notice through size-only refreshes and deletions. */
+  classificationNeedsFullScan?: boolean;
 }
 
 /** Lowercase file names that mark their folder as a project. */
 export const PROJECT_MARKERS: ReadonlySet<string> = new Set([
   "package.json",
   "cargo.toml",
+  "build.sbt",
+  "pom.xml",
+  "build.gradle",
+  "build.gradle.kts",
   "go.mod",
   "pyproject.toml",
   "composer.json",
@@ -85,7 +91,7 @@ export interface DevArtifactsRescanProgress {
 }
 
 export function isProjectMarkerName(fileName: string): boolean {
-  return PROJECT_MARKERS.has(fileName.toLowerCase());
+  return /^[\x00-\x7f]*$/.test(fileName) && PROJECT_MARKERS.has(fileName.toLowerCase());
 }
 
 export function createDevAcc(): {
@@ -236,18 +242,25 @@ function nearestProject(artifactPath: string, projects: Map<string, string>): st
   }
 }
 
-function keepArtifact(root: string, projects: Map<string, string>): boolean {
-  const last = basenameOf(root).toLowerCase();
-  if (last === "dist" || last === "build" || last === "out") {
-    return nearestProject(root, projects) !== null;
-  }
-  return true;
+// Old sidecars can include name-only guesses and whole tool homes.
+// Do not keep displaying or refreshing those guesses after rules change.
+function keepArtifact(rec: DevArtifactRootRec): boolean {
+  // Native scans resolve linked worktrees from their .git pointer file, so
+  // these verified roots need not have the conventional .worktrees name.
+  if (rec.kind === "worktree" && rec.worktree) return true;
+  const match = classifyArtifactPath(rec.path, true);
+  return match?.kind === rec.kind && dirsEqual(match.root, rec.path);
 }
 
 /** Keep the largest trees and only the projects that own them. */
 export function compactDevArtifactSidecar(sidecar: DevArtifactSidecar): DevArtifactSidecar {
+  let classificationNeedsFullScan = sidecar.classificationNeedsFullScan;
   const roots = sidecar.roots
-    .filter((rec) => rec.size > 0)
+    .filter((rec) => {
+      if (rec.size <= 0) return false;
+      if (!keepArtifact(rec)) classificationNeedsFullScan = true;
+      return true;
+    })
     .sort((a, b) => b.size - a.size || a.path.localeCompare(b.path));
   const kept = roots.length > DEV_SIDECAR_ROOT_CAP
     ? roots.slice(0, DEV_SIDECAR_ROOT_CAP)
@@ -267,6 +280,7 @@ export function compactDevArtifactSidecar(sidecar: DevArtifactSidecar): DevArtif
     version: 1,
     rootPath: sidecar.rootPath,
     generatedAt: sidecar.generatedAt,
+    ...(classificationNeedsFullScan ? { classificationNeedsFullScan: true } : {}),
     roots: kept,
     projects: keptProjects,
     droppedPaths: sidecar.droppedPaths?.length ? sidecar.droppedPaths : undefined,
@@ -324,6 +338,7 @@ export function sidecarFromReport(report: DevArtifactReport): DevArtifactSidecar
     })),
     projects,
     droppedPaths: report.droppedPaths?.length ? report.droppedPaths : undefined,
+    ...(report.classificationNeedsFullScan ? { classificationNeedsFullScan: true } : {}),
   };
 }
 
@@ -337,9 +352,8 @@ export function reportFromSidecar(
   const projects = projectLookup(current.projects);
   const artifacts: DevArtifact[] = [];
   for (const rec of current.roots) {
-    if (!keepArtifact(rec.path, projects)) continue;
-    // A repo belongs to its checkout, marker file or not, and a linked
-    // worktree to the main checkout its `.git` file points at.
+    if (!keepArtifact(rec)) continue;
+    // Repos belong to their checkout; worktrees to the checkout their .git points at.
     const projectPath = rec.kind === "git-repo"
       ? dirnameOf(rec.path)
       : rec.worktree?.project ?? nearestProject(rec.path, projects);
@@ -376,6 +390,7 @@ export function reportFromSidecar(
     generatedAt: current.generatedAt,
     rootPath: current.rootPath,
     droppedPaths: current.droppedPaths,
+    ...(current.classificationNeedsFullScan ? { classificationNeedsFullScan: true } : {}),
   };
 }
 
@@ -588,6 +603,7 @@ export function planRescanTargets(
   const seen = new Set<string>();
   const targets: string[] = [];
   for (const rec of sidecar.roots) {
+    if (!keepArtifact(rec)) continue;
     const key = pathKey(rec.path);
     if (seen.has(key)) continue;
     seen.add(key);
@@ -619,7 +635,11 @@ export async function rescanDevArtifactSidecar(
     acc.projects.add(project);
   }
   const targets = planRescanTargets(sidecar, discoverDiagLogRoots(sidecar.rootPath));
-  const kindByPath = new Map(sidecar.roots.map((r) => [pathKey(r.path), r.kind]));
+  let classificationNeedsFullScan = sidecar.classificationNeedsFullScan;
+  const kindByPath = new Map(sidecar.roots.map((r) => {
+    if (!keepArtifact(r)) classificationNeedsFullScan = true;
+    return [pathKey(r.path), r.kind];
+  }));
   const started = Date.now();
   let filesSoFar = 0;
   let bytesSoFar = 0;
@@ -663,6 +683,7 @@ export async function rescanDevArtifactSidecar(
 
   emit(targets.length, targets[targets.length - 1] ?? sidecar.rootPath, true);
   const next = carryWorktreeInfo(carryCloneInfo(sidecarFromAcc(acc, sidecar.rootPath), sidecar), sidecar);
+  if (classificationNeedsFullScan) next.classificationNeedsFullScan = true;
   if (!sidecar.droppedPaths?.length) return next;
   return { ...next, droppedPaths: sidecar.droppedPaths };
 }

@@ -588,6 +588,10 @@ fn is_project_marker(name: &str) -> bool {
         name.to_ascii_lowercase().as_str(),
         "package.json"
             | "cargo.toml"
+            | "build.sbt"
+            | "pom.xml"
+            | "build.gradle"
+            | "build.gradle.kts"
             | "go.mod"
             | "pyproject.toml"
             | "composer.json"
@@ -598,35 +602,454 @@ fn is_project_marker(name: &str) -> bool {
     )
 }
 
+fn numeric_version(value: &str, min_parts: usize, max_parts: usize) -> bool {
+    let mut count = 0;
+    for part in value.split('.') {
+        count += 1;
+        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+    }
+    (min_parts..=max_parts).contains(&count)
+}
+
+fn dotnet_framework(value: &str) -> bool {
+    let (framework, platform) = value
+        .split_once('-')
+        .map_or((value, None), |(a, b)| (a, Some(b)));
+    let Some(version) = framework.strip_prefix("net") else {
+        return false;
+    };
+    let valid = if let Some(version) = version
+        .strip_prefix("standard")
+        .or_else(|| version.strip_prefix("coreapp"))
+    {
+        numeric_version(version, 2, 2)
+    } else {
+        numeric_version(version, 1, 2)
+    };
+    valid
+        && platform.is_none_or(|platform| {
+            let letters = platform
+                .bytes()
+                .take_while(|b| b.is_ascii_lowercase())
+                .count();
+            matches!(
+                &platform[..letters],
+                "windows" | "android" | "ios" | "macos" | "maccatalyst" | "tvos" | "browser"
+            ) && (letters == platform.len() || numeric_version(&platform[letters..], 1, usize::MAX))
+        })
+}
+
+fn go_module_version(name: &str) -> bool {
+    let Some((module, version)) = name.split_once("@v") else {
+        return false;
+    };
+    if module.is_empty()
+        || !module
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".!_-".contains(&b))
+    {
+        return false;
+    }
+    let suffix = version.find(['-', '+']);
+    let base = suffix.map_or(version, |i| &version[..i]);
+    numeric_version(base, 3, 3)
+        && suffix.is_none_or(|i| {
+            let suffix = &version[i + 1..];
+            !suffix.is_empty()
+                && suffix
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b".+-".contains(&b))
+        })
+}
+
+fn cache_tool_kind(tool: &str) -> Option<Kind> {
+    match tool {
+        "pip" | "uv" => Some(Kind::Python),
+        "go-build" => Some(Kind::GoModule),
+        "composer" => Some(Kind::PackageCache),
+        "zig" => Some(Kind::CompilerCache),
+        "coursier" => Some(Kind::Jvm),
+        "ccache" | "sccache" | "mozilla.sccache" | "vscode-cpptools" => Some(Kind::CompilerCache),
+        "yarn" | "pnpm" | "electron" | "electron-builder" | "ms-playwright" | "cypress"
+        | "homebrew" | "puppeteer" | "node-gyp" | "org.swift.swiftpm" => Some(Kind::PackageCache),
+        _ => None,
+    }
+}
+
+// Fixed-width structural checks, matching TypeScript. No filesystem probes.
+fn language_layout(parts: &[&str], i: usize, lower: &str) -> Option<(usize, Kind)> {
+    if !matches!(
+        lower,
+        "library"
+            | "appdata"
+            | ".cache"
+            | ".pub-cache"
+            | ".dart_tool"
+            | ".composer"
+            | ".gem"
+            | "vendor"
+            | ".hex"
+            | "_build"
+            | ".stack-work"
+            | "dist-newstyle"
+    ) {
+        return None;
+    }
+    let at = |offset: usize, value: &str| {
+        parts
+            .get(i + offset)
+            .is_some_and(|s| s.eq_ignore_ascii_case(value))
+    };
+    let next = parts
+        .get(i + 1)
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    if lower == "library" && next == "developer" && at(2, "xcode") && at(3, "deriveddata") {
+        return Some((i + 4, Kind::CompilerCache));
+    }
+    if matches!(
+        (lower, next.as_str()),
+        (".pub-cache", "hosted")
+            | (".composer", "cache")
+            | (".gem", "specs")
+            | (".hex", "packages")
+    ) {
+        return Some((i + 2, Kind::PackageCache));
+    }
+    if lower == ".pub-cache" && next == "git" && at(2, "cache") {
+        return Some((i + 3, Kind::PackageCache));
+    }
+    if lower == "appdata" && next == "local" && at(2, "pub") && at(3, "cache") && at(4, "hosted") {
+        return Some((i + 5, Kind::PackageCache));
+    }
+    if lower == "appdata"
+        && next == "local"
+        && at(2, "composer")
+        && (at(3, "files") || at(3, "repo") || at(3, "vcs"))
+    {
+        return Some((i + 4, Kind::PackageCache));
+    }
+    if lower == ".cache" && next == "gem" && (at(2, "specs") || at(2, "gems")) {
+        return Some((i + 3, Kind::PackageCache));
+    }
+    let ruby = if lower == ".gem" && next == "ruby" {
+        Some(i + 1)
+    } else if lower == "vendor" && next == "bundle" && at(2, "ruby") {
+        Some(i + 2)
+    } else {
+        None
+    };
+    if let Some(ruby) = ruby {
+        if parts
+            .get(ruby + 1)
+            .is_some_and(|s| numeric_version(s, 3, 3))
+            && parts
+                .get(ruby + 2)
+                .is_some_and(|s| s.eq_ignore_ascii_case("cache"))
+        {
+            return Some((ruby + 3, Kind::PackageCache));
+        }
+    }
+    if matches!(
+        (lower, next.as_str()),
+        (".dart_tool", "flutter_build")
+            | (".stack-work", "dist")
+            | ("dist-newstyle", "build")
+            | ("dist-newstyle", "cache")
+    ) {
+        return Some((i + 2, Kind::CompilerCache));
+    }
+    if lower == "_build"
+        && matches!(next.as_str(), "dev" | "test" | "prod" | "shared")
+        && at(2, "lib")
+        && at(4, "ebin")
+        && parts.get(i + 3).is_some_and(|name| {
+            name.as_bytes()
+                .first()
+                .is_some_and(|b| b.is_ascii_alphabetic())
+                && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        })
+    {
+        return Some((i + 5, Kind::CompilerCache));
+    }
+    None
+}
+
 #[cfg(test)]
 fn classify(path: &str) -> Option<(String, Kind)> {
     let parts = split_segments(path);
     classify_parts(&parts, 0).map(|(depth, kind)| (join_segments(path, &parts, depth), kind))
 }
 
-/// The tree `parts` falls in, as (segments in its root path, kind),
-/// looking only at segments from `start` on.
-///
-/// Linked worktrees outside `.worktrees/` are not path rules: their
-/// `.git` file says what they are, and `DevArtifactAcc` reads it.
+// Start at the enclosing worktree's end to classify nested output without
+// splitting or reconstructing each file path again.
 fn classify_parts(parts: &[&str], start: usize) -> Option<(usize, Kind)> {
     for i in start..parts.len() {
+        crate::work::step();
         let lower = parts[i].to_ascii_lowercase();
-        if lower == "target" {
-            if i + 1 < parts.len() {
-                let next = parts[i + 1].to_ascii_lowercase();
-                if matches!(next.as_str(), "debug" | "release" | "doc" | "incremental") {
-                    return Some((i + 2, Kind::RustTarget));
+        if let Some((end, kind)) = language_layout(&parts, i, &lower) {
+            return Some((end, kind));
+        }
+        if matches!(
+            lower.as_str(),
+            ".cache" | "library" | ".local" | "appdata" | ".npm"
+        ) {
+            let next = parts
+                .get(i + 1)
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_default();
+            let after = parts
+                .get(i + 2)
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_default();
+            let cache_tool = if lower == ".cache" {
+                Some(i + 1)
+            } else if lower == "library" && next == "caches" {
+                Some(i + 2)
+            } else {
+                None
+            };
+            if let Some(tool) = cache_tool {
+                if let Some(kind) = parts
+                    .get(tool)
+                    .and_then(|s| cache_tool_kind(&s.to_ascii_lowercase()))
+                {
+                    return Some((tool + 1, kind));
                 }
             }
-            return Some((i + 1, Kind::RustTarget));
+            if ((lower == ".local" && next == "share") || (lower == "appdata" && next == "local"))
+                && after == "nuget"
+                && parts.get(i + 3).is_some_and(|s| {
+                    matches!(
+                        s.to_ascii_lowercase().as_str(),
+                        "http-cache" | "v3-cache" | "plugins-cache"
+                    )
+                })
+            {
+                return Some((i + 4, Kind::Dotnet));
+            }
+            if lower == ".npm" {
+                if next == "_cacache" {
+                    return Some((i + 2, Kind::PackageCache));
+                }
+                continue;
+            }
+        }
+        if matches!(
+            lower.as_str(),
+            ".yarn"
+                | ".bun"
+                | ".gradle"
+                | ".m2"
+                | ".nuget"
+                | ".vercel"
+                | ".netlify"
+                | ".output"
+                | ".venv"
+                | "venv"
+                | ".tox"
+                | "obj"
+        ) {
+            let next = parts
+                .get(i + 1)
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_default();
+            let after = parts
+                .get(i + 2)
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_default();
+            // Only generated/cache children, not whole tool homes.
+            match lower.as_str() {
+                ".yarn" => {
+                    if next == "berry" && after == "cache" {
+                        return Some((i + 3, Kind::PackageCache));
+                    }
+                    return matches!(next.as_str(), "cache" | "unplugged")
+                        .then(|| (i + 2, Kind::PackageCache));
+                }
+                ".bun" => {
+                    return (next == "install" && after == "cache")
+                        .then(|| (i + 3, Kind::PackageCache));
+                }
+                ".gradle" => {
+                    if next == "caches" || numeric_version(&next, 2, 3) {
+                        return Some((i + 2, Kind::Jvm));
+                    }
+                    return (next == "wrapper" && after == "dists")
+                        .then(|| (i + 3, Kind::Jvm));
+                }
+                ".m2" => {
+                    return (next == "repository")
+                        .then(|| (i + 2, Kind::Jvm));
+                }
+                ".nuget" => {
+                    return (next == "packages")
+                        .then(|| (i + 2, Kind::Dotnet));
+                }
+                ".vercel" | ".netlify" | ".output" => {
+                    let output = match lower.as_str() {
+                        ".vercel" => matches!(next.as_str(), "cache" | "output"),
+                        ".netlify" => next == "cache",
+                        _ => matches!(next.as_str(), "public" | "server"),
+                    };
+                    return output.then(|| (i + 2, Kind::JsBuild));
+                }
+                ".venv" | "venv" | ".tox" => {
+                    let lib = i + if lower == ".tox" { 2 } else { 1 };
+                    if parts
+                        .get(lib)
+                        .is_some_and(|s| s.eq_ignore_ascii_case("lib"))
+                    {
+                        let version = parts
+                            .get(lib + 1)
+                            .map(|s| s.to_ascii_lowercase())
+                            .unwrap_or_default();
+                        let packages = if version == "site-packages" {
+                            Some(lib + 1)
+                        } else if version.strip_prefix("python").is_some_and(|v| {
+                            numeric_version(v.strip_suffix('t').unwrap_or(v), 2, 2)
+                        }) {
+                            Some(lib + 2)
+                        } else {
+                            None
+                        };
+                        if let Some(packages) = packages {
+                            if parts
+                                .get(packages)
+                                .is_some_and(|s| s.eq_ignore_ascii_case("site-packages"))
+                            {
+                                return Some((
+                                    packages + 1,
+                                    Kind::Python,
+                                ));
+                            }
+                        }
+                    }
+                }
+                "obj"
+                    if matches!(next.as_str(), "debug" | "release") && dotnet_framework(&after) =>
+                {
+                    return Some((i + 3, Kind::Dotnet));
+                }
+                _ => {}
+            }
+            continue;
+        }
+        if matches!(lower.as_str(), "ccache" | "sccache" | "mozilla.sccache") {
+            let parent = i.checked_sub(1).and_then(|j| parts.get(j));
+            let grandparent = i.checked_sub(2).and_then(|j| parts.get(j));
+            if parent.zip(grandparent).is_some_and(|(p, gp)| {
+                (p.eq_ignore_ascii_case("caches") && gp.eq_ignore_ascii_case("library"))
+                    || (p.eq_ignore_ascii_case("local") && gp.eq_ignore_ascii_case("appdata"))
+                    || (lower == "sccache"
+                        && p.eq_ignore_ascii_case("mozilla")
+                        && gp.eq_ignore_ascii_case("local")
+                        && i.checked_sub(3)
+                            .and_then(|j| parts.get(j))
+                            .is_some_and(|s| s.eq_ignore_ascii_case("appdata")))
+            }) {
+                return Some((i + 1, Kind::CompilerCache));
+            }
+            continue;
+        }
+        if lower == "target" {
+            // Match only tool-specific subtrees, never a whole ambiguous
+            // target/profile tree or an ancestor's project language.
+            let next = parts
+                .get(i + 1)
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_default();
+            let scala = next.strip_prefix("scala-").is_some_and(|version| {
+                let mut components = version.split('.');
+                let major = components.next().unwrap_or_default();
+                let rest: Vec<_> = components.collect();
+                (major == "3" || (major == "2" && !rest.is_empty()))
+                    && rest
+                        .iter()
+                        .all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            });
+            if scala || matches!(next.as_str(), "maven-status" | "maven-archiver") {
+                return Some((i + 2, Kind::Jvm));
+            }
+            let triple = next.split('-').count() >= 3
+                && next.split('-').take(2).all(|s| !s.is_empty())
+                && next.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-'
+                })
+                && next.splitn(3, '-').nth(2).is_some_and(|s| {
+                    s.as_bytes()
+                        .first()
+                        .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                });
+            let profile = if matches!(next.as_str(), "debug" | "release") {
+                i + 1
+            } else if triple {
+                i + 2
+            } else {
+                continue;
+            };
+            if parts.get(profile).is_some_and(|s| {
+                s.eq_ignore_ascii_case("debug") || s.eq_ignore_ascii_case("release")
+            }) && parts.get(profile + 1).is_some_and(|s| {
+                matches!(
+                    s.to_ascii_lowercase().as_str(),
+                    "deps" | "incremental" | ".fingerprint"
+                )
+            }) {
+                return Some((profile + 2, Kind::RustTarget));
+            }
+            if parts.get(profile).is_some_and(|s| {
+                s.eq_ignore_ascii_case("debug") || s.eq_ignore_ascii_case("release")
+            }) && parts
+                .get(profile + 1)
+                .is_some_and(|s| s.eq_ignore_ascii_case("build"))
+                && parts.get(profile + 2).is_some_and(|s| {
+                    s.rsplit_once('-').is_some_and(|(name, hash)| {
+                        !name.is_empty()
+                            && (name.as_bytes()[0].is_ascii_alphanumeric()
+                                || name.as_bytes()[0] == b'_')
+                            && name
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                            && hash.len() == 16
+                            && hash.bytes().all(|b| b.is_ascii_hexdigit())
+                    })
+                })
+            {
+                return Some((profile + 3, Kind::RustTarget));
+            }
+            continue;
         }
         if lower == ".cargo" && i + 1 < parts.len() && parts[i + 1].eq_ignore_ascii_case("registry")
         {
             return Some((i + 2, Kind::CargoRegistry));
         }
-        if lower == "pkg" && i + 1 < parts.len() && parts[i + 1].eq_ignore_ascii_case("mod") {
-            return Some((i + 2, Kind::GoModule));
+        if lower == "pkg"
+            && parts
+                .get(i + 1)
+                .is_some_and(|s| s.eq_ignore_ascii_case("mod"))
+        {
+            if parts
+                .get(i + 2)
+                .is_some_and(|s| s.eq_ignore_ascii_case("cache"))
+                && parts
+                    .get(i + 3)
+                    .is_some_and(|s| s.eq_ignore_ascii_case("download"))
+            {
+                return Some((i + 4, Kind::GoModule));
+            }
+            // Same bounded layout search as ARTIFACT_ROOT_LOOKBACK in TS.
+            if parts.get(i + 2).is_some_and(|s| s.contains('.')) {
+                for end in i + 2..parts.len().min(i + 6) {
+                    crate::work::step();
+                    if go_module_version(&parts[end].to_ascii_lowercase()) {
+                        return Some((end + 1, Kind::GoModule));
+                    }
+                }
+            }
+            continue;
         }
         // pnpm's global store outside a `.pnpm-store` folder:
         // `$PNPM_HOME/store`. Same rule as `classifyArtifactPath` in
@@ -676,26 +1099,18 @@ fn classify_parts(parts: &[&str], start: usize) -> Option<(usize, Kind)> {
             };
             return Some((depth, kind));
         }
-        if matches!(lower.as_str(), "dist" | "build" | "out") {
-            return Some((i + 1, Kind::JsBuild));
-        }
     }
     None
 }
 
-
 fn mapped_kind(lower: &str) -> Option<Kind> {
     Some(match lower {
         "node_modules" => Kind::NodeModules,
-        ".pnpm-store" | ".yarn" | ".bun" => Kind::PackageCache,
-        ".next" | ".nuxt" | ".output" | ".turbo" | ".parcel-cache" | ".svelte-kit"
-        | ".vercel" | ".netlify" => Kind::JsBuild,
-        "__pycache__" | ".venv" | "venv" | ".tox" | ".mypy_cache" | ".pytest_cache"
-        | ".ruff_cache" => Kind::Python,
-        ".gradle" | ".m2" => Kind::Jvm,
-        ".nuget" => Kind::Dotnet,
-        "cmakefiles" | "cmake-build-debug" | "cmake-build-release" => Kind::CmakeBuild,
-        "ccache" | "sccache" => Kind::CompilerCache,
+        ".pnpm-store" => Kind::PackageCache,
+        ".next" | ".nuxt" | ".turbo" | ".parcel-cache" | ".svelte-kit" => Kind::JsBuild,
+        "__pycache__" | ".mypy_cache" | ".pytest_cache" | ".ruff_cache" => Kind::Python,
+        "cmakefiles" => Kind::CmakeBuild,
+        ".zig-cache" => Kind::CompilerCache,
         ".worktrees" => Kind::Worktree,
         "diagoutputdir" | "rdclientautotrace" => Kind::DiagLogs,
         _ => return None,
@@ -765,6 +1180,146 @@ mod tests {
     use super::*;
 
     #[test]
+    fn classification_scales_with_files_and_ambiguous_path_depth() {
+        let count = |files: usize, depth: usize| {
+            let prefix = "/pkg/mod/example.com".repeat(depth);
+            crate::work::take();
+            for _ in 0..files {
+                assert!(classify(&format!("{prefix}/notes.txt")).is_none());
+                assert!(
+                    classify("/go/pkg/mod/example.com/team/module/v2@v2.0.0/file.go").is_some()
+                );
+                assert!(classify("/mono/target/aarch64-apple-darwin/debug/build/crate-0123456789abcdef/out/lib.a").is_some());
+                assert!(classify("/Users/dev/Library/Caches/electron/download.zip").is_some());
+                assert!(classify("/home/dev/.local/share/NuGet/http-cache/package.dat").is_some());
+                assert!(classify("/project/vendor/bundle/ruby/3.4.0/cache/a.gem").is_some());
+                assert!(classify("/project/_build/dev/lib/my_app/ebin/Elixir.Main.beam").is_some());
+                assert!(classify("/Users/dev/AppData/Local/Pub/Cache/hosted/pkg/lib.dart").is_some());
+            }
+            crate::work::take()
+        };
+        // Grow file count alone and path depth alone: each must be linear.
+        let small = count(100, 10);
+        assert!(count(800, 10) <= small * 16);
+        assert!(count(100, 80) <= small * 16);
+        assert!(count(800, 80) <= 600_000);
+    }
+
+    #[test]
+    fn mixed_monorepo_is_independent_of_marker_order() {
+        let files = [
+            "/mono/Cargo.toml",
+            "/mono/package.json",
+            "/mono/jvm/build.sbt",
+            "/mono/jvm/api/target/scala-2.13/classes/A.class",
+            "/mono/jvm/api/target/scala-2.13/classes/B.class",
+            "/mono/native/target/debug/deps/libapp.rlib",
+            "/mono/jvm/api/target/classes/C.class",
+            "/mono/unrelated/target/notes.txt",
+            "/mono/jvm/build/notes.txt",
+        ];
+        for reverse in [false, true] {
+            let mut ordered = files.to_vec();
+            if reverse {
+                ordered.reverse();
+            }
+            let mut acc = DevArtifactAcc::new();
+            for path in ordered {
+                acc.add(path, 100, false, None);
+            }
+            assert_eq!(acc.artifacts.len(), 2);
+            let jvm = &acc.artifacts["/mono/jvm/api/target/scala-2.13"];
+            assert_eq!(jvm.kind.as_str(), "jvm");
+            assert_eq!((jvm.size, jvm.files), (200, 2));
+            assert_eq!(
+                acc.artifacts["/mono/native/target/debug/deps"]
+                    .kind
+                    .as_str(),
+                "rust-target"
+            );
+            assert!(acc.projects.contains("/mono/jvm"));
+        }
+    }
+
+    #[test]
+    fn shared_adversarial_corpus_and_path_spellings() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../src/test/fixtures/devArtifactClassification.json"
+        ))
+        .unwrap();
+        for case in cases.as_array().unwrap() {
+            for prefix in ["/", "C:/", "//nas/share/"] {
+                for sep in ["/", "\\"] {
+                    if prefix == "/" && sep == "\\" {
+                        continue;
+                    }
+                    for upper in [false, true] {
+                        let spell = |path: &str| {
+                            let value = format!("{prefix}{}", &path[1..]).replace('/', sep);
+                            if upper {
+                                value.to_ascii_uppercase()
+                            } else {
+                                value
+                            }
+                        };
+                        let path = spell(case["path"].as_str().unwrap());
+                        let expected = case["root"].as_str().map(|root| {
+                            let root = spell(root);
+                            let root = if prefix.starts_with("//") {
+                                root.replace('/', "\\")
+                            } else {
+                                root
+                            };
+                            (root, case["kind"].as_str().unwrap().to_string())
+                        });
+                        if let Some((root, kind)) = &expected {
+                            // classify accepts file paths; a bare .git may be a pointer
+                            // file, so validate this directory root through a child.
+                            let root_probe = if kind == "git-repo" {
+                                format!("{root}/HEAD")
+                            } else {
+                                root.clone()
+                            };
+                            assert_eq!(
+                                classify(&root_probe).map(|(r, k)| (r, k.as_str().to_string())),
+                                Some((root.clone(), kind.clone())),
+                                "root: {root}"
+                            );
+                        }
+                        assert_eq!(
+                            classify(&path).map(|(r, k)| (r, k.as_str().to_string())),
+                            expected,
+                            "{path}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fuzz_ambiguous_names_with_fixed_seed() {
+        let mut seed = 0x5ca1ab1eu32;
+        let mut random = |n: usize| {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            seed as usize % n
+        };
+        let names: Vec<String> = serde_json::from_str(include_str!(
+            "../../../src/test/fixtures/devArtifactAmbiguousSegments.json"
+        ))
+        .unwrap();
+        for _ in 0..2000 {
+            let mut path = String::from("/mono");
+            for _ in 0..1 + random(24) {
+                path.push('/');
+                path.push_str(&names[random(names.len())]);
+            }
+            path.push_str("/notes.txt");
+            assert!(classify(&path).is_none(), "{path}");
+        }
+    }
+
+    #[test]
     fn classifies_node_modules() {
         let (root, kind) = classify(r"C:\proj\app\node_modules\preact\dist\preact.js").unwrap();
         assert_eq!(root, r"C:\proj\app\node_modules");
@@ -773,8 +1328,8 @@ mod tests {
 
     #[test]
     fn classifies_rust_target() {
-        let (root, kind) = classify("/home/dev/diskhound/target/debug/diskhound").unwrap();
-        assert_eq!(root, "/home/dev/diskhound/target/debug");
+        let (root, kind) = classify("/home/dev/diskhound/target/debug/deps/diskhound").unwrap();
+        assert_eq!(root, "/home/dev/diskhound/target/debug/deps");
         assert!(matches!(kind, Kind::RustTarget));
     }
 
@@ -971,7 +1526,7 @@ mod tests {
             (format!("{wt}/src/main.ts"), 4_000),
             (format!("{wt}/node_modules/react/index.js"), 50_000),
             (format!("{wt}/packages/ui/node_modules/x/y.js"), 30_000),
-            (format!("{wt}/target/debug/app"), 900_000),
+            (format!("{wt}/target/debug/deps/libapp.rlib"), 900_000),
             (format!("{wt}/.git"), 4_096),
             (format!("{wt}/package.json"), 1_000),
             // A submodule inside it: part of the worktree, not its own.
@@ -979,11 +1534,19 @@ mod tests {
             (format!("{wt}/vendor/lib/lib.c"), 2_000),
             // Elsewhere: a plain project with its own node_modules.
             ("/Users/dev/github/app/node_modules/a/b.js".to_string(), 7_000),
+            (format!("{wt}/jvm/target/scala-2.13/classes/App.class"), 20_000),
+            // Part of the worktree, but no language evidence for this target.
+            (format!("{wt}/unknown/target/notes.txt"), 3_000),
         ];
         let files: Vec<(&str, u64)> = files.iter().map(|(p, s)| (p.as_str(), *s)).collect();
         let tree_size: u64 = files.iter().filter(|(p, _)| p.starts_with(wt)).map(|(_, s)| s).sum();
         // The `.git` file first, last, and in the middle.
-        for order in [vec![4, 0, 1, 2, 3, 5, 6, 7, 8], vec![0, 1, 2, 3, 5, 6, 7, 8, 4], (0..9).collect()] {
+        let without_git: Vec<usize> = (0..files.len()).filter(|i| *i != 4).collect();
+        for order in [
+            [vec![4], without_git.clone()].concat(),
+            [without_git, vec![4]].concat(),
+            (0..files.len()).collect(),
+        ] {
             let mut acc = DevArtifactAcc::with_git_reader(fake_git_file);
             for i in &order {
                 let (path, size) = files[*i];
@@ -993,15 +1556,16 @@ mod tests {
             let rec = &acc.artifacts[wt];
             assert!(matches!(rec.kind, Kind::Worktree));
             assert_eq!(rec.size, tree_size);
-            assert_eq!(rec.files, 8);
+            assert_eq!(rec.files, 10);
             assert_eq!(rec.project.as_deref(), Some("/Users/dev/github/feat"));
             assert_eq!(
                 rec.nested,
-                BTreeMap::from([("node-modules", 80_000), ("rust-target", 900_000)]),
+                BTreeMap::from([("node-modules", 80_000), ("rust-target", 900_000), ("jvm", 20_000)]),
             );
             // Folded in, so no byte is listed twice.
             assert!(!acc.artifacts.contains_key(&format!("{wt}/node_modules")));
-            assert!(!acc.artifacts.contains_key(&format!("{wt}/target/debug")));
+            assert!(!acc.artifacts.contains_key(&format!("{wt}/target/debug/deps")));
+            assert!(!acc.artifacts.contains_key(&format!("{wt}/jvm/target/scala-2.13")));
             assert!(!acc.artifacts.contains_key(&format!("{wt}/vendor/lib")));
             assert!(acc.artifacts.contains_key("/Users/dev/github/app/node_modules"));
             // The worktree's .git and the submodule's: both outside every tree.
@@ -1030,7 +1594,7 @@ mod tests {
     fn git_files_inside_another_tree_are_not_read() {
         let mut acc = DevArtifactAcc::with_git_reader(|_| panic!("read a .git inside a tree"));
         acc.add("/Users/dev/app/node_modules/dep/.git", 100, false, None);
-        acc.add("/Users/dev/app/target/debug/build/x/.git", 100, false, None);
+        acc.add("/Users/dev/app/target/debug/build/x-0123456789abcdef/.git", 100, false, None);
         acc.add("/Users/dev/app/.git/modules/lib/.git", 100, false, None);
         assert_eq!(acc.git_file_reads(), 0);
     }
@@ -1061,6 +1625,9 @@ mod tests {
             (r"C:\src\app\.worktrees\feat\.git", 4_096u64),
             (r"C:\src\app\.worktrees\feat\node_modules\x\i.js", 20_000),
             (r"C:\src\app\.worktrees\feat\src\a.rs", 1_000),
+            (r"C:\src\app\.worktrees\feat\target\debug\deps\libapp.rlib", 30_000),
+            (r"C:\src\app\.worktrees\feat\jvm\target\scala-3.3\classes\App.class", 5_000),
+            (r"C:\src\app\.worktrees\feat\unknown\target\notes.txt", 2_000),
         ];
         fn windows_git_file(_: &str) -> Option<String> {
             Some("gitdir: C:/src/app/.git/worktrees/feat\n".to_string())
@@ -1072,9 +1639,9 @@ mod tests {
         // No folder rollups: the per-file sums already cover the tree.
         acc.resolve_worktrees(&|_| None);
         let rec = &acc.artifacts[r"C:\src\app\.worktrees\feat"];
-        assert_eq!(rec.size, 25_096);
+        assert_eq!(rec.size, 62_096);
         assert_eq!(rec.project.as_deref(), Some(r"C:\src\app"));
-        assert_eq!(rec.nested, BTreeMap::from([("node-modules", 20_000)]));
+        assert_eq!(rec.nested, BTreeMap::from([("node-modules", 20_000), ("rust-target", 30_000), ("jvm", 5_000)]));
         assert_eq!(acc.git_file_reads(), 1);
     }
 
