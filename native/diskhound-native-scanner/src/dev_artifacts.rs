@@ -89,6 +89,7 @@ struct AccRec {
     kind: Kind,
     size: u64,
     files: u64,
+    latest_file_mtime_ms: Option<u64>,
     /// Stable index into `DevArtifactAcc::root_paths`; clone groups
     /// refer to roots by this id.
     id: u32,
@@ -110,6 +111,8 @@ impl AccRec {
             kind,
             size: 0,
             files: 0,
+            // Promoted worktrees use folder rollups without complete file mtimes.
+            latest_file_mtime_ms: None,
             id,
             measured: false,
             clone: CloneSums::default(),
@@ -181,6 +184,7 @@ impl DevArtifactAcc {
     /// Artifacts tree, so the caller can attribute clone groups.
     pub fn add(
         &mut self,
+        mtime_ms: u64,
         path: &str,
         size: u64,
         extra_hardlink: bool,
@@ -215,10 +219,15 @@ impl DevArtifactAcc {
         let next_id = self.root_paths.len() as u32;
         let entry = self.artifacts.entry(root).or_insert_with_key(|root| {
             self.root_paths.push(root.clone());
-            AccRec::new(kind, next_id)
+            let mut rec = AccRec::new(kind, next_id);
+            rec.latest_file_mtime_ms = Some(0);
+            rec
         });
         entry.size = entry.size.saturating_add(occupancy);
         entry.files = entry.files.saturating_add(1);
+        crate::work::step(); // One recency aggregation per file.
+        entry.latest_file_mtime_ms = entry.latest_file_mtime_ms
+            .and_then(|old| if mtime_ms > 0 { Some(old.max(mtime_ms)) } else { None });
         if matches!(kind, Kind::Worktree) {
             if let Some((_, inner)) = classify_parts(&parts, depth) {
                 *entry.nested.entry(inner.as_str()).or_default() += occupancy;
@@ -446,6 +455,8 @@ struct SidecarFile {
 
 #[derive(Serialize)]
 struct SidecarRoot {
+    #[serde(rename = "latestFileMtimeMs")]
+    latest_file_mtime_ms: Option<u64>,
     path: String,
     kind: String,
     size: u64,
@@ -545,6 +556,7 @@ pub fn write_sidecar(
         .iter()
         .filter(|(_, rec)| rec.size > 0)
         .map(|(path, rec)| SidecarRoot {
+            latest_file_mtime_ms: rec.latest_file_mtime_ms,
             path: path.clone(),
             kind: rec.kind.as_str().to_string(),
             size: rec.size,
@@ -1180,6 +1192,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn modification_times_include_nested_hardlinks_and_unknowns() {
+        let mut acc = DevArtifactAcc::new();
+        acc.add(1_800_000_000_000, "/p/node_modules/a", 4096, false, None);
+        acc.add(1_800_000_001_000, "/p/node_modules/nested/node_modules/b", 4096, true, None);
+        assert_eq!(acc.artifacts.len(), 1);
+        let rec = acc.artifacts.values().next().unwrap();
+        assert_eq!(rec.latest_file_mtime_ms, Some(1_800_000_001_000));
+        assert_eq!(rec.size, 4096);
+        acc.add(0, "/p/node_modules/unknown", 1, false, None);
+        acc.add(1_800_000_002_000, "/p/node_modules/known", 1, false, None);
+        assert_eq!(acc.artifacts.values().next().unwrap().latest_file_mtime_ms, None);
+    }
+
+    #[test]
+    fn recency_aggregation_scales_with_files_and_roots() {
+        fn count(roots: usize, files: usize) -> u64 {
+            crate::work::take();
+            let mut acc = DevArtifactAcc::new();
+            for root in 0..roots {
+                for file in 0..files {
+                    acc.add(1_800_000_000_000 + file as u64,
+                        &format!("/p{root}/node_modules/file{file}"), 4096, false, None);
+                }
+            }
+            assert_eq!(acc.artifacts.len(), roots);
+            crate::work::take()
+        }
+        let small = count(100, 10);
+        let large = count(800, 10);
+        assert!(large <= small * 16);
+        assert!(large <= 200_000);
+        assert!(count(100, 80) <= small * 16);
+    }
+
+    #[test]
     fn classification_scales_with_files_and_ambiguous_path_depth() {
         let count = |files: usize, depth: usize| {
             let prefix = "/pkg/mod/example.com".repeat(depth);
@@ -1225,7 +1272,7 @@ mod tests {
             }
             let mut acc = DevArtifactAcc::new();
             for path in ordered {
-                acc.add(path, 100, false, None);
+                acc.add(1, path, 100, false, None);
             }
             assert_eq!(acc.artifacts.len(), 2);
             let jvm = &acc.artifacts["/mono/jvm/api/target/scala-2.13"];
@@ -1372,14 +1419,15 @@ mod tests {
     #[test]
     fn terraform_lock_file_marks_a_project() {
         let mut acc = DevArtifactAcc::new();
-        acc.add("/Users/dev/infra/prod/.terraform.lock.hcl", 1_000, false, None);
-        acc.add(
+        acc.add(1, "/Users/dev/infra/prod/.terraform.lock.hcl", 1_000, false, None);
+        acc.add(1,
             "/Users/dev/infra/prod/.terraform/providers/registry.terraform.io/hashicorp/aws/6.54.0/darwin_arm64/terraform-provider-aws_v6.54.0_x5",
             800_000_000,
             false,
             None,
         );
         let roots = vec![SidecarRoot {
+            latest_file_mtime_ms: None,
             path: "/Users/dev/infra/prod/.terraform/providers".to_string(),
             kind: "terraform".to_string(),
             size: 800_000_000,
@@ -1550,13 +1598,15 @@ mod tests {
             let mut acc = DevArtifactAcc::with_git_reader(fake_git_file);
             for i in &order {
                 let (path, size) = files[*i];
-                acc.add(path, size, false, None);
+                acc.add(1, path, size, false, None);
             }
             resolve(&mut acc, &files);
             let rec = &acc.artifacts[wt];
             assert!(matches!(rec.kind, Kind::Worktree));
             assert_eq!(rec.size, tree_size);
             assert_eq!(rec.files, 10);
+            // Sizes can be complete while modification timestamps are unknown.
+            assert_eq!(rec.latest_file_mtime_ms, None);
             assert_eq!(rec.project.as_deref(), Some("/Users/dev/github/feat"));
             assert_eq!(
                 rec.nested,
@@ -1582,7 +1632,7 @@ mod tests {
         ];
         let mut acc = DevArtifactAcc::with_git_reader(fake_git_file);
         for (path, size) in files {
-            acc.add(path, size, false, None);
+            acc.add(1, path, size, false, None);
         }
         resolve(&mut acc, &files);
         assert_eq!(acc.worktree_count(), 0);
@@ -1593,9 +1643,9 @@ mod tests {
     #[test]
     fn git_files_inside_another_tree_are_not_read() {
         let mut acc = DevArtifactAcc::with_git_reader(|_| panic!("read a .git inside a tree"));
-        acc.add("/Users/dev/app/node_modules/dep/.git", 100, false, None);
-        acc.add("/Users/dev/app/target/debug/build/x-0123456789abcdef/.git", 100, false, None);
-        acc.add("/Users/dev/app/.git/modules/lib/.git", 100, false, None);
+        acc.add(1, "/Users/dev/app/node_modules/dep/.git", 100, false, None);
+        acc.add(1, "/Users/dev/app/target/debug/build/x-0123456789abcdef/.git", 100, false, None);
+        acc.add(1, "/Users/dev/app/.git/modules/lib/.git", 100, false, None);
         assert_eq!(acc.git_file_reads(), 0);
     }
 
@@ -1611,7 +1661,7 @@ mod tests {
         ];
         let mut acc = DevArtifactAcc::with_git_reader(fake_git_file);
         for (path, size) in files.iter().rev() {
-            acc.add(path, *size, false, None);
+            acc.add(1, path, *size, false, None);
         }
         resolve(&mut acc, &files);
         assert_eq!(acc.worktree_count(), 1);
@@ -1634,7 +1684,7 @@ mod tests {
         }
         let mut acc = DevArtifactAcc::with_git_reader(windows_git_file);
         for (path, size) in files {
-            acc.add(path, size, false, None);
+            acc.add(1, path, size, false, None);
         }
         // No folder rollups: the per-file sums already cover the tree.
         acc.resolve_worktrees(&|_| None);
@@ -1655,8 +1705,8 @@ mod tests {
         std::fs::write(&git, "gitdir: /Users/dev/github/app/.git/worktrees/app\n").unwrap();
         let src = wt.join("main.c");
         let mut acc = DevArtifactAcc::new();
-        acc.add(&src.to_string_lossy(), 2_000, false, None);
-        acc.add(&git.to_string_lossy(), 100, false, None);
+        acc.add(1, &src.to_string_lossy(), 2_000, false, None);
+        acc.add(1, &git.to_string_lossy(), 100, false, None);
         acc.resolve_worktrees(&|_| None);
         let rec = &acc.artifacts[&*wt.to_string_lossy()];
         assert!(matches!(rec.kind, Kind::Worktree));
@@ -1692,12 +1742,12 @@ mod tests {
         let mut groups = CloneGroups::new();
         // The .git file arrives last, after every clone.
         for (path, size, attrs) in &files {
-            let root = acc.add(path, *size, false, Some(attrs));
+            let root = acc.add(1, path, *size, false, Some(attrs));
             groups.add(attrs, *size, root.unwrap_or(crate::clone_attrs::OUTSIDE_ROOTS));
         }
         for i in 0..3 {
             let store = format!("/Users/dev/Library/pnpm/store/v10/files/b{i}");
-            let root = acc.add(&store, SIZE, false, Some(&copy_of(2, 4))).unwrap();
+            let root = acc.add(1, &store, SIZE, false, Some(&copy_of(2, 4))).unwrap();
             groups.add(&copy_of(2, 4), SIZE, root);
         }
         let listed: Vec<(&str, u64)> = files.iter().map(|(p, s, _)| (p.as_str(), *s)).collect();
@@ -1728,7 +1778,7 @@ mod tests {
         ];
         let mut acc = DevArtifactAcc::with_git_reader(fake_git_file);
         for (path, size) in files {
-            acc.add(path, size, false, None);
+            acc.add(1, path, size, false, None);
         }
         resolve(&mut acc, &files);
         let dir = std::env::temp_dir().join(format!("dh-dev-wt-sidecar-{}", std::process::id()));
@@ -1771,7 +1821,7 @@ mod tests {
             }
             for (path, size) in &files {
                 let attrs = path.ends_with(".png").then_some(&loose);
-                acc.add(path, *size, false, attrs);
+                acc.add(1, path, *size, false, attrs);
             }
             let listed: Vec<(&str, u64)> = files.iter().map(|(p, s)| (p.as_str(), *s)).collect();
             let totals = tree_totals_of(&listed);
@@ -1823,15 +1873,15 @@ mod tests {
         let store = "/Users/dev/Library/pnpm/store/v10/files/aa/one";
         let project = "/Users/dev/app/node_modules/.pnpm/x@1/node_modules/x/one.js";
         for (path, attrs) in [(store, shared(1)), (project, shared(1))] {
-            let root = acc.add(path, 4096, false, Some(&attrs)).unwrap();
+            let root = acc.add(1, path, 4096, false, Some(&attrs)).unwrap();
             groups.add(&attrs, 4096, root);
         }
         // Ordinary (non-clone) file inside the project.
-        acc.add("/Users/dev/app/node_modules/y/index.js", 8192, false, Some(&CloneAttrs::default()));
+        acc.add(1, "/Users/dev/app/node_modules/y/index.js", 8192, false, Some(&CloneAttrs::default()));
         // Two clones of one file both inside the project: internal.
         for _ in 0..2 {
             let internal = shared(5);
-            let root = acc.add("/Users/dev/app/node_modules/z/a.js", 1000, false, Some(&internal)).unwrap();
+            let root = acc.add(1, "/Users/dev/app/node_modules/z/a.js", 1000, false, Some(&internal)).unwrap();
             groups.add(&internal, 1000, root);
         }
         // Unrelated file outside Dev roots.
@@ -1873,12 +1923,12 @@ mod tests {
             for copy in 0..5 {
                 let attrs = copy_of(7, 50, 0);
                 let path = format!("/Users/dev/p{project}/node_modules/pkg/{copy}.js");
-                let root = acc.add(&path, SIZE, false, Some(&attrs)).unwrap();
+                let root = acc.add(1, &path, SIZE, false, Some(&attrs)).unwrap();
                 groups.add(&attrs, SIZE, root);
             }
         }
         // A modified clone: no group, so its 900 KB still shared count whole.
-        acc.add("/Users/dev/p0/node_modules/pkg/edited.js", SIZE, false, Some(&copy_of(8, 1, 100_000)));
+        acc.add(1, "/Users/dev/p0/node_modules/pkg/edited.js", SIZE, false, Some(&copy_of(8, 1, 100_000)));
 
         let shares = groups.attribute(acc.root_id_count());
         let mut blocks = 0;
@@ -1911,7 +1961,7 @@ mod tests {
     #[test]
     fn writes_sidecar_json() {
         let mut acc = DevArtifactAcc::new();
-        acc.add(r"C:\proj\node_modules\x.js", 1000, false, None);
+        acc.add(1, r"C:\proj\node_modules\x.js", 1000, false, None);
         let dir = std::env::temp_dir().join(format!("dh-dev-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let out = dir.join("scan.dev-artifacts.json");
@@ -1919,6 +1969,8 @@ mod tests {
         let raw = std::fs::read_to_string(&out).unwrap();
         assert!(raw.contains("node-modules"));
         assert!(raw.contains("rootPath"));
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed["roots"][0]["latestFileMtimeMs"], 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1928,7 +1980,7 @@ mod tests {
         for i in 0..3_000 {
             let project = format!(r"C:\p{i}");
             acc.projects.insert(project.clone());
-            acc.add(&format!(r"{project}\node_modules\x.js"), 1_000 + i as u64, false, None);
+            acc.add(1, &format!(r"{project}\node_modules\x.js"), 1_000 + i as u64, false, None);
         }
         let dir = std::env::temp_dir().join(format!("dh-dev-cap-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

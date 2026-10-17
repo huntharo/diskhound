@@ -92,6 +92,9 @@ test("finds Terraform providers from the folder tree when the scan has no Dev si
   if (restored.rootPath === null) throw new Error("scan has no root path");
   expect(restored.rootPath).toBe(scanned.rootPath);
   await expectTerraformRow(second, restored.rootPath, false);
+  await second.page.getByLabel("Exclude recently modified folders").check();
+  await expect(second.page.locator(".dev-row")).toHaveCount(0);
+  await expect(second.page.getByRole("button", { name: "Delete all", exact: true })).toBeDisabled();
 });
 
 
@@ -198,4 +201,39 @@ test("keeps tool configuration out of native and folder-tree cache reports", asy
   const second = await launch({ dataDir: first.dataDir });
   await waitForScanComplete(second.page);
   await check(second, false);
+});
+
+test("modification protection filters cached roots and clears hidden selections", async ({ launch }, testInfo) => {
+  const root = testInfo.outputPath("dev");
+  const { utimesSync } = await import("node:fs");
+  for (const [project, ageHours] of [["recent", 1], ["yesterday", 30], ["old", 200]] as const) {
+    writeFile(root, [project, "node_modules", "nested", "file.js"], SMALL_BYTES);
+    const modified = new Date(Date.now() - ageHours * 3600000);
+    utimesSync(join(root, project, "node_modules", "nested", "file.js"), modified, modified);
+  }
+  const handle = await launch();
+  await scanFolderFromPicker(handle, root);
+  await openTab(handle.page, "Dev Artifacts");
+  const rows = handle.page.locator(".dev-row");
+  const protection = handle.page.getByLabel("Exclude recently modified folders");
+  const window = handle.page.getByLabel("Modification protection window");
+  await expect(protection).not.toBeChecked();
+  await expect(rows).toHaveCount(3);
+  await handle.page.getByRole("button", { name: "Select visible", exact: true }).click();
+  await protection.check();
+  await expect(window).toHaveValue("48");
+  await expect(rows).toHaveCount(1);
+  await expect(handle.page.getByRole("button", { name: "Delete selected", exact: true })).toHaveCount(0);
+  await window.selectOption("24");
+  await expect(rows).toHaveCount(2);
+  await window.selectOption("168");
+  await expect(rows).toHaveCount(1);
+  const confirmation = handle.page.waitForEvent("dialog").then(async (dialog) => {
+    expect(dialog.message()).toContain("1 tree");
+    await dialog.dismiss();
+  });
+  await handle.page.getByRole("button", { name: "Delete all", exact: true }).click();
+  await confirmation;
+  await protection.uncheck();
+  await expect(rows).toHaveCount(3);
 });
