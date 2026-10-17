@@ -1,3 +1,4 @@
+import type { DockerResult } from "./docker";
 // ── Scan Types ──────────────────────────────────────────────
 
 import {
@@ -1352,7 +1353,7 @@ export interface DuplicateScanOptions {
 
 // ── View Types ──────────────────────────────────────────────
 
-export type AppView = "overview" | "files" | "folders" | "dev" | "duplicates" | "easyMove" | "changes" | "memory" | "diskIo" | "settings";
+export type AppView = "overview" | "files" | "folders" | "dev" | "duplicates" | "easyMove" | "changes" | "memory" | "diskIo" | "docker" | "settings";
 
 /**
  * Payload for `focusMainWithView` — used by the System Widget's
@@ -1415,6 +1416,9 @@ export interface DevBranch {
 }
 
 export interface DiskhoundNativeApi {
+  getDockerInventory: () => Promise<DockerResult>;
+  cancelDockerInventory: () => Promise<void>;
+  removeDockerImage: (id: string) => Promise<{ ok: boolean; message: string }>;
   /** Static OS identifier, resolved once at preload time. Lets the
    *  renderer gate Windows-only UI (MFT elevation, CPU affinity rules,
    *  GPU counters) without relying on user-agent sniffing. */

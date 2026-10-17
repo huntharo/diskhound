@@ -1,0 +1,30 @@
+import { afterEach, expect, it, vi } from "vitest";
+import { execFile } from "node:child_process";
+import { runDocker } from "./inventory";
+vi.mock("node:child_process", () => ({ execFile: vi.fn() }));
+afterEach(() => { vi.unstubAllEnvs(); vi.clearAllMocks(); });
+it("bounds CLI output and runtime, passes cancellation and never invokes a shell", async () => {
+  vi.stubEnv("DOCKER_CONTEXT", "remote");
+  vi.stubEnv("DOCKER_HOST", "ssh://remote");
+  vi.stubEnv("DOCKER_TLS_VERIFY", "1");
+  const signal = new AbortController().signal;
+  const pending = runDocker(["--host", "unix:///socket", "system", "df"], signal, true);
+  const call = vi.mocked(execFile).mock.calls[0] as unknown as [string, string[], Record<string, unknown>, (error: unknown, stdout: string) => void];
+  expect(call[0]).toBe("docker");
+  expect(call[2]).toMatchObject({ signal, timeout: 20_000, killSignal: "SIGKILL", maxBuffer: 8 * 1024 * 1024, windowsHide: true });
+  expect(call[2].shell).toBeUndefined();
+  expect(call[2].env).not.toHaveProperty("DOCKER_CONTEXT");
+  expect(call[2].env).not.toHaveProperty("DOCKER_HOST");
+  expect(call[2].env).not.toHaveProperty("DOCKER_TLS_VERIFY");
+  call[3](null, "result");
+  await expect(pending).resolves.toBe("result");
+});
+it.each(["timeout", "cancel", "unavailable"])("reports %s without retrying", async kind => {
+  const controller = new AbortController();
+  const pending = runDocker(["context", "show"], controller.signal);
+  const call = vi.mocked(execFile).mock.calls[0] as unknown as [string, string[], unknown, (error: unknown, stdout: string) => void];
+  if (kind === "cancel") controller.abort();
+  call[3]({ killed: kind === "timeout", message: "failure" }, "");
+  await expect(pending).rejects.toThrow(kind === "timeout" ? "timed out" : kind === "cancel" ? "cancelled" : "unavailable");
+  expect(execFile).toHaveBeenCalledTimes(1);
+});

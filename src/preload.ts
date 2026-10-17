@@ -47,6 +47,9 @@ const AGENT_CONSENT_STATE_CHANNEL = "diskhound:agent-consent-state";
 
 const api: DiskhoundNativeApi = {
   platform,
+  getDockerInventory: () => ipcRenderer.invoke("diskhound:docker-inventory"),
+  cancelDockerInventory: () => ipcRenderer.invoke("diskhound:docker-cancel"),
+  removeDockerImage: (id) => ipcRenderer.invoke("diskhound:docker-remove-image", id),
   // The sandboxed agent approval window cannot require node:os.
   cpuCount: process.sandboxed
     ? navigator.hardwareConcurrency || 1
