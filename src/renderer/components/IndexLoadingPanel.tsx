@@ -65,10 +65,3 @@ export const DEV_FOLDER_TREE_STAGES: Stage[] = [
   { afterSec: 12, label: "Grouping worktrees, node_modules, and targets…" },
   { afterSec: 30, label: "Still reading the folder tree. First open on an older huge-drive scan can take a minute." },
 ];
-
-export const DEV_RESCAN_STAGES: Stage[] = [
-  { afterSec: 0, label: "Walking known artifact trees on this scan…" },
-  { afterSec: 3, label: "Refreshing node_modules, targets, and caches…" },
-  { afterSec: 12, label: "Large package trees can take several minutes." },
-  { afterSec: 30, label: "Still walking known trees. This is not a full drive scan." },
-];

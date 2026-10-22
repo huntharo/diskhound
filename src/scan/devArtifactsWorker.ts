@@ -4,12 +4,10 @@ import { sidecarFromFolderTreeFile } from "../shared/devArtifactFolderTree";
 import {
   readDevArtifactSidecar,
   reportFromSidecar,
-  rescanDevArtifactSidecar,
   writeDevArtifactSidecar,
 } from "../shared/devArtifactSidecar";
 import type {
   DevArtifactsClassifyInput,
-  DevArtifactsRescanInput,
   DevArtifactsWorkerRequest,
   DevArtifactsWorkerResponse,
 } from "../shared/devArtifactsWorkerProtocol";
@@ -26,37 +24,11 @@ async function classifyFromFolderTree(input: DevArtifactsClassifyInput) {
   return reportFromSidecar(sidecar, previous);
 }
 
-async function rescanKnownTrees(input: DevArtifactsRescanInput, requestId: string) {
-  const sidecar = await readDevArtifactSidecar(input.sidecarPath);
-  if (!sidecar) {
-    throw new Error(
-      "No Dev Artifacts sidecar to refresh. Run a full scan, or open Dev Artifacts after Folders has loaded.",
-    );
-  }
-  const next = await rescanDevArtifactSidecar(sidecar, (progress) => {
-    const response: DevArtifactsWorkerResponse = {
-      type: "progress",
-      requestId,
-      progress,
-    };
-    parentPort?.postMessage(response);
-  });
-  await writeDevArtifactSidecar(input.sidecarPath, next);
-  return reportFromSidecar(next, sidecar);
-}
-
 if (parentPort) {
   parentPort.on("message", (message: DevArtifactsWorkerRequest) => {
-    if (
-      !message
-      || (message.type !== "rescan" && message.type !== "classify")
-    ) return;
+    if (!message || message.type !== "classify") return;
 
-    const work = message.type === "classify"
-      ? classifyFromFolderTree(message.input)
-      : rescanKnownTrees(message.input, message.requestId);
-
-    void work
+    void classifyFromFolderTree(message.input)
       .then((report) => {
         const response: DevArtifactsWorkerResponse = {
           type: "result",

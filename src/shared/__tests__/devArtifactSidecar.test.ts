@@ -290,72 +290,6 @@ describe("reportFromSidecar", () => {
   });
 });
 
-describe("planRescanTargets", () => {
-  it("walks known roots only and does not expand project hints", async () => {
-    const { planRescanTargets, PROJECT_CHILD_HINTS } = await import("../devArtifactSidecar");
-    expect(PROJECT_CHILD_HINTS.length).toBeGreaterThan(5);
-    const projects = Array.from({ length: 200 }, (_, i) => `C:\\p${i}`);
-    const targets = planRescanTargets({
-      version: 1,
-      rootPath: "C:\\",
-      generatedAt: 1,
-      roots: [
-        { path: "C:\\a\\node_modules", kind: "node-modules", size: 1, files: 1 },
-        { path: "C:\\a\\node_modules", kind: "node-modules", size: 1, files: 1 },
-        { path: "C:\\b\\target", kind: "rust-target", size: 2, files: 2 },
-      ],
-      projects,
-    });
-    expect(targets).toEqual(["C:\\a\\node_modules"]);
-    expect(targets.length).toBeLessThan(projects.length);
-  });
-
-  it("adds a seeded DiagOutputDir that is not already a sidecar root", async () => {
-    const { planRescanTargets } = await import("../devArtifactSidecar");
-    const targets = planRescanTargets({
-      version: 1,
-      rootPath: "C:\\",
-      generatedAt: 1,
-      roots: [{ path: "C:\\a\\node_modules", kind: "node-modules", size: 1, files: 1 }],
-      projects: [],
-    }, ["C:\\Users\\thoma\\AppData\\Local\\Temp\\DiagOutputDir"]);
-    expect(targets).toEqual([
-      "C:\\a\\node_modules",
-      "C:\\Users\\thoma\\AppData\\Local\\Temp\\DiagOutputDir",
-    ]);
-  });
-
-  it("drops a nested RdClientAutoTrace seed under DiagOutputDir", async () => {
-    const { planRescanTargets } = await import("../devArtifactSidecar");
-    const targets = planRescanTargets({
-      version: 1,
-      rootPath: "C:\\",
-      generatedAt: 1,
-      roots: [{
-        path: "C:\\Users\\thoma\\AppData\\Local\\Temp\\DiagOutputDir",
-        kind: "diag-logs",
-        size: 1,
-        files: 1,
-      }],
-      projects: [],
-    }, [
-      "C:\\Users\\thoma\\AppData\\Local\\Temp\\DiagOutputDir",
-      "C:\\Users\\thoma\\AppData\\Local\\Temp\\DiagOutputDir\\RdClientAutoTrace",
-    ]);
-    expect(targets).toEqual(["C:\\Users\\thoma\\AppData\\Local\\Temp\\DiagOutputDir"]);
-  });
-});
-
-describe("discoverDiagLogRoots", () => {
-  it("finds DiagOutputDir under a fake Users profile", async () => {
-    const { discoverDiagLogRoots } = await import("../devArtifactSidecar");
-    const drive = Path.join(tempDir, "drive");
-    const diag = Path.join(drive, "Users", "thoma", "AppData", "Local", "Temp", "DiagOutputDir");
-    await FSP.mkdir(diag, { recursive: true });
-    const found = discoverDiagLogRoots(drive);
-    expect(found.some((p) => p.toLowerCase().endsWith("diagoutputdir"))).toBe(true);
-  });
-});
 
 describe("dropSidecarRoots", () => {
   it("removes the tree and records it so a reread cannot restore it", async () => {
@@ -391,35 +325,6 @@ describe("dropSidecarRoots", () => {
   });
 });
 
-describe("rescanDevArtifactSidecar", () => {
-  it("re-walks a known root and emits progress", async () => {
-    const { writeDevArtifactSidecar, readDevArtifactSidecar, rescanDevArtifactSidecar } = await import("../devArtifactSidecar");
-    const tree = Path.join(tempDir, "proj", "node_modules", "pkg");
-    await FSP.mkdir(tree, { recursive: true });
-    await FSP.writeFile(Path.join(tree, "index.js"), "x".repeat(100));
-    const sidecarPath = Path.join(tempDir, "scan.dev-artifacts.json");
-    await writeDevArtifactSidecar(sidecarPath, {
-      version: 1,
-      rootPath: tempDir,
-      generatedAt: 1,
-      roots: [{ path: Path.join(tempDir, "proj", "node_modules"), kind: "node-modules", size: 1, files: 1 }],
-      projects: [Path.join(tempDir, "proj")],
-      droppedPaths: ["C:\\gone\\node_modules"],
-    });
-    const sidecar = await readDevArtifactSidecar(sidecarPath);
-    const ticks: number[] = [];
-    const next = await rescanDevArtifactSidecar(sidecar!, (progress) => {
-      ticks.push(progress.treesWalked);
-      expect(progress.treesTotal).toBe(1);
-    });
-    expect(next.roots[0]?.files).toBe(1);
-    expect(next.roots[0]?.size).toBeGreaterThanOrEqual(100);
-    expect(next.droppedPaths).toEqual(["C:\\gone\\node_modules"]);
-    expect(ticks.length).toBeGreaterThan(0);
-    expect(ticks[0]).toBe(0);
-  });
-});
-
 describe("APFS clone info in the Dev sidecar", () => {
   const clone = {
     cloneSize: 400,
@@ -448,29 +353,6 @@ describe("APFS clone info in the Dev sidecar", () => {
     expect("clone" in sidecarFromReport(report).roots[1]!).toBe(false);
   });
 
-  it("rescans keep the last full scan's clone info, scaled to the new size", async () => {
-    const { carryCloneInfo } = await import("../devArtifactSidecar");
-    const previous = {
-      version: 1 as const,
-      rootPath: "/Users/me",
-      generatedAt: 1,
-      roots: [{ path: "/Users/me/app/node_modules", kind: "node-modules" as const, size: 500, files: 3, clone }],
-      projects: [],
-    };
-    const next = carryCloneInfo({
-      ...previous,
-      roots: [
-        { path: "/Users/me/app/node_modules", kind: "node-modules", size: 250, files: 2 },
-        { path: "/Users/me/other/node_modules", kind: "node-modules", size: 10, files: 1 },
-      ],
-    }, previous);
-    expect(next.roots[0]!.clone).toEqual({ ...clone, cloneSize: 200, cloneSharedSize: 200 });
-    // cloneSharedBlocks scales with the rest when the old sidecar had it.
-    const withBlocks = { ...previous, roots: [{ ...previous.roots[0]!, clone: { ...clone, cloneSharedBlocks: 40 } }] };
-    expect(carryCloneInfo({ ...previous, roots: [{ ...previous.roots[0]!, size: 250, clone: undefined }] }, withBlocks)
-      .roots[0]!.clone?.cloneSharedBlocks).toBe(20);
-    expect(next.roots[1]!.clone).toBeUndefined();
-  });
 });
 
 describe("mixed-language evidence", () => {
@@ -499,7 +381,7 @@ describe("mixed-language evidence", () => {
   });
 
   it("flags legacy tool homes for a full scan instead of preserving broad cleanup roots", async () => {
-    const { reportFromSidecar, planRescanTargets } = await import("../devArtifactSidecar");
+    const { reportFromSidecar } = await import("../devArtifactSidecar");
     const sidecar = {
       version: 1 as const, rootPath: "/mono", generatedAt: 1, projects: [],
       roots: [
@@ -515,11 +397,10 @@ describe("mixed-language evidence", () => {
       ],
     };
     expect(reportFromSidecar(sidecar)).toMatchObject({ totalBytes: 100, classificationNeedsFullScan: true });
-    expect(planRescanTargets(sidecar)).toEqual(["/mono/.gradle/caches"]);
   });
 
-  it("rejects legacy guesses in both reports and rescan plans", async () => {
-    const { reportFromSidecar, planRescanTargets, sidecarFromReport, compactDevArtifactSidecar, rescanDevArtifactSidecar, dropSidecarRoots } = await import("../devArtifactSidecar");
+  it("rejects legacy guesses and preserves the incomplete notice after deleting a visible row", async () => {
+    const { reportFromSidecar, sidecarFromReport, compactDevArtifactSidecar, dropSidecarRoots } = await import("../devArtifactSidecar");
     const sidecar = {
       version: 1 as const, rootPath: "/mono", generatedAt: 1, projects: ["/mono"],
       roots: [
@@ -532,15 +413,12 @@ describe("mixed-language evidence", () => {
     const report = reportFromSidecar(sidecar);
     expect(report.totalBytes).toBe(20);
     expect(report.classificationNeedsFullScan).toBe(true);
-    expect(planRescanTargets(sidecar)).toEqual(["/mono/web/.next"]);
-    // Neither deleting a visible row nor refreshing its size discovers
-    // the excluded output, so both must preserve the incomplete notice.
+    // Deleting a visible row cannot discover the excluded output, so it
+    // must preserve the incomplete notice until a full scan.
     const roundTrip = compactDevArtifactSidecar(sidecarFromReport(report));
     expect(reportFromSidecar(roundTrip).classificationNeedsFullScan).toBe(true);
     const deleted = dropSidecarRoots(roundTrip, ["/mono/web/.next"]);
     expect(reportFromSidecar(deleted)).toMatchObject({ artifacts: [], classificationNeedsFullScan: true });
-    const refreshed = await rescanDevArtifactSidecar({ ...sidecar, rootPath: tempDir });
-    expect(reportFromSidecar(refreshed).classificationNeedsFullScan).toBe(true);
   });
 });
 
@@ -571,8 +449,6 @@ describe("linked worktrees in the Dev sidecar", () => {
     // Nested trees are already in the worktree's size: nothing doubles.
     expect(report.totalBytes).toBe(900);
     expect(report.classificationNeedsFullScan).toBeUndefined();
-    const { planRescanTargets } = await import("../devArtifactSidecar");
-    expect(planRescanTargets(sidecar)).toContain("/Users/me/claude-worktrees/app/feat");
     const back = sidecarFromReport(report);
     expect(back.roots.find((r) => r.kind === "worktree")!.worktree).toEqual(worktree);
     expect(reportFromSidecar(back).artifacts.find((a) => a.kind === "worktree")!.projectPath)
@@ -588,21 +464,4 @@ describe("linked worktrees in the Dev sidecar", () => {
     expect(report.artifacts[0]!.projectPath).toBe("/Users/me/github/app");
   });
 
-  it("rescans keep the main checkout and scale nested sizes", async () => {
-    const { carryWorktreeInfo } = await import("../devArtifactSidecar");
-    const next = carryWorktreeInfo({
-      ...sidecar,
-      roots: [
-        { path: "/Users/me/claude-worktrees/app/feat", kind: "worktree", size: 300, files: 5 },
-        { path: "/Users/me/github/app/node_modules", kind: "node-modules", size: 300, files: 4 },
-      ],
-    }, sidecar);
-    expect(next.roots[0]!.worktree).toEqual({
-      project: "/Users/me/github/app",
-      nestedSize: { "node-modules": 200, "rust-target": 50 },
-    });
-    expect(next.roots[1]!.worktree).toBeUndefined();
-    // The previous sidecar is untouched.
-    expect(worktree.nestedSize["node-modules"]).toBe(400);
-  });
 });

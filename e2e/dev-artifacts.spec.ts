@@ -75,6 +75,26 @@ test("lists Terraform providers under their working directory", async ({ launch 
   await expectTerraformRow(handle, snapshot.rootPath, true);
 });
 
+test("the drive Rescan refreshes Dev Artifacts without a second scan action", async ({ launch }, testInfo) => {
+  const root = testInfo.outputPath("dev");
+  writeTree(root);
+  const handle = await launch();
+  const { page } = handle;
+  const first = await scanFolderFromPicker(handle, root);
+  await openTab(page, "Dev Artifacts");
+  await expect(page.locator(".dev-row")).toHaveCount(1);
+  await expect(page.locator(".dev-view").getByRole("button", { name: /rescan/i })).toHaveCount(0);
+
+  const before = await page.evaluate((path) => window.diskhound.getScanHistory(path), first.rootPath!);
+  await page.locator(".scan-controls").getByRole("button", { name: "Rescan", exact: true }).click();
+  await expect.poll(
+    () => page.evaluate((path) => window.diskhound.getScanHistory(path).then((history) => history[0]?.id), first.rootPath!),
+  ).not.toBe(before[0]?.id);
+  await waitForScanComplete(page);
+  await expect(page.locator(".dev-row")).toHaveCount(1);
+  await expect(page.locator(".dev-rescan-banner")).toHaveCount(0);
+});
+
 test("finds Terraform providers from the folder tree when the scan has no Dev sidecar", async ({ launch }, testInfo) => {
   const root = testInfo.outputPath("dev");
   writeTree(root);
