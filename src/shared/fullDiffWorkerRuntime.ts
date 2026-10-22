@@ -9,6 +9,7 @@ import { Worker } from "node:worker_threads";
 import { createGunzip, deflateRaw, inflateRawSync } from "node:zlib";
 
 import { resolveBundledWorkerScript } from "./bundledWorkerPath";
+import { trackWorker } from "./workerHeapRegistry";
 import type { FullDiffResult, FullFileChange } from "./contracts";
 import type {
   FullDiffSortJob,
@@ -787,6 +788,7 @@ async function runWorkerRequest(
       maxYoungGenerationSizeMb: 256,
     },
   });
+  trackWorker(worker, "full-diff");
   const { requestId } = request;
 
   return await new Promise<FullDiffWorkerSuccess>((resolve, reject) => {

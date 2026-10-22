@@ -370,6 +370,7 @@ export interface AppSettings {
   notifications: NotificationSettings;
   cleanup: CleanupSettings;
   storage: StorageSettings;
+  diagnostics: DiagnosticsSettings;
   recentScans: RecentScan[];
   /** Persistent CPU-affinity rules. Every process-monitor sample
    *  checks running processes against these rules and re-applies the
@@ -566,6 +567,103 @@ export interface StorageSettings {
    * existing users).
    */
   duplicateHashDepthPercent: number;
+}
+
+/**
+ * Opt-in main-process profiling for bug reports. Captures land under
+ * `<userData>/diagnostics/` and never leave the machine. Everything is
+ * off by default: a CPU profile is a ~1 MB write, and a full heap
+ * snapshot is about as big as the heap (a gigabyte or more at the
+ * gate) and freezes the main process while V8 writes it.
+ *
+ * `DISKHOUND_HOT_CPU_PROFILING*` and `DISKHOUND_HEAP_*` env vars
+ * override these for one launch (see src/diagnostics/diagnosticsConfig.ts).
+ */
+export interface DiagnosticsSettings {
+  /**
+   * Keep V8's sampling CPU profiler recording the main thread, and
+   * save a .cpuprofile when the main thread stays hot. The saved
+   * profile reaches back up to ~60 s before the trigger.
+   */
+  hotCpuProfiling: boolean;
+  /** Main-thread CPU, as % of one core, that counts as hot. */
+  hotCpuThresholdPercent: number;
+  /**
+   * Run V8's sampling heap profiler on the main process and, when the
+   * heap passes the gate, save its allocation profile as a .heapprofile
+   * (under a few MB). At most one gate capture a day.
+   */
+  heapDiagnostics: boolean;
+  /**
+   * Also write two full .heapsnapshot files at the gate, 20 s apart,
+   * to diff in DevTools. Captures pause the main process and can use
+   * substantial memory and disk space.
+   */
+  heapSnapshots: boolean;
+  /** Main-process used heap, in MB, that fires the gate. */
+  heapGateMb: number;
+}
+
+export const HEAP_GATE_MB_DEFAULT = 1200;
+export const HEAP_GATE_MB_MIN = 128;
+export const HEAP_GATE_MB_MAX = 3072;
+export const HOT_CPU_THRESHOLD_PERCENT_DEFAULT = 50;
+
+export type DiagnosticsSessionKind = "hot-cpu" | "heap";
+export type DiagnosticsArtifactKind = "cpuprofile" | "heapprofile" | "heapsnapshot";
+
+export interface DiagnosticsArtifactInfo {
+  filename: string;
+  path: string;
+  kind: DiagnosticsArtifactKind;
+  bytes: number;
+  /** One line for the handoff text, e.g. "74 s, 61 s before a 97% trigger". */
+  summary: string | null;
+}
+
+export interface DiagnosticsSessionInfo {
+  /** Directory name, e.g. `hot-cpu-2026-09-25-1412-a1b2c3`. */
+  name: string;
+  kind: DiagnosticsSessionKind;
+  path: string;
+  createdAt: number;
+  bytes: number;
+  artifacts: DiagnosticsArtifactInfo[];
+}
+
+export interface DiagnosticsStatus {
+  rootPath: string;
+  /** Env vars overriding Settings for this launch, as `NAME=value`. */
+  envOverrides: string[];
+  hotCpu: {
+    enabled: boolean;
+    state: "off" | "starting" | "recording" | "profiling" | "capped" | "failed";
+    thresholdPercent: number;
+    profilesWritten: number;
+    maxProfiles: number;
+    /** Main-thread CPU at the last sample, or null before the first. */
+    lastCpuPercent: number | null;
+  };
+  heap: {
+    enabled: boolean;
+    snapshots: boolean;
+    state: "off" | "watching" | "sampling" | "capturing" | "capped";
+    usedBytes: number;
+    limitBytes: number;
+    gateBytes: number;
+    watchBytes: number;
+    /** Last heap each live worker_thread reported (same 4 GB cage). */
+    workers: Array<{ label: string; usedBytes: number | null }>;
+    gatesToday: number;
+    maxGatesPerDay: number;
+    /** Latest gate or snapshot outcome, e.g. why a snapshot was skipped. */
+    lastEvent: string | null;
+  };
+  /** Newest first. */
+  sessions: DiagnosticsSessionInfo[];
+  totalBytes: number;
+  /** Plain text listing every capture's path, to paste into a bug report. */
+  handoffText: string;
 }
 
 /** Returned by `nativeApi.getStorageStats()` — surfaces disk usage
@@ -866,6 +964,8 @@ export interface ToastMessage {
   title: string;
   body?: string;
   dismissAfterMs?: number;
+  /** Adds a Copy details action without dismissing the toast. */
+  copyText?: string;
 }
 
 // ── Easy Move (symlink) Types ─────────────────────────────
@@ -1704,6 +1804,16 @@ export interface DiskhoundNativeApi {
     source?: string;
   }) => void;
 
+  // Diagnostics (Settings → Diagnostics)
+  getDiagnosticsStatus: () => Promise<DiagnosticsStatus>;
+  /** Open `<userData>/diagnostics`, or one session folder by its name. */
+  revealDiagnostics: (sessionName?: string) => Promise<PathActionResult>;
+  /** Write one main-process .heapsnapshot now, unless the heap cage
+   *  lacks the headroom a snapshot needs. */
+  captureHeapSnapshot: () => Promise<PathActionResult & { path?: string }>;
+  /** Delete every diagnostics session. */
+  clearDiagnostics: () => Promise<{ removed: number; bytesFreed: number }>;
+
   // Auto-update
   checkForUpdates: () => Promise<void>;
   quitAndInstall: () => void;
@@ -1874,6 +1984,14 @@ export function defaultSettings(): AppSettings {
       // huge drives can drop this from the Storage settings panel.
       duplicateHashDepthPercent: 100,
     },
+    diagnostics: {
+      hotCpuProfiling: false,
+      hotCpuThresholdPercent: HOT_CPU_THRESHOLD_PERCENT_DEFAULT,
+      heapDiagnostics: false,
+      heapSnapshots: false,
+      // ~30% of Electron's 4 GB cage, for the allocation profile.
+      heapGateMb: HEAP_GATE_MB_DEFAULT,
+    },
     recentScans: [],
     affinityRules: [],
     agents: {
@@ -1932,6 +2050,7 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
     notifications: { ...defaults.notifications, ...(input?.notifications ?? {}) },
     cleanup: { ...defaults.cleanup, ...(input?.cleanup ?? {}) },
     storage: { ...defaults.storage, ...(input?.storage ?? {}) },
+    diagnostics: { ...defaults.diagnostics, ...(input?.diagnostics ?? {}) },
     recentScans: Array.isArray(input?.recentScans) ? input!.recentScans : defaults.recentScans,
     agents: { ...defaults.agents, ...(input?.agents ?? {}) },
     affinityRules: Array.isArray(input?.affinityRules)
@@ -2047,6 +2166,23 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
         1,
         100,
         defaults.storage.duplicateHashDepthPercent,
+      ),
+    },
+    diagnostics: {
+      hotCpuProfiling: Boolean(merged.diagnostics.hotCpuProfiling),
+      hotCpuThresholdPercent: clampInteger(
+        merged.diagnostics.hotCpuThresholdPercent,
+        5,
+        100, // one thread can't use more than one core
+        defaults.diagnostics.hotCpuThresholdPercent,
+      ),
+      heapDiagnostics: Boolean(merged.diagnostics.heapDiagnostics),
+      heapSnapshots: Boolean(merged.diagnostics.heapSnapshots),
+      heapGateMb: clampInteger(
+        merged.diagnostics.heapGateMb,
+        HEAP_GATE_MB_MIN,
+        HEAP_GATE_MB_MAX,
+        defaults.diagnostics.heapGateMb,
       ),
     },
     recentScans: (Array.isArray(merged.recentScans) ? merged.recentScans : [])

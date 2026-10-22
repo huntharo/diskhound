@@ -8,6 +8,7 @@ import { resolveBundledWorkerScript } from "./bundledWorkerPath";
 import { INDEX_FILE_LINE_RE } from "./indexLineParse";
 import { unescapeJsonPath } from "./jsonPathUnescape";
 import { normPath } from "./pathUtils";
+import { trackWorker } from "./workerHeapRegistry";
 import type {
   FolderTreeSidecarQueryInput,
   FolderTreeSidecarQueryResult,
@@ -192,6 +193,7 @@ export async function runFolderTreeWorker(
       maxYoungGenerationSizeMb: 256,
     },
   });
+  trackWorker(worker, "folder-tree");
   const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
   return await new Promise<SerializedFolderTree>((resolve, reject) => {
@@ -288,6 +290,7 @@ export async function runFolderTreeQueryWorker(
   const worker = new Worker(options.workerPath, {
     resourceLimits: { maxOldGenerationSizeMb: FOLDER_TREE_QUERY_WORKER_HEAP_MB },
   });
+  trackWorker(worker, "folder-tree-query");
   const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
   return await new Promise<FolderTreeSidecarQueryResult>((resolve, reject) => {
