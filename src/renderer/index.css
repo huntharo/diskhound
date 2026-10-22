@@ -1984,6 +1984,7 @@ button, input, select, textarea { font: inherit; }
   color: var(--text);
 }
 .storage-card-value.muted { color: var(--text-muted); }
+.system-metadata-path { overflow-wrap: anywhere; }
 .storage-card-meta {
   margin-top: 2px;
   font-family: var(--font-mono);

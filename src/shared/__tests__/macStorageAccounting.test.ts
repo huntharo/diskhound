@@ -210,6 +210,18 @@ describe("buildStorageAccountingReport", () => {
     expect(report.container).toBeNull();
     expect(report.notes[0]).toMatch(/EXFAT/);
   });
+
+  it("keeps failed collection unavailable and the Time Machine fallback incomplete", () => {
+    const failed = buildStorageAccountingReport({ ...base, apfsSnapshots: null,
+      tmutilSnapshotNames: null, capacity: null });
+    expect(failed.snapshotStatus).toBe("unavailable");
+    expect(failed.purgeableBytes).toBeNull();
+    const fallback = buildStorageAccountingReport({ ...base, apfsSnapshots: null,
+      tmutilSnapshotNames: [] });
+    expect(fallback.snapshotStatus).toBe("incomplete");
+    expect(parseApfsSnapshotsPlist("<plist><dict><key>Error</key><string>Permission denied</string></dict></plist>"))
+      .toBeNull();
+  });
 });
 
 describe("collectStorageAccounting", () => {

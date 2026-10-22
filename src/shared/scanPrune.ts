@@ -30,6 +30,8 @@ export interface ScanPrunePlan {
   duplicateMounts: Set<string>;
   /** Data-volume names of directories reached through a firmlink below the root. */
   firmlinkTwins: Set<string>;
+  /** Owning macOS volume in the scan's path spelling; startup stores use Data. */
+  macMetadataVolume?: string;
 }
 
 export type PruneReason = "other-mount" | "duplicate-mount" | "firmlink-twin";
@@ -121,9 +123,18 @@ function firmlinkAliases(path: string, firmlinks: Firmlink[]): string[] {
 function owningMount(path: string, mounts: string[], firmlinks: Firmlink[]): string | null {
   const names = [path, ...firmlinkAliases(path, firmlinks)];
   let best: string | null = null;
+  let bestDistance = Infinity;
   for (const point of mounts) {
-    if (!names.some((name) => isAtOrUnder(point, name))) continue;
-    if (best === null || point.length > best.length) best = point;
+    for (const name of names) {
+      if (!isAtOrUnder(point, name)) continue;
+      // Alias prefixes have different lengths. Compare the unmatched
+      // suffix so a short /Users mount beats the longer Data alias.
+      const distance = name === point ? 0 : name.length - point.length - (point === "/" ? 0 : 1);
+      if (distance < bestDistance || (distance === bestDistance && point.length > (best?.length ?? 0))) {
+        best = point;
+        bestDistance = distance;
+      }
+    }
   }
   return best;
 }
@@ -144,6 +155,9 @@ export function macPrunePlan(root: string, mounts: string[], firmlinks: Firmlink
 
   const rootMount = owningMount(trimmed, mounts, firmlinks);
   if (rootMount === null) return plan;
+  plan.macMetadataVolume = isStartupVolume(rootMount) ? MAC_DATA_VOLUME
+    : [rootMount, ...firmlinkAliases(rootMount, firmlinks)]
+      .find((point) => isAtOrUnder(point, trimmed)) ?? rootMount;
   for (const point of mounts) {
     const sameDisk = point === rootMount || (isStartupVolume(point) && isStartupVolume(rootMount));
     if (sameDisk) continue;

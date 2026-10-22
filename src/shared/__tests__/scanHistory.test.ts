@@ -89,6 +89,16 @@ describe("scanHistory", () => {
     expect(loaded!.rootPath).toBe("C:\\test");
   });
 
+  it("preserves macOS metadata sizes and unavailable coverage in history", async () => {
+    const snap = makeSnapshot("/", 7777, Date.now());
+    snap.macSystemMetadata = [
+      { kind: "fsevents", path: "/System/Volumes/Data/.fseventsd", bytes: 4096, status: "incomplete", issue: "scan-errors" },
+      { kind: "spotlight", path: "/System/Volumes/Data/.Spotlight-V100", bytes: null, status: "unavailable", issue: "scan-errors" },
+    ];
+    const id = await saveScanToHistory(snap);
+    expect((await loadHistoricalSnapshot(id!))!.macSystemMetadata).toEqual(snap.macSystemMetadata);
+  });
+
   it("returns null for non-existent snapshot ID", async () => {
     const loaded = await loadHistoricalSnapshot("non-existent-id");
     expect(loaded).toBeNull();
