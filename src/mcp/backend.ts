@@ -16,6 +16,7 @@ import type {
   WindowViewState,
 } from "../shared/contracts";
 import type { AgentActivityEntry } from "../shared/agentAccess";
+import type { RemovalAction, RemovalRequest } from "../shared/agentRemovals";
 import type { RemovalMeasurement } from "./removalMeasure";
 
 /**
@@ -68,17 +69,15 @@ export interface DiskhoundAgentBackend {
    */
   measureRemoval?(paths: readonly string[], signal?: AbortSignal): Promise<RemovalMeasurement>;
   /**
-   * Show a native confirmation dialog in DiskHound and, only if the
-   * user accepts, move each path to the Trash / Recycle Bin through the
-   * same protected-folder checks the UI uses. Throws when none of the
-   * paths can be offered (missing, or refused for agents).
+   * Add items to DiskHound's review list and return at once. Nothing is
+   * removed until the user approves the list in DiskHound. Paths are
+   * resolved to their on-disk spelling and checked against the same
+   * protected folders the UI uses; each queued item says whether the
+   * Trash can take it. Throws when nothing could be added.
    */
-  confirmAndTrash(request: TrashRequest): Promise<TrashOutcome>;
-  /**
-   * Same checks and a sterner confirmation, then delete each path
-   * permanently (not to the Trash) with DiskHound's own delete.
-   */
-  confirmAndDelete(request: TrashRequest): Promise<TrashOutcome>;
+  queueRemoval(request: RemovalQueueRequest): Promise<RemovalQueueOutcome>;
+  /** This session's requests, oldest first, with what the user decided. */
+  removalRequests?(sessionId: string): RemovalRequest[];
 }
 
 export interface FolderChildren {
@@ -108,25 +107,22 @@ export interface NavigateRequest {
   section?: "ai-agents";
 }
 
-export interface TrashRequest {
+export interface RemovalQueueRequest {
   sessionId: string;
   sessionName: string;
   roleName: string;
+  asked: RemovalAction;
   paths: string[];
   reason?: string;
-  /**
-   * Throws if the session may no longer trash. Requests queue behind
-   * each other's dialogs, so the user may revoke the session (or change
-   * its role) before this one's dialog would appear.
-   */
-  recheck?: () => Promise<void>;
-  /** Aborted when the agent's request goes away or the MCP server stops. */
-  signal?: AbortSignal;
 }
 
-export interface TrashOutcome {
-  confirmed: boolean;
-  results: { path: string; ok: boolean; message: string; sizeBytes: number | null }[];
+export interface RemovalQueueOutcome {
+  /** The request as queued: its items, sizes and Trash checks. */
+  request: RemovalRequest;
+  /** Paths not added, and why. */
+  refused: { path: string; message: string }[];
+  /** Waiting items this session had asked for before, now moved into this request. */
+  replaced: number;
 }
 
 /** Sink for the Settings "Recent agent actions" feed + header pill. */

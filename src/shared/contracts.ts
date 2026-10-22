@@ -18,6 +18,12 @@ import type {
   AgentConsentState,
   AgentSecurityEvent,
 } from "./agentAccess";
+import type {
+  AgentRemovalList,
+  RemovalApprovalResult,
+  RemovalDecision,
+  RemovalMeasureResult,
+} from "./agentRemovals";
 
 export type ScanStatus = "idle" | "running" | "done" | "cancelled" | "error";
 export type ScanEngine = "js-worker" | "native-sidecar" | "usn-journal";
@@ -384,6 +390,14 @@ export interface AgentSettings {
    * app. Sessions and their roles live in mcp-policy.json, not here.
    */
   enabled: boolean;
+  /**
+   * Where the user confirms an agent's Trash and delete requests.
+   * "in-app": they wait in DiskHound's review list (the only one built).
+   * "in-agent" is kept for asking in the agent's chat, which needs MCP
+   * elicitation: stateful HTTP sessions, the stdio helper relaying the
+   * question, and a client that supports it (Claude Desktop doesn't).
+   */
+  confirmRemovals: "in-app" | "in-agent";
 }
 
 export interface AffinityRule {
@@ -802,6 +816,8 @@ export interface DevArtifactReport {
   rootPath: string;
   /** Trees removed this scan. Stops scan hotspots from putting them back. */
   droppedPaths?: string[];
+  /** Saved build roots lack the evidence required by current classification rules. */
+  classificationNeedsFullScan?: boolean;
 }
 
 export interface IndexSearchQuery {
@@ -1775,6 +1791,14 @@ export interface DiskhoundNativeApi {
   agentConsentDecide: (decision: AgentConsentDecision) => Promise<{ ok: boolean; message?: string }>;
   /** Approval window only: the waiting agent went quiet, or came back. */
   onAgentConsentState: (listener: (state: AgentConsentState) => void) => () => void;
+  /** Run what the user decided in the review sheet: ticked items with their action, unticked ones skipped. */
+  approveAgentRemovals: (decisions: RemovalDecision[]) => Promise<RemovalApprovalResult>;
+  /** What removing these waiting items together frees. Not on Windows. */
+  measureAgentRemovals: (itemIds: string[]) => Promise<RemovalMeasureResult>;
+  /** The review list changed: an agent asked, the user decided, or a re-check updated an item. */
+  onAgentRemovalsChanged: (listener: (list: AgentRemovalList) => void) => () => void;
+  /** The tray asked for the review sheet. */
+  onAgentReviewOpen: (listener: () => void) => () => void;
 }
 
 // ── Defaults ────────────────────────────────────────────────
@@ -1838,6 +1862,7 @@ export function defaultSettings(): AppSettings {
     affinityRules: [],
     agents: {
       enabled: false,
+      confirmRemovals: "in-app",
     },
   };
 }
@@ -2030,6 +2055,8 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
     affinityRules: merged.affinityRules,
     agents: {
       enabled: Boolean(merged.agents.enabled),
+      // Only the review list exists so far.
+      confirmRemovals: "in-app",
     },
   };
 }

@@ -2959,8 +2959,21 @@ button, input, select, textarea { font: inherit; }
   overflow: hidden;
 }
 
-.file-view.has-bulk-status {
+.file-category-note {
+  margin: 8px 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.file-view.has-bulk-status,
+.file-view.has-category-note {
   grid-template-rows: auto auto auto auto minmax(0, 1fr);
+}
+
+.file-view.has-bulk-status.has-category-note {
+  grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
+
 }
 
 .file-toolbar {
@@ -10271,6 +10284,160 @@ body.system-widget-body #app {
   color: var(--amber);
   font-weight: 600;
 }
+
+/* Header pill while agents' removal requests wait: amber, counting items. */
+.agent-pill.review {
+  border-color: rgba(245, 158, 11, 0.35);
+  background: var(--amber-glow);
+  color: var(--amber);
+}
+.agent-pill.review:hover,
+.agent-pill.review.open { background: rgba(245, 158, 11, 0.22); color: var(--amber); }
+.agent-pill-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+}
+@media (max-width: 1100px) {
+  .agent-pill.review { width: auto; padding: 0 8px; }
+}
+
+/* ── Review sheet: agents' removal requests ── */
+.rv-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(6px);
+  animation: fadeIn 0.12s ease-out;
+  -webkit-app-region: no-drag;
+}
+.rv-sheet {
+  display: flex;
+  flex-direction: column;
+  width: min(680px, 100%);
+  max-height: calc(100vh - 64px);
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  background: var(--black);
+  box-shadow: 0 22px 50px rgba(0, 0, 0, 0.6);
+  animation: scaleIn 0.15s ease-out;
+  outline: none;
+}
+:root.light .rv-sheet { border-color: var(--border); background: var(--bg-raised); box-shadow: 0 22px 50px rgba(0, 0, 0, 0.18); }
+.rv-head { padding: 18px 20px 12px; border-bottom: 1px solid var(--border); }
+.rv-eyebrow {
+  margin-bottom: 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.rv-title { margin: 0 0 4px; font-size: 16px; font-weight: 650; color: var(--text); }
+.rv-sub { margin: 0; font-size: 12px; line-height: 1.5; color: var(--text-secondary); }
+.rv-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 14px 14px;
+}
+.rv-empty { padding: 18px 6px; font-size: 12px; color: var(--text-tertiary); }
+.rv-group-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  padding: 0 2px 4px;
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+}
+.rv-group-name { font-size: 12.5px; font-weight: 650; color: var(--text); }
+.rv-reason { margin: 0 2px 7px; font-size: 11.5px; line-height: 1.45; color: var(--text-secondary); }
+.rv-list { overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-row); }
+.rv-row {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) 64px 132px;
+  gap: 10px;
+  align-items: start;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.rv-row:last-child { border-bottom: none; }
+.rv-row.off .rv-path,
+.rv-row.off .rv-size { color: var(--text-muted); }
+.rv-row.locked { background: rgba(148, 163, 184, 0.04); }
+.rv-check { width: 14px; height: 14px; margin: 1px 0 0; accent-color: var(--amber); cursor: pointer; }
+.rv-check:disabled { opacity: 0.3; cursor: default; }
+.rv-main { min-width: 0; }
+.rv-path { overflow: hidden; font: 11.5px/1.45 var(--font-mono); color: var(--text); white-space: nowrap; }
+.rv-meta { margin-top: 2px; font-size: 11px; line-height: 1.45; color: var(--text-tertiary); text-wrap: pretty; }
+.rv-meta.warn { color: var(--amber); }
+.rv-meta.gone { color: var(--text-muted); }
+.rv-size { padding-top: 1px; font: 11px/1.4 var(--font-mono); color: var(--text-secondary); text-align: right; white-space: nowrap; }
+.rv-action { display: flex; justify-content: flex-end; }
+.rv-seg { display: inline-flex; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.rv-segb {
+  padding: 2px 8px;
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 15px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.rv-segb + .rv-segb { border-left: 1px solid var(--border); }
+.rv-segb.on { background: var(--amber-glow); color: var(--amber); }
+.rv-segb.on.del { background: var(--red-glow); color: var(--red); }
+.rv-segb:disabled { cursor: default; }
+.rv-one {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 10.5px;
+  line-height: 15px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.rv-one.del { color: var(--red); }
+.rv-one.no { border-style: dashed; color: var(--text-muted); }
+.rv-result { padding-top: 1px; font-size: 10.5px; line-height: 15px; text-align: right; }
+.rv-result.ok { color: var(--green); }
+.rv-result.skip { color: var(--text-muted); }
+.rv-result.bad { color: var(--red); }
+.rv-result.busy { color: var(--amber); }
+.rv-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 20px 16px;
+  border-top: 1px solid var(--border);
+}
+.rv-sum { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; font-size: 11.5px; color: var(--text-secondary); }
+.rv-sum b { font-weight: 650; color: var(--text); }
+.rv-measure { padding: 0; }
+.rv-measure:disabled { opacity: 0.5; cursor: default; }
+.rv-note { font-size: 11px; line-height: 1.5; color: var(--text-tertiary); text-wrap: pretty; }
+.rv-note.warn { color: var(--amber); }
+.rv-done { font-size: 12px; line-height: 1.5; color: var(--green); }
+.rv-done.warn { color: var(--amber); }
+.rv-acts { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.scan-btn-primary.rv-danger {
+  border-color: rgba(239, 68, 68, 0.3);
+  background: var(--red-glow);
+  color: var(--red);
+}
+.scan-btn-primary.rv-danger:hover { background: rgba(239, 68, 68, 0.2); color: var(--red); }
 
 /* ── Settings: waiting approvals, sessions ── */
 .agent-pending-row {

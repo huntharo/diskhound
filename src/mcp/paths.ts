@@ -19,13 +19,15 @@ export function isInside(root: string, candidate: string): boolean {
 /**
  * The absolute path an agent meant. `~` expands to the home folder, and
  * a bare drive letter ("C:", which diskhound_status reports on Windows)
- * becomes that drive's root. Anything else relative is refused: it
- * would resolve against DiskHound's working directory (on Windows,
- * `Path.resolve("C:")` is that directory, not the drive).
+ * becomes that drive's root. Leading and trailing spaces stay: on macOS
+ * and Linux they are part of the filename, and trimming would confirm a
+ * different file. Anything else relative is refused: it would resolve
+ * against DiskHound's working directory (on Windows, `Path.resolve("C:")`
+ * is that directory, not the drive).
  */
 export function agentPath(input: string, platform: NodeJS.Platform = process.platform, home = OS.homedir()): string {
   const api = platform === "win32" ? Path.win32 : Path.posix;
-  let value = input.trim();
+  let value = input;
   if (value === "~" || value.startsWith("~/") || (platform === "win32" && value.startsWith("~\\"))) {
     value = api.join(home, value.slice(1));
   }

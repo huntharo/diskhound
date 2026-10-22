@@ -14,6 +14,7 @@ import {
   type McpAgentSession,
 } from "../../shared/agentAccess";
 import {
+  openRemovalReview,
   setAgentAccess,
   useAgentAccess,
   useAgentSettingsFocus,
@@ -26,6 +27,7 @@ import {
   isGuideClient,
   lastActionBySession,
   pendingText,
+  reviewSummary,
   sessionClientName,
   viaLabel,
 } from "../lib/agentDisplay";
@@ -91,6 +93,7 @@ export function AgentsSection() {
   if (!snapshot) return null;
 
   const { status } = snapshot;
+  const review = reviewSummary(snapshot.removals);
   const active = activeSessions(snapshot);
   const revoked = snapshot.sessions.filter((session) => session.revokedAt !== null);
   const last = lastActionBySession(snapshot.activity);
@@ -164,6 +167,21 @@ export function AgentsSection() {
         </div>
       </div>
 
+      <div className="setting-row">
+        <div>
+          <div className="setting-label">Confirm agents' removals</div>
+          <div className="setting-desc">
+            An agent's Trash and delete requests wait in a review list until you approve them in DiskHound. Nothing
+            comes to the front while you're away. Confirming in the agent's chat instead needs MCP elicitation,
+            which Claude Desktop doesn't support yet.
+          </div>
+        </div>
+        <select className="setting-input" aria-label="Confirm agents' removals" value="in-app" onChange={() => undefined}>
+          <option value="in-app">In DiskHound</option>
+          <option value="in-agent" disabled>In the agent's chat (not yet)</option>
+        </select>
+      </div>
+
       {snapshot.pending.length > 0 && (
         <>
           <div className="agent-subtitle">Waiting for approval</div>
@@ -192,6 +210,25 @@ export function AgentsSection() {
               </button>
             </div>
           ))}
+        </>
+      )}
+
+      {review.items > 0 && (
+        <>
+          <div className="agent-subtitle">Waiting for your review</div>
+          <div className="agent-pending-row agent-review-row">
+            <span className="agent-pill-dot waiting" />
+            <div className="protected-folder-info">
+              <div className="agent-session-name">
+                {review.items} item{review.items === 1 ? "" : "s"} agents asked to remove
+              </div>
+              <div className="agent-session-meta">{review.from}</div>
+            </div>
+            <button className="action-btn agent-review-btn" onClick={() => openRemovalReview()}>
+              Review…
+            </button>
+            <span />
+          </div>
         </>
       )}
 
@@ -344,7 +381,7 @@ function announceRoleChange(session: McpAgentSession, before: Set<string>, snaps
   }
   const destructive = added.filter((permission) => MCP_AGENT_CAPABILITY_DETAILS[permission].danger === "destructive");
   const detail = destructive.length > 0
-    ? `It can now ask to ${destructive.map((p) => MCP_AGENT_CAPABILITY_DETAILS[p].verb).join(" and ")}. You confirm every request. ${reload}`
+    ? `It can now ask to ${destructive.map((p) => MCP_AGENT_CAPABILITY_DETAILS[p].verb).join(" and ")}. Requests wait in DiskHound until you review them. ${reload}`
     : reload;
   toast("info", `${session.name} is now ${role.name}`, detail);
 }

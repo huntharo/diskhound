@@ -242,6 +242,8 @@ type ActiveScanSession = (WorkerScanSession | NativeScannerSession) & {
 let mainWindow: BrowserWindow | null = null;
 let widgetWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
+/** Agents' removal requests waiting for review; the tray menu shows them. */
+let agentReviewCount = 0;
 /**
  * Per-root scan sessions. Keyed by normPath(rootPath) so a "C:\" key and a
  * "C:\\" key collide. Allows concurrent scans on different drives; a new
@@ -4262,51 +4264,59 @@ void (async () => {
 
   // ── System Tray ───────────────────────────────────────────
 
+  const trayMenu = () => Menu.buildFromTemplate([
+    {
+      label: "Show DiskHound",
+      click: () => {
+        focusOrShowMainWindow();
+      },
+    },
+    { type: "separator" },
+    {
+      label: "Quick Scan",
+      click: () => {
+        const settings = settingsStore?.get();
+        if (settings?.scanning.defaultRootPath) {
+          void startScan(settings.scanning.defaultRootPath, defaultScanOptions());
+        }
+        focusOrShowMainWindow();
+      },
+    },
+    {
+      label: "Open System Widget",
+      click: () => {
+        void createSystemWidgetWindow();
+      },
+    },
+    ...(agentReviewCount > 0
+      ? [{
+          label: `Review agent requests (${agentReviewCount})…`,
+          click: () => {
+            void agentHost?.showRemovalReview();
+          },
+        }]
+      : []),
+    {
+      label: "AI Agents…",
+      click: () => {
+        void agentHost?.showSettings();
+      },
+    },
+    { type: "separator" },
+    {
+      label: "Quit",
+      accelerator: "CommandOrControl+Q",
+      click: () => {
+        quitDiskHound();
+      },
+    },
+  ]);
+
   const createTray = () => {
     const icon = createTrayIconImage();
     tray = new Tray(icon);
     tray.setToolTip("DiskHound");
-
-    const contextMenu = Menu.buildFromTemplate([
-      {
-        label: "Show DiskHound",
-        click: () => {
-          focusOrShowMainWindow();
-        },
-      },
-      { type: "separator" },
-      {
-        label: "Quick Scan",
-        click: () => {
-          const settings = settingsStore?.get();
-          if (settings?.scanning.defaultRootPath) {
-            void startScan(settings.scanning.defaultRootPath, defaultScanOptions());
-          }
-          focusOrShowMainWindow();
-        },
-      },
-      {
-        label: "Open System Widget",
-        click: () => {
-          void createSystemWidgetWindow();
-        },
-      },
-      {
-        label: "AI Agents…",
-        click: () => {
-          void agentHost?.showSettings();
-        },
-      },
-      { type: "separator" },
-      {
-        label: "Quit",
-        accelerator: "CommandOrControl+Q",
-        click: () => {
-          quitDiskHound();
-        },
-      },
-    ]);
-
+    const contextMenu = trayMenu();
     tray.setContextMenu(contextMenu);
     tray.on("double-click", () => {
       focusOrShowMainWindow();
@@ -4667,6 +4677,11 @@ void (async () => {
       startDuplicateScan: (rootPath, minSizeBytes) => startDuplicateScanImpl(rootPath, { minSizeBytes }),
       trashPath: (targetPath) => trashPathImpl(targetPath),
       permanentDeletePath: (targetPath) => permanentDeletePathImpl(targetPath),
+      removalsWaiting: (count) => {
+        // The tray menu offers the review list while agents' requests wait.
+        agentReviewCount = count;
+        tray?.setContextMenu(trayMenu());
+      },
     });
     pathsRemoved = () => agentHost?.pathsRemoved();
   } catch (err) {
@@ -4909,7 +4924,17 @@ void (async () => {
     }
   });
 
-  app.on("before-quit", () => {
+  let deferQuitForRemovals = false;
+  app.on("before-quit", (event) => {
+    // An approval holds the review list until every ticked item is decided.
+    // Quitting in the middle would keep the partial snapshot and drop the
+    // rest, including items already removed. Wait, then quit for real.
+    if (!deferQuitForRemovals && agentHost?.removalsBusy()) {
+      event.preventDefault();
+      deferQuitForRemovals = true;
+      void agentHost.whenRemovalsIdle().finally(() => app.quit());
+      return;
+    }
     isQuitting = true;
     clearInterval(affinityInterval);
     updateScheduler?.stop();
@@ -4954,6 +4979,9 @@ void (async () => {
     // snapshot and its cursor wait for quit.
     scanStore.flush();
     flushUsnCursorStore();
+    // An agent's request queued in the last half second: write it
+    // before quit can cut an async write off, so it survives a restart.
+    agentHost?.flushRemovals();
     void agentHost?.dispose();
   });
 })().catch((err: unknown) => {

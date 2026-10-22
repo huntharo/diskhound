@@ -797,6 +797,16 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
     </button>
   ) : null;
 
+  const classificationNotice = report?.classificationNeedsFullScan ? (
+    <div className="dev-sharing-note" role="status">
+      <strong>Build artifact totals are incomplete.</strong>{" "}
+      Older rules included ambiguous folders or whole tool directories. Those entries are now excluded.
+      Missing categories do not mean their output or caches are absent.
+      Run a full scan to classify them again.
+      {scanButton}
+    </div>
+  ) : null;
+
   if (!root) {
     return (
       <div className="dev-view">
@@ -871,8 +881,8 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
       <div className="dev-view">
         <div className="empty-view">
           <span className="scan-root-chip">{rootLabel}</span>
-          <span>No developer artifacts left on this scan.</span>
-          <span className="empty-view-sub">Looks for worktrees, Git repos, package trees, Rust targets, venvs, compiler caches, and DiagOutputDir RDP traces on this scan. Switch drives in the header to see another root.</span>
+          <span>{report?.classificationNeedsFullScan ? "This saved scan needs a full rescan." : "No developer artifacts left on this scan."}</span>
+          {classificationNotice ?? <span className="empty-view-sub">Looks for worktrees, Git repos, package trees, Rust targets, JVM output, venvs, compiler caches, and DiagOutputDir RDP traces on this scan. Switch drives in the header to see another root.</span>}
           {!report && <button className="action-btn" onClick={() => void load()}>Retry</button>}
         </div>
       </div>
@@ -926,6 +936,7 @@ export function DevView({ snapshot, onStartScan, otherScannedRoots = [] }: Props
         </div>
       </div>
 
+      {classificationNotice}
       {(showSharedNote || devSnapshots.length > 0) && (
         <div className="dev-sharing-note" role="note">
           {showSharedNote && (

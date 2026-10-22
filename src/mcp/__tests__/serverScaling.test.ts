@@ -4,7 +4,8 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { FixedMcpAuthorizer } from "../accessPolicy";
 import { createDiskhoundMcpServer } from "../server";
 import { loadSkillCatalog } from "../skills";
-import { createFakeBackend, NOW, ROOT, SKILLS_DIR, roleAuthorization } from "./fakeBackend";
+import type { RemovalRequest } from "../../shared/agentRemovals";
+import { createFakeBackend, NOW, ROOT, SKILLS_DIR, TRASH_OK, roleAuthorization } from "./fakeBackend";
 
 const skills = loadSkillCatalog(SKILLS_DIR);
 
@@ -85,6 +86,16 @@ async function measure(name: typeof cases[number], factor: number) {
       files: Array.from({ length: 16 }, (_, j) => ({ path: `${ROOT}/${i}/${j}`, name: `${j}`, parentPath: `${ROOT}/${i}`,
         modifiedAt: NOW, reclaimableBytes: j, sharing: "clone" as const })) })),
   } }));
+  // diskhound_status reports this session's removal requests: half decided, half waiting.
+  backend.removalRequests.mockReturnValue(c.wrap(Array.from({ length: n }, (_, i): RemovalRequest => ({
+    id: `rq_${i}`, sessionId: "s", sessionName: "Agent", roleName: "Cleanup Operator", asked: "trash", reason: null,
+    requestedAt: NOW - ((i * 31337) % n) * 60_000, decidedAt: i % 2 ? NOW - i * 1000 : null,
+    items: Array.from({ length: 4 }, (_, j) => ({
+      id: `it_${i}_${j}`, path: `${ROOT}/r${i}/${j}`, asked: "trash" as const, sizeBytes: 1000, check: TRASH_OK,
+      status: i % 2 ? "moved" as const : "waiting" as const,
+      ...(i % 2 ? { outcome: { action: "trash" as const, message: "Moved to the Trash.", at: NOW - ((i * 31337) % n) * 1000 } } : {}),
+    })),
+  }))));
   const server = createDiskhoundMcpServer({ backend, skills, activity: { record: () => undefined }, authorizer: new FixedMcpAuthorizer(roleAuthorization("builtin.reader")), now: () => NOW });
   const client = new Client({ name: "scaling-test", version: "1" });
   const [ct, st] = InMemoryTransport.createLinkedPair();

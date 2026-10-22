@@ -19,8 +19,8 @@ import { MCP_AGENT_CAPABILITIES, type McpAgentCapability } from "../../shared/ag
 import { McpPolicyStore } from "../accessPolicy";
 import { AgentAccessServer, allowedOrigin, isLoopbackAddress, withDefaultArguments } from "../agentAccessServer";
 import { AgentAccessService } from "../agentAccessService";
-import type { TrashRequest } from "../backend";
 import { ConsentBroker, type ConsentSender, type ConsentWindow } from "../consentBroker";
+import { listenerProof } from "../listenerProof";
 import { loadSkillCatalog } from "../skills";
 import { createFakeBackend, RecordingActivity, RecordingSecurity, SKILLS_DIR, type FakeBackend } from "./fakeBackend";
 
@@ -91,6 +91,7 @@ beforeEach(async () => {
     skills: SKILLS,
     policy,
     clientsFile: Path.join(tempDir, "mcp-oauth-clients.json"),
+    listenerKeyFile: Path.join(tempDir, "mcp-listener-key"),
     requestConsent: broker.request,
     onChanged,
     port: 0,
@@ -286,14 +287,19 @@ describe("AgentAccessServer basics", () => {
     await server.stop();
   });
 
-  it("restarts on the same port and keeps registered clients across instances", async () => {
+  it("drops an unapproved registration when the listener stops", async () => {
     const { client_id: clientId } = await register();
     const port = server.port;
     await server.stop();
     await server.start();
     expect(server.port).toBe(port);
+    const forgotten = await fetch(authorizeUrl(clientId, pkce().challenge), { redirect: "manual" });
+    expect(forgotten.status).toBe(400);
+    expect(FS.existsSync(Path.join(tempDir, "mcp-oauth-clients.json"))).toBe(false);
+  });
 
-    // A fresh instance (an app relaunch) reads the persisted client store.
+  it("reloads an approved client after a relaunch", async () => {
+    const { clientId } = await login();
     await server.stop();
     server = new AgentAccessServer({
       backend,
@@ -301,6 +307,7 @@ describe("AgentAccessServer basics", () => {
       skills: SKILLS,
       policy,
       clientsFile: Path.join(tempDir, "mcp-oauth-clients.json"),
+      listenerKeyFile: Path.join(tempDir, "mcp-listener-key"),
       requestConsent: broker.request,
       onChanged,
       port: 0,
@@ -322,6 +329,7 @@ describe("AgentAccessService", () => {
         skills: SKILLS,
         policy,
         clientsFile: Path.join(tempDir, "mcp-oauth-clients.json"),
+        listenerKeyFile: Path.join(tempDir, "mcp-listener-key"),
         requestConsent: broker.request,
         onChanged,
         port,
@@ -467,6 +475,20 @@ describe("OAuth metadata", () => {
     });
   });
 
+  it("proves it holds the listener key without returning the key", async () => {
+    const nonce = "a".repeat(43);
+    const missing = await fetch(`${base}/diskhound/listener-proof`);
+    expect(missing.status).toBe(400);
+    const response = await fetch(`${base}/diskhound/listener-proof?nonce=${nonce}`);
+    expect(response.status).toBe(200);
+    const key = FS.readFileSync(Path.join(tempDir, "mcp-listener-key"));
+    expect(key).toHaveLength(32);
+    expect(await response.json()).toEqual({ proof: listenerProof(key, nonce) });
+    if (process.platform !== "win32") {
+      expect(FS.statSync(Path.join(tempDir, "mcp-listener-key")).mode & 0o777).toBe(0o600);
+    }
+  });
+
   it("serves authorization server metadata for a public-client, PKCE-only server", async () => {
     const response = await fetch(`${base}/.well-known/oauth-authorization-server`);
     expect(response.status).toBe(200);
@@ -486,7 +508,7 @@ describe("OAuth metadata", () => {
 });
 
 describe("OAuth flow", () => {
-  it("registers public clients only and persists them 0600", async () => {
+  it("registers public clients only and keeps an unapproved registration off disk", async () => {
     const response = await fetch(`${base}/register`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -498,12 +520,16 @@ describe("OAuth flow", () => {
     expect(client.client_secret).toBeUndefined();
     expect(client.token_endpoint_auth_method).toBe("none");
     expect(client.grant_types).toEqual(["authorization_code"]);
+    expect(FS.existsSync(Path.join(tempDir, "mcp-oauth-clients.json"))).toBe(false);
+  });
 
-    const file = Path.join(tempDir, "mcp-oauth-clients.json");
-    const saved = JSON.parse(FS.readFileSync(file, "utf8")) as { client_id: string }[];
-    expect(saved.map((entry) => entry.client_id)).toEqual([client.client_id]);
-    expect(FS.readFileSync(file, "utf8")).not.toContain("client_secret\"");
-    if (process.platform !== "win32") expect(FS.statSync(file).mode & 0o777).toBe(0o600);
+  it("rejects a redirect URI that is not loopback http", async () => {
+    const response = await fetch(`${base}/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ client_name: "Elsewhere", redirect_uris: ["https://example.com/callback"] }),
+    });
+    expect(response.status).toBe(400);
   });
 
   it("walks DCR → authorize → native approval → token → MCP tools", async () => {
@@ -557,6 +583,12 @@ describe("OAuth flow", () => {
     expect(tokens.refresh_token).toBeUndefined();
     expect(onChanged).toHaveBeenCalled();
 
+    const file = Path.join(tempDir, "mcp-oauth-clients.json");
+    const saved = JSON.parse(FS.readFileSync(file, "utf8")) as { client_id: string }[];
+    expect(saved.map((entry) => entry.client_id)).toEqual([clientId]);
+    expect(FS.readFileSync(file, "utf8")).not.toContain("client_secret");
+    if (process.platform !== "win32") expect(FS.statSync(file).mode & 0o777).toBe(0o600);
+
     // Codes are single-use.
     const replay = await exchange(tokenParams);
     expect(replay.status).toBe(400);
@@ -586,7 +618,7 @@ describe("OAuth flow", () => {
     expect(trash.isError).toBe(true);
     expect(text(trash)).toContain("files.trash");
     expect(text(trash)).toContain("Settings");
-    expect(backend.confirmAndTrash).not.toHaveBeenCalled();
+    expect(backend.queueRemoval).not.toHaveBeenCalled();
 
     expect(activity.entries).toEqual([
       expect.objectContaining({ sessionName: "My Claude", tool: "diskhound_status", ok: true }),
@@ -598,45 +630,31 @@ describe("OAuth flow", () => {
     expect((skills.contents[0] as { text: string }).text).toContain("name: diskhound-free-up-space");
   });
 
-  it("lets the operator role trash (after the user confirms) and applies role changes on the next call", async () => {
+  it("lets the operator role add Trash requests to the review list and applies role changes on the next call", async () => {
     const { token } = await login("builtin.operator");
     const client = await mcpClient(token);
     const trash = (await client.callTool({ name: "diskhound_move_to_trash", arguments: { paths: ["/tmp/a"] } })) as CallToolResult;
     expect(trash.isError).not.toBe(true);
-    expect(backend.confirmAndTrash).toHaveBeenCalledWith(expect.objectContaining({ sessionName: "My Agent", paths: ["/tmp/a"] }));
+    expect(backend.queueRemoval).toHaveBeenCalledWith(expect.objectContaining({ sessionName: "My Agent", asked: "trash", paths: ["/tmp/a"] }));
 
     const [session] = policy.sessions();
     policy.assignRole(session!.id, "builtin.reader");
     const again = (await client.callTool({ name: "diskhound_move_to_trash", arguments: { paths: ["/tmp/a"] } })) as CallToolResult;
     expect(again.isError).toBe(true);
-    expect(backend.confirmAndTrash).toHaveBeenCalledTimes(1);
+    expect(backend.queueRemoval).toHaveBeenCalledTimes(1);
   });
 
-  it("lets a queued trash request see a revoke, and aborts it when the server stops", async () => {
+  it("returns as soon as the request is queued, and the request outlives the agent's connection", async () => {
     const { token } = await login("builtin.operator");
     const client = await mcpClient(token);
-    let request: TrashRequest | undefined;
-    let dialogUp!: () => void;
-    const up = new Promise<void>((resolve) => (dialogUp = resolve));
-    backend.confirmAndTrash.mockImplementationOnce((req) => {
-      request = req;
-      dialogUp();
-      // A dialog that stays up until the request is aborted.
-      return new Promise((_, reject) => req.signal?.addEventListener("abort", () => reject(new Error("aborted"))));
-    });
-    const pending = client
-      .callTool({ name: "diskhound_move_to_trash", arguments: { paths: ["/tmp/a"] } })
-      .catch((error: unknown) => error);
-    await up;
-
-    await expect(request!.recheck!()).resolves.toBeUndefined();
-    policy.revokeSession(policy.sessions()[0]!.id);
-    await expect(request!.recheck!()).rejects.toMatchObject({ code: "revoked_session" });
-
-    expect(request!.signal!.aborted).toBe(false);
+    const trash = (await client.callTool({ name: "diskhound_move_to_trash", arguments: { paths: ["/tmp/a"], reason: "Old build" } })) as CallToolResult;
+    expect(trash.structuredContent).toMatchObject({ queued: true, waitingForUser: true });
+    // Nothing ties the request to this HTTP call: no abort signal, no re-check hook.
+    const [request] = backend.queueRemoval.mock.calls[0]!;
+    expect(Object.keys(request).sort()).toEqual(["asked", "paths", "reason", "roleName", "sessionId", "sessionName"]);
+    await client.close();
     await server.stop();
-    expect(request!.signal!.aborted).toBe(true);
-    await pending;
+    expect(backend.removalRequests(request.sessionId)).toMatchObject([{ reason: "Old build", items: [{ path: "/tmp/a", status: "waiting" }] }]);
   });
 
   it("lets the guide role upgrade to operator in Settings when the agent asked for every scope", async () => {
@@ -663,7 +681,7 @@ describe("OAuth flow", () => {
     expect(refused.isError).toBe(true);
     expect(text(refused)).toContain("diskhound_delete_permanently isn't available to this DiskHound session (Cleanup Guide doesn't grant files.delete)");
     expect(text(refused)).toContain("DiskHound logged the attempt");
-    expect(backend.confirmAndDelete).not.toHaveBeenCalled();
+    expect(backend.queueRemoval).not.toHaveBeenCalled();
     expect(security.events).toEqual([
       {
         sessionId: policy.sessions()[0]!.id,
@@ -692,18 +710,18 @@ describe("OAuth flow", () => {
         { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "diskhound_status", arguments: {} } },
       ]),
     });
-    expect(backend.confirmAndTrash).not.toHaveBeenCalled();
+    expect(backend.queueRemoval).not.toHaveBeenCalled();
     expect(security.events).toMatchObject([{ kind: "tool_not_allowed", tool: "diskhound_move_to_trash" }]);
   });
 
-  it("gives Cleanup Admin both removal tools, each behind the user's confirmation", async () => {
+  it("gives Cleanup Admin both removal tools, each behind the user's review", async () => {
     const { token } = await login("builtin.admin");
     const client = await mcpClient(token);
     const { tools } = await client.listTools();
     expect(tools.map((tool) => tool.name)).toEqual(expect.arrayContaining(["diskhound_move_to_trash", "diskhound_delete_permanently"]));
     const deleted = (await client.callTool({ name: "diskhound_delete_permanently", arguments: { paths: ["/tmp/a"] } })) as CallToolResult;
     expect(deleted.isError).not.toBe(true);
-    expect(backend.confirmAndDelete).toHaveBeenCalledWith(expect.objectContaining({ sessionName: "My Agent", roleName: "Cleanup Admin", paths: ["/tmp/a"] }));
+    expect(backend.queueRemoval).toHaveBeenCalledWith(expect.objectContaining({ sessionName: "My Agent", roleName: "Cleanup Admin", asked: "delete", paths: ["/tmp/a"] }));
     expect(security.events).toEqual([]);
   });
 

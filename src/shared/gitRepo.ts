@@ -278,9 +278,12 @@ async function inspectGitWorktree(
   git: GitCommand,
   readText: (filePath: string) => Promise<string | null>,
   exists: (filePath: string) => Promise<boolean> = pathExists,
+  // Already read by a caller that had to learn the repo before queueing.
+  // Undefined means this function reads `.git` itself.
+  knownGitFile?: string | null,
 ): Promise<{ check: DevWorktreeCheck; adminDir: string | null }> {
   const gitPath = Path.join(worktreePath, ".git");
-  const gitFile = await readText(gitPath);
+  const gitFile = knownGitFile !== undefined ? knownGitFile : await readText(gitPath);
   if (gitFile === null) {
     // Unreadable, or a .git folder (a full clone): not ours to remove.
     if (await exists(gitPath)) {
@@ -324,6 +327,30 @@ async function inspectGitWorktree(
 }
 
 /**
+ * One removal at a time per repository. `git worktree remove` locks that
+ * repo's index, and a status running beside it fails closed (the worktree
+ * looks unchecked, so it is left in place). Callers may ask for many
+ * worktrees at once; different repos still run together.
+ */
+const removalTails = new Map<string, Promise<void>>();
+
+function oneRemovalAtATime<T>(repoKey: string, work: () => Promise<T>): Promise<T> {
+  const previous = removalTails.get(repoKey) ?? Promise.resolve();
+  const run = previous.catch(() => undefined).then(work);
+  const tail = run.then(() => undefined, () => undefined);
+  removalTails.set(repoKey, tail);
+  void tail.finally(() => {
+    if (removalTails.get(repoKey) === tail) removalTails.delete(repoKey);
+  });
+  return run;
+}
+
+function removalRepoKey(adminDir: string): string {
+  const common = Path.resolve(Path.dirname(Path.dirname(adminDir)));
+  return process.platform === "win32" ? common.toLowerCase() : common;
+}
+
+/**
  * Recheck immediately before removal, then let Git remove both the checkout
  * and its registration. Never force or fall back to a filesystem delete.
  * Run from the common Git directory so the child is not inside the folder
@@ -335,7 +362,22 @@ export async function removeGitWorktree(
   remove: GitRemovalCommand = runGitRemovalCommand,
   readText: (filePath: string) => Promise<string | null> = readSmallText,
 ): Promise<PathActionResult> {
-  const { check, adminDir } = await inspectGitWorktree(worktreePath, git, readText);
+  const gitFile = await readText(Path.join(worktreePath, ".git"));
+  const adminDir = gitFile === null ? null : worktreeAdminDir(worktreePath, gitFile);
+  const finish = () => finishRemoval(worktreePath, git, remove, readText, gitFile);
+  // No linked worktree: Git is not asked to lock a repo.
+  if (!adminDir) return finish();
+  return oneRemovalAtATime(removalRepoKey(adminDir), finish);
+}
+
+async function finishRemoval(
+  worktreePath: string,
+  git: GitCommand,
+  remove: GitRemovalCommand,
+  readText: (filePath: string) => Promise<string | null>,
+  gitFile: string | null,
+): Promise<PathActionResult> {
+  const { check, adminDir } = await inspectGitWorktree(worktreePath, git, readText, pathExists, gitFile);
   const risks = worktreeRisks(check);
   if (risks.length > 0) return { ok: false, message: `Not removed: ${risks.join(" ")}` };
   if (!adminDir) return { ok: false, message: "The worktree's .git file is no longer readable." };

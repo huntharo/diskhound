@@ -58,9 +58,12 @@ wrap the command in `xvfb-run --auto-servernum`.
   port, so the MCP server never takes 51735 from a DiskHound the
   developer runs with AI agents on. `handle.agentPort` is the port;
   pass `launch({ agentPort })` to keep it across a restart.
-- **Agent Trash.** `stubTrash(handle, dir)` answers the agent's Trash
-  confirmation with the button the spec picks, and moves items into
-  `dir` rather than the developer's real Trash or Recycle Bin.
+- **Agent Trash.** `stubTrash(handle, dir)` moves items into `dir`
+  rather than the developer's real Trash or Recycle Bin. It also
+  records any native message box, answered with Cancel. Agents'
+  removals wait on DiskHound's review list, so specs expect
+  `dialogs()` to be empty. `openReview(page)` opens the list from the
+  header pill, and `reviewRow(sheet, path)` finds one item on it.
 - **Scan tree.** The `scanTree` fixture writes five random-content
   files with known, distinct sizes under the test's output dir, not the
   OS temp dir. macOS temp resolves under `/private`, which is in

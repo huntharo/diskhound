@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import * as OS from "node:os";
 import * as Path from "node:path";
 
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, ipcMain, shell } from "electron";
 
 import type {
   AppSettings,
@@ -28,26 +28,39 @@ import {
   BUILT_IN_MCP_ROLES,
   MCP_SERVER_NAME,
   agentAccessMcpUrl,
+  sessionPermissions,
   type AddToClaudeResult,
   type AgentAccessSnapshot,
   type AgentAccessStatus,
   type AgentConsentDecision,
 } from "../shared/agentAccess";
+import {
+  EMPTY_REMOVAL_LIST,
+  waitingItems,
+  type AgentRemovalList,
+  type RemovalApprovalResult,
+  type RemovalDecision,
+  type RemovalMeasureResult,
+} from "../shared/agentRemovals";
 import { normPath } from "../shared/pathUtils";
 import { powerEfficiencyWorkers } from "../shared/powerEfficiency";
 import { formatSizeBytes, resolveSizeUnitBase } from "../shared/sizeUnits";
 import { McpPolicyStore } from "./accessPolicy";
+import { listenerKeyPath } from "./listenerProof";
 import type { AgentAccessService } from "./agentAccessService";
 import { AgentActivityLog } from "./activityLog";
-import type { DiskhoundAgentBackend, FolderChildren, NavigateRequest, TrashOutcome, TrashRequest } from "./backend";
+import type { DiskhoundAgentBackend, FolderChildren, NavigateRequest, RemovalQueueOutcome, RemovalQueueRequest } from "./backend";
 import { writeClaudeExtension } from "./claudeExtension";
 import { ConsentBroker, type ConsentWindow } from "./consentBroker";
 import { resolveNativeScannerBinary } from "../nativeScanner";
 import { isInside } from "./paths";
 import { nativeRemovalMeasurer, RemovalMeasurements } from "./removalMeasure";
+import { RemovalQueue, type QueueInput } from "./removalQueue";
+import { RemovalReview, type SessionAccess } from "./removalReview";
 import { AgentSecurityLog } from "./securityLog";
 import type { SkillCatalog } from "./skills";
-import { agentTrashRefusal, canonicalPath, configuredTrashGuard, outermostPaths } from "./trashGuard";
+import { agentTrashRefusal, canonicalPath, canonicalTarget, configuredTrashGuard, outermostPaths } from "./trashGuard";
+import { systemVolumeLoader, TrashProbe } from "./trashSupport";
 
 const NAVIGATE_VIEW_CHANNEL = "diskhound:navigate-view";
 const PATHS_TRASHED_CHANNEL = "diskhound:paths-trashed";
@@ -55,12 +68,16 @@ const PATHS_DELETED_CHANNEL = "diskhound:paths-deleted";
 const AGENT_ACCESS_CHANGED_CHANNEL = "diskhound:agent-access-changed";
 const AGENT_ACTIVITY_CHANNEL = "diskhound:agent-activity";
 const AGENT_SECURITY_CHANNEL = "diskhound:agent-security";
+const AGENT_REMOVALS_CHANNEL = "diskhound:agent-removals-changed";
+const AGENT_REVIEW_OPEN_CHANNEL = "diskhound:agent-review-open";
+/** Pushes of the review list coalesce to one per this long while an approval runs. */
+const REMOVALS_PUSH_MS = 100;
 
 /**
  * The closures from main.ts that the agent host needs. main.ts owns
  * the scan pipeline and its caches; this module only adapts them to
  * the MCP backend contract and adds the Electron-specific pieces
- * (approval window, trash confirmation, navigation, Settings IPC).
+ * (approval window, the removal review list, navigation, Settings IPC).
  */
 export interface AgentHostDeps {
   projectRoot: string;
@@ -92,6 +109,8 @@ export interface AgentHostDeps {
   trashPath(targetPath: string): Promise<PathActionResult>;
   /** DiskHound's own permanent delete (worker for folders), as the UI uses it. */
   permanentDeletePath(targetPath: string): Promise<PathActionResult>;
+  /** Items waiting in the review list changed; the tray menu shows the count. */
+  removalsWaiting?(count: number): void;
 }
 
 export interface AgentHost {
@@ -99,8 +118,16 @@ export interface AgentHost {
   start(): Promise<void>;
   /** Open Settings → AI Agents in the main window (menus, tray). */
   showSettings(): Promise<void>;
+  /** Open the review list of agents' removal requests (tray). */
+  showRemovalReview(): Promise<void>;
   /** Files were removed from the UI: removal measurements are stale. */
   pathsRemoved(): void;
+  /** Write the review list now if it changed (quit; before-quit is synchronous). */
+  flushRemovals(): void;
+  /** An approval is still deciding items, so quit has to wait for its write. */
+  removalsBusy(): boolean;
+  /** Resolves after the in-flight approval has written its decisions. */
+  whenRemovalsIdle(): Promise<void>;
   dispose(): Promise<void>;
 }
 
@@ -187,6 +214,7 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
   // e.g. when an agent's call recreated the window from the tray.
   let readyRendererId: number | null = null;
   let pendingNavigation: NavigateViewPayload | null = null;
+  let pendingReviewOpen = false;
   ipcMain.on("diskhound:report-view-state", (event, state: WindowViewState) => {
     const main = deps.getMainWindow();
     if (!main || event.sender.id !== main.webContents.id) return;
@@ -196,6 +224,10 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
       const payload = pendingNavigation;
       pendingNavigation = null;
       mainWindowSend(NAVIGATE_VIEW_CHANNEL, payload);
+    }
+    if (pendingReviewOpen) {
+      pendingReviewOpen = false;
+      mainWindowSend(AGENT_REVIEW_OPEN_CHANNEL, null);
     }
   });
 
@@ -286,7 +318,7 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
     return null;
   };
 
-  /** The units the window shows, so the dialog's sizes match it. */
+  /** The units the window shows, so toasts match it. */
   const sizeUnitBase = () => resolveSizeUnitBase(deps.getSettings().general.sizeUnits, process.platform);
   const formatSize = (bytes: number | null) => {
     if (bytes === null) return "size unknown";
@@ -297,154 +329,187 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
   const refusedText = (why: string | null) => (why ? `Refused: ${why}.` : null);
   const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`;
 
-  // One confirmation dialog at a time; later requests queue behind it.
-  let removalTail: Promise<unknown> = Promise.resolve();
-  const confirmAndRemove = (request: TrashRequest, mode: "trash" | "delete"): Promise<TrashOutcome> => {
-    const verb = mode === "trash" ? "moved" : "deleted";
-    const hungUp = () =>
-      new Error(`The agent's request closed before DiskHound asked the user. Nothing was ${verb}.`);
-    const run = async (): Promise<TrashOutcome> => {
-      // This request may have waited behind other dialogs. If the agent
-      // hung up, the server stopped, or the user revoked the session or
-      // changed its role meanwhile, don't ask on its behalf.
-      if (request.signal?.aborted) throw hungUp();
-      await request.recheck?.();
+  // ── Removal review list ─────────────────────────────────
 
-      // Resolve each path to its on-disk spelling so the protected-folder
-      // check (a string compare in main) sees what would actually move.
-      const keep = await keepFolders();
-      const protectedFolder = await configuredTrashGuard(deps.getSettings().scanning.excludedFolderPaths);
-      const refused: TrashOutcome["results"] = [];
-      const offered: string[] = [];
-      for (const requested of request.paths) {
-        let target: string;
-        try {
-          target = await canonicalPath(requested);
-        } catch {
-          refused.push({ path: requested, ok: false, message: "Nothing exists at this path.", sizeBytes: null });
-          continue;
-        }
-        const why = protectedFolder(requested, target) ?? agentTrashRefusal(target, keep);
-        if (why) {
-          refused.push({ path: target, ok: false, message: `Refused: ${why}.`, sizeBytes: null });
-          security.record({
-            sessionId: request.sessionId,
-            sessionName: request.sessionName,
-            roleName: request.roleName,
-            kind: "protected_path",
-            tool: mode === "trash" ? "diskhound_move_to_trash" : "diskhound_delete_permanently",
-            detail: `Asked to ${mode === "trash" ? `move ${target} to the ${trashName()}` : `delete ${target} permanently`}; refused: ${why.replace(/\.$/, "")}.`,
-          });
-        } else {
-          offered.push(target);
-        }
-      }
-      const targets = outermostPaths(offered);
-      if (targets.length === 0) {
-        throw new Error(`Nothing to ask the user about. ${refused.map((r) => `${r.path}: ${r.message}`).join(" ")}`);
-      }
+  // These paths are fixed for the run, so they resolve once.
+  let keep: Promise<string[]> | null = null;
+  /** Protected folders from Settings, then the folders agents may never remove. */
+  const protection = async () => {
+    const kept = await (keep ??= keepFolders());
+    const guard = await configuredTrashGuard(deps.getSettings().scanning.excludedFolderPaths);
+    return (requested: string, target: string) => guard(requested, target) ?? refusedText(agentTrashRefusal(target, kept));
+  };
 
-      const sizes = await Promise.all(targets.map((p) => recordedSize(p)));
-      await deps.ensureMainWindow();
-      const main = deps.getMainWindow();
-      if (!main || main.isDestroyed()) return { confirmed: false, results: [] };
-      if (!main.isVisible()) main.show();
-      if (main.isMinimized()) main.restore();
-      if (process.platform === "darwin") app.focus({ steal: true });
-      main.focus();
+  const probe = new TrashProbe(systemVolumeLoader(), { sizeText: (bytes) => formatSize(bytes) });
 
-      // Paths outside every scan have no recorded folder size.
-      const known = sizes.filter((size): size is number => size !== null);
-      const total = known.reduce((sum, size) => sum + size, 0);
-      const totalText = known.length === 0 ? "" : ` (${known.length < sizes.length ? "at least " : ""}${formatSize(total)})`;
-      // Every item, never "…and N more": the server caps a request at 20.
-      const listed = targets.map((p, i) => `• ${p}  (${formatSize(sizes[i] ?? null)})`);
-      // The user should know what else the agent asked for, and why it isn't here.
-      const skipped = refused.length === 0
-        ? ""
-        : `\n\nNot included:\n${refused.map((r) => `• ${r.path}: ${r.message.replace(/^Refused: /, "")}`).join("\n")}`;
-      const bin = trashName();
-      const { response } = await dialog.showMessageBox(main, mode === "trash"
-        ? {
-            type: "warning",
-            title: "DiskHound — agent request",
-            message: `“${request.sessionName}” wants to move ${plural(targets.length, "item")}${totalText} to the ${bin}.`,
-            detail:
-              (request.reason ? `Reason: ${request.reason}\n\n` : "") +
-              `${listed.join("\n")}${skipped}\n\nYou can restore items from the ${bin} until it is emptied.`,
-            buttons: [`Move to ${bin}`, "Cancel"],
-            defaultId: 1,
-            cancelId: 1,
-            noLink: true,
-            // Closes the dialog (as Cancel) if the agent hangs up or agents are turned off.
-            signal: request.signal,
-          }
-        : {
-            type: "warning",
-            title: "DiskHound — agent request",
-            message: `“${request.sessionName}” wants to permanently delete ${plural(targets.length, "item")}${totalText}.`,
-            detail:
-              (request.reason ? `Reason: ${request.reason}\n\n` : "") +
-              `${listed.join("\n")}${skipped}\n\nThese won't go to the ${bin}. Deleted items can't be restored.`,
-            buttons: ["Delete Permanently", "Cancel"],
-            defaultId: 1,
-            cancelId: 1,
-            noLink: true,
-            signal: request.signal,
-          });
-      if (request.signal?.aborted) throw hungUp();
-      if (response !== 0) {
-        deps.log(`agent-${mode}`, `declined session="${request.sessionName}" paths=${targets.length}`);
-        return { confirmed: false, results: [] };
+  // Coalesce pushes: an approval decides items one after another.
+  let pushTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastWaiting: number | null = null;
+  const pushRemovals = () => {
+    pushTimer = null;
+    const list = queue.list();
+    mainWindowSend(AGENT_REMOVALS_CHANNEL, list);
+    const waiting = waitingItems(list).length;
+    if (waiting !== lastWaiting) {
+      lastWaiting = waiting;
+      deps.removalsWaiting?.(waiting);
+    }
+  };
+  // The sheet paints the approval summary from this call's return value.
+  // A push still waiting on the 100 ms coalesce would leave a row on
+  // "Removing…" beside that finished summary.
+  const flushRemovalsNow = () => {
+    if (pushTimer) {
+      clearTimeout(pushTimer);
+      pushTimer = null;
+    }
+    pushRemovals();
+  };
+  const queue = new RemovalQueue(Path.join(userData, "agent-removals.json"), {
+    onChange: () => {
+      pushTimer ??= setTimeout(pushRemovals, REMOVALS_PUSH_MS);
+    },
+    log: (message) => deps.log("agent-removals", message),
+  });
+  /** The list, read from disk only once agents have been in use. */
+  const removalList = (): AgentRemovalList =>
+    queue.loaded || deps.getSettings().agents.enabled || policy.exists() ? queue.list() : EMPTY_REMOVAL_LIST;
+
+  const queueRemoval = async (request: RemovalQueueRequest): Promise<RemovalQueueOutcome> => {
+    const bin = trashName();
+    const verb = request.asked === "trash" ? `move %s to the ${bin}` : "delete %s permanently";
+    const tool = request.asked === "trash" ? "diskhound_move_to_trash" : "diskhound_delete_permanently";
+    // Resolve each path to its on-disk spelling so the protected-folder
+    // check (a string compare) sees what would actually be removed.
+    const protect = await protection();
+    const refused: RemovalQueueOutcome["refused"] = [];
+    const offered: string[] = [];
+    // What is at each path now; approval leaves alone anything made there later.
+    const fileIds = new Map<string, string>();
+    for (const requested of request.paths) {
+      let target: string;
+      try {
+        const found = await canonicalTarget(requested);
+        target = found.path;
+        fileIds.set(target, found.fileId);
+      } catch {
+        refused.push({ path: requested, message: "Nothing exists at this path." });
+        continue;
       }
-      // The session's role, Settings and the paths themselves may have
-      // changed while the confirmation was open. Check everything again:
-      // a folder above a target swapped for a link would otherwise send
-      // the removal somewhere the user never saw.
-      await request.recheck?.();
-      const results: TrashOutcome["results"] = [...refused];
-      const currentProtection = await configuredTrashGuard(deps.getSettings().scanning.excludedFolderPaths);
-      const currentKeep = await keepFolders();
-      for (const [index, target] of targets.entries()) {
-        const now = await canonicalPath(target).catch(() => null);
-        const blocked = now === null
-          ? "Nothing exists at this path any more."
-          : now !== target
-            ? "This path changed after you confirmed, so DiskHound left it alone."
-            : currentProtection(target, target) ?? refusedText(agentTrashRefusal(target, currentKeep));
-        const result = blocked
-          ? { ok: false, message: blocked }
-          : mode === "trash"
-            ? await deps.trashPath(target)
-            : await deps.permanentDeletePath(target);
-        results.push({ path: target, ok: result.ok, message: result.message, sizeBytes: sizes[index] ?? null });
+      const why = protect(requested, target);
+      if (why) {
+        refused.push({ path: target, message: why });
+        security.record({
+          sessionId: request.sessionId,
+          sessionName: request.sessionName,
+          roleName: request.roleName,
+          kind: "protected_path",
+          tool,
+          detail: `Asked to ${verb.replace("%s", target)}; refused: ${why.replace(/^Refused: /, "").replace(/\.$/, "")}.`,
+        });
+        continue;
       }
-      const done = results.filter((r) => r.ok);
-      if (done.length > 0) measurements?.invalidate();
-      deps.log(`agent-${mode}`, `session="${request.sessionName}" ${verb}=${done.length}/${results.length}`);
-      if (done.length > 0) {
-        mainWindowSend(mode === "trash" ? PATHS_TRASHED_CHANNEL : PATHS_DELETED_CHANNEL, done.map((r) => r.path));
-        const known = done.flatMap((r) => (r.sizeBytes === null ? [] : [r.sizeBytes]));
-        const freedBytes = known.reduce((s, size) => s + size, 0);
-        // Paths outside every scan have no size: never claim "0 B" for them.
-        const freed = known.length === 0
-          ? null
-          : `${known.length < done.length ? "at least " : ""}${formatSize(freedBytes)}`;
-        deps.toast(
-          "success",
-          mode === "trash"
-            ? `Moved ${plural(done.length, "item")} to the ${bin}`
-            : `Deleted ${plural(done.length, "item")} permanently`,
-          mode === "trash"
-            ? `Requested by ${request.sessionName}. Empty the ${bin} to free ${freed ?? "the space"}.`
-            : `Requested by ${request.sessionName}.${freed ? ` Freed ${freed}.` : ""}`,
-        );
+      const mounted = await probe.mountedAt(target);
+      if (mounted) {
+        refused.push({ path: target, message: `Refused: ${mounted} is mounted here, and DiskHound never removes a volume. Ask for what's inside it instead.` });
+        continue;
       }
-      return { confirmed: true, results };
+      offered.push(target);
+    }
+    const targets = outermostPaths(offered);
+    // A path inside another one asked for goes with it; say so.
+    for (const path of offered) {
+      const parent = targets.find((target) => target !== path && isInside(target, path));
+      if (parent) refused.push({ path, message: `It's inside ${parent}, which is on the list with it.` });
+    }
+    const sizes = await Promise.all(targets.map((path) => recordedSize(path)));
+    const checks = await probe.check(targets.map((path, index) => ({ path, sizeBytes: sizes[index] ?? null })));
+    const items: QueueInput["items"] = [];
+    for (const [index, path] of targets.entries()) {
+      const check = checks[index]!;
+      // Nothing could ever remove it; don't make the user look at it.
+      if (check.readOnly) refused.push({ path, message: `Refused: ${check.volume ?? "its volume"} is read-only.` });
+      else items.push({ path, sizeBytes: sizes[index] ?? null, check, fileId: fileIds.get(path) });
+    }
+    if (items.length === 0) {
+      throw new Error(`Nothing was added to DiskHound's review list. ${refused.map((r) => `${r.path}: ${r.message}`).join(" ")}`);
+    }
+    const { request: queued, replaced } = queue.add({
+      sessionId: request.sessionId,
+      sessionName: request.sessionName,
+      roleName: request.roleName,
+      asked: request.asked,
+      reason: request.reason?.trim() || null,
+      items,
+    });
+    deps.log("agent-removals", `queued session="${request.sessionName}" action=${request.asked} items=${items.length} refused=${refused.length}`);
+    return { request: queued, refused, replaced };
+  };
+
+  const sessionsNow = () => {
+    const sessions = new Map(policy.sessions().map((session) => [session.id, session]));
+    return (sessionId: string): SessionAccess | null => {
+      const session = sessions.get(sessionId);
+      if (!session || session.revokedAt !== null) return null;
+      const role = BUILT_IN_MCP_ROLES.find((candidate) => candidate.id === session.roleId);
+      return { name: session.name, roleName: role?.name ?? "no role", capabilities: sessionPermissions(session) };
     };
-    const operation = removalTail.then(run, run);
-    removalTail = operation.catch(() => undefined);
-    return operation;
+  };
+
+  const review = new RemovalReview({
+    queue,
+    check: (items) => {
+      // Volumes may have come and gone since the list was opened.
+      probe.invalidate();
+      return probe.check(items);
+    },
+    canonicalTarget,
+    protection,
+    sessions: sessionsNow,
+    trashPath: (path) => deps.trashPath(path),
+    deletePath: (path) => deps.permanentDeletePath(path),
+    listDir: (path) => FS.readdir(path),
+    platform: process.platform,
+  });
+
+  const approvalToast = (result: RemovalApprovalResult) => {
+    const bin = trashName();
+    const removed = result.moved.items + result.deleted.items + result.partial;
+    const sized = (count: RemovalApprovalResult["moved"]) =>
+      count.items === count.unsized ? null : `${count.unsized > 0 ? "at least " : ""}${formatSize(count.bytes)}`;
+    const deletedSize = sized(result.deleted);
+    const movedSize = sized(result.moved);
+    const body = [
+      result.deleted.items ? `Deleted ${result.deleted.items}${deletedSize ? `: ${deletedSize} free now` : ""}.` : null,
+      result.moved.items ? `Moved ${result.moved.items} to the ${bin}${movedSize ? `: ${movedSize} more once you empty it` : ""}.` : null,
+      result.partial ? `${plural(result.partial, "folder")} removed except another volume inside.` : null,
+      result.failed ? `${result.failed} not removed.` : null,
+      result.refused ? `${result.refused} not allowed any more.` : null,
+      result.gone ? `${result.gone} already gone.` : null,
+      result.skipped ? `${result.skipped} skipped.` : null,
+      result.changed ? `${plural(result.changed, "item")} changed since you looked; review ${result.changed === 1 ? "it" : "them"} again.` : null,
+    ].filter(Boolean).join(" ");
+    const title = removed > 0
+      ? `Removed ${plural(removed, "item")} for ${plural(result.sessions, "agent")}`
+      : result.skipped > 0 && result.failed + result.refused + result.changed === 0
+        ? `Skipped ${plural(result.skipped, "item")}`
+        : "Nothing was removed";
+    deps.toast(result.failed + result.refused + result.changed > 0 ? "warning" : "success", title, body || undefined);
+  };
+
+  const approveRemovals = async (decisions: RemovalDecision[]): Promise<RemovalApprovalResult> => {
+    const { result, trashed, deleted } = await review.approve(decisions);
+    if (trashed.length + deleted.length > 0) {
+      measurements?.invalidate();
+      if (trashed.length) mainWindowSend(PATHS_TRASHED_CHANNEL, trashed);
+      if (deleted.length) mainWindowSend(PATHS_DELETED_CHANNEL, deleted);
+    }
+    deps.log(
+      "agent-removals",
+      `approved moved=${result.moved.items} deleted=${result.deleted.items} partial=${result.partial} failed=${result.failed} refused=${result.refused} gone=${result.gone} skipped=${result.skipped} changed=${result.changed}`,
+    );
+    approvalToast(result);
+    return result;
   };
 
   // What removing paths frees, measured by the native scanner (APFS
@@ -501,8 +566,8 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
       return { ok: true, message: "Revealed." };
     },
     ...(process.platform === "win32" ? {} : { measureRemoval }),
-    confirmAndTrash: (request) => confirmAndRemove(request, "trash"),
-    confirmAndDelete: (request) => confirmAndRemove(request, "delete"),
+    queueRemoval,
+    removalRequests: (sessionId) => queue.forSession(sessionId),
   };
 
   // ── Approval sheet ───────────────────────────────────────
@@ -630,6 +695,7 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
         skills,
         policy,
         clientsFile,
+        listenerKeyFile: listenerKeyPath(),
         requestConsent: broker.request,
         onChanged: broadcast,
         port,
@@ -670,6 +736,7 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
     })(),
     activity: activity.list(),
     pending: broker.pending(),
+    removals: removalList(),
     security: security.recent(),
     policyFile: policy.filePath,
     securityLogFile: security.filePath,
@@ -731,6 +798,34 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
     broker.dismiss(String(requestId));
     return snapshot();
   });
+  // The review sheet sends one decision per item it showed: ticked items
+  // run with the action picked, unticked ones are skipped.
+  ipcMain.handle("diskhound:agent-removals-approve", async (event, input: unknown) => {
+    requireMainWindow(event);
+    const decisions = (Array.isArray(input) ? input : []).filter((decision): decision is RemovalDecision =>
+      Boolean(decision) && typeof decision.itemId === "string" && typeof decision.run === "boolean" &&
+      (decision.action === "trash" || decision.action === "delete"));
+    try {
+      return await approveRemovals(decisions);
+    } finally {
+      flushRemovalsNow();
+    }
+  });
+  // What the ticked items free together. Only paths in the list are measured.
+  ipcMain.handle("diskhound:agent-removals-measure", async (event, itemIds: unknown): Promise<RemovalMeasureResult> => {
+    requireMainWindow(event);
+    if (process.platform === "win32") return { ok: false, error: "Not measured on Windows: the scan already counts each file once." };
+    const paths = (Array.isArray(itemIds) ? itemIds : [])
+      .map((id) => (typeof id === "string" ? queue.find(id)?.item : undefined))
+      .filter((item) => item?.status === "waiting")
+      .map((item) => item!.path);
+    if (paths.length === 0) return { ok: false, error: "Nothing to measure." };
+    try {
+      return { ok: true, measurement: await measureRemoval(paths) };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
   // Claude Desktop's extension, built from this app's helper and opened
   // in Claude, which asks the user to install it. Claude copies it on
   // install, so the file in temp only has to last until then.
@@ -767,19 +862,40 @@ export function createAgentHost(deps: AgentHostDeps): AgentHost {
     await navigate({ view: "settings", section: "ai-agents", focus: true });
   };
 
+  /** The user asked for it (tray), so DiskHound comes to the front. */
+  const showRemovalReview = async () => {
+    await deps.ensureMainWindow();
+    const main = deps.getMainWindow();
+    if (!main || main.isDestroyed()) return;
+    if (!main.isVisible()) main.show();
+    if (main.isMinimized()) main.restore();
+    main.focus();
+    if (readyRendererId === main.webContents.id && !main.webContents.isLoading()) mainWindowSend(AGENT_REVIEW_OPEN_CHANNEL, null);
+    else pendingReviewOpen = true;
+  };
+
   return {
     start: async () => {
       if (!deps.getSettings().agents.enabled) return;
       const started = await (await ensureService()).setEnabled(true, false);
       deps.log("agent-access", started.listening ? `listening on ${started.mcpUrl}` : `failed to start: ${started.error ?? "unknown"}`);
+      // Requests left from an earlier run: the tray says so.
+      lastWaiting = queue.waitingCount();
+      if (lastWaiting > 0) deps.removalsWaiting?.(lastWaiting);
     },
     showSettings,
+    showRemovalReview,
     pathsRemoved: () => measurements?.invalidate(),
+    flushRemovals: () => queue.flushSync(),
+    removalsBusy: () => queue.busy(),
+    whenRemovalsIdle: () => queue.whenIdle(),
     dispose: async () => {
       broker.close();
       measurements?.dispose();
+      if (pushTimer) clearTimeout(pushTimer);
       await service?.dispose();
       await security.flush();
+      await queue.dispose();
     },
   };
 }

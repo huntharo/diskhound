@@ -6,10 +6,11 @@ use reqwest::{redirect::Policy, Client, Response, Url};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     io::Write,
     time::{Duration, Instant},
 };
-use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 type Result<T> = std::result::Result<T, &'static str>;
 const INPUT_LIMIT: usize = 1024 * 1024;
@@ -161,6 +162,87 @@ const APPROVAL_WAIT: Duration = Duration::from_secs(30);
 /// up on a request after 60 s (the MCP SDK's default).
 const LIST_WAIT: Duration = Duration::from_secs(45);
 const NOT_DISKHOUND: &str = "Something other than DiskHound is listening on DiskHound's port. Ask the user to quit that program and keep DiskHound open with Settings > AI Agents turned on, then call diskhound_status again.";
+
+fn listener_key_path() -> Result<std::path::PathBuf> {
+    Ok(dirs::data_local_dir()
+        .ok_or(NOT_DISKHOUND)?
+        .join("DiskHound")
+        .join("mcp-listener-key"))
+}
+
+/// The key file must be a regular 32-byte file private to this user.
+/// A symlink or a looser mode is another account's chance to learn it.
+fn load_listener_key(path: &std::path::Path) -> Result<Vec<u8>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let info = std::fs::symlink_metadata(path).map_err(|_| NOT_DISKHOUND)?;
+        if !info.is_file()
+            || info.uid() != unsafe { libc::geteuid() }
+            || info.mode() & 0o777 != 0o600
+        {
+            return Err(NOT_DISKHOUND);
+        }
+    }
+    #[cfg(windows)]
+    {
+        let info = std::fs::symlink_metadata(path).map_err(|_| NOT_DISKHOUND)?;
+        if !info.is_file() || info.file_type().is_symlink() {
+            return Err(NOT_DISKHOUND);
+        }
+    }
+    let bytes = std::fs::read(path).map_err(|_| NOT_DISKHOUND)?;
+    if bytes.len() != 32 {
+        return Err(NOT_DISKHOUND);
+    }
+    Ok(bytes)
+}
+
+fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+    const BLOCK: usize = 64;
+    let mut padded = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        padded[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        padded[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0u8; BLOCK];
+    let mut opad = [0u8; BLOCK];
+    for i in 0..BLOCK {
+        ipad[i] = padded[i] ^ 0x36;
+        opad[i] = padded[i] ^ 0x5c;
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(message);
+    let inner = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner);
+    outer.finalize().into()
+}
+
+fn proof_matches(key: &[u8], nonce: &str, proof: &str) -> bool {
+    if proof.len() != 64 || !proof.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return false;
+    }
+    let expected = hex_encode(&hmac_sha256(key, nonce.as_bytes()));
+    let mut diff = 0u8;
+    for (left, right) in expected.bytes().zip(proof.bytes()) {
+        diff |= left ^ right;
+    }
+    diff == 0
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0xf) as usize] as char);
+    }
+    out
+}
 const OFFLINE: &str = "DiskHound isn't reachable. Ask the user to open DiskHound and turn on Settings > AI Agents > Allow local AI agents, then call diskhound_status again.";
 const DENIED: &str =
     "The user denied this connection in DiskHound. Reconnect this MCP server to ask again.";
@@ -202,8 +284,13 @@ struct Bridge {
     version: String,
     /// What the client called itself in `initialize`; names the approval.
     client_name: String,
-    /// DiskHound (not another app) answered on the port.
+    /// A check that did not send a token already saw a valid proof.
+    /// A saved bearer never trusts this: each one is proved on its own connection.
     verified: bool,
+    /// Tests point this at a temp file. None uses the user's data directory.
+    listener_key_path: Option<std::path::PathBuf>,
+    /// Tests inject the key bytes. Production always reads the file.
+    listener_key_override: Option<Vec<u8>>,
     /// The background approval, once started.
     approval: Option<tokio::sync::watch::Receiver<Approval>>,
     /// When to start the approval if nothing asks for it sooner.
@@ -376,6 +463,168 @@ fn placeholder_tools() -> Value {
     }]})
 }
 
+/// One HTTP/1.1 response read off a connection we keep open ourselves.
+/// reqwest's pool may open a new connection for the next request, which is
+/// exactly the gap a new listener on this port could sit in.
+struct RawResponse {
+    status: u16,
+    headers: HashMap<String, String>,
+    body: Vec<u8>,
+}
+
+struct LoopbackConn {
+    socket: tokio::net::TcpStream,
+    pending: Vec<u8>,
+}
+
+const HEADER_LIMIT: usize = 64 * 1024;
+/// Same budget as the reqwest client: a Trash dialog can take a while.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+
+impl LoopbackConn {
+    async fn connect(port: u16) -> Result<Self> {
+        let socket = tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)),
+        )
+        .await
+        .map_err(|_| OFFLINE)?
+        .map_err(|_| OFFLINE)?;
+        let _ = socket.set_nodelay(true);
+        Ok(Self {
+            socket,
+            pending: Vec::new(),
+        })
+    }
+
+    async fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.socket.write_all(bytes).await
+    }
+
+    async fn fill(&mut self) -> Result<()> {
+        let mut buf = [0u8; 8192];
+        let count = self.socket.read(&mut buf).await.map_err(|_| UNAVAILABLE)?;
+        if count == 0 {
+            return Err(UNAVAILABLE);
+        }
+        self.pending.extend_from_slice(&buf[..count]);
+        Ok(())
+    }
+
+    async fn read_response(&mut self) -> Result<RawResponse> {
+        let header_end = loop {
+            if let Some(end) = self.pending.windows(4).position(|mark| mark == b"\r\n\r\n") {
+                break end;
+            }
+            if self.pending.len() > HEADER_LIMIT {
+                return Err("Invalid DiskHound response");
+            }
+            self.fill().await?;
+        };
+        let header_text = std::str::from_utf8(&self.pending[..header_end])
+            .map_err(|_| "Invalid DiskHound response")?;
+        let mut lines = header_text.split("\r\n");
+        let status = lines
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|code| code.parse().ok())
+            .ok_or("Invalid DiskHound response")?;
+        let mut headers = HashMap::new();
+        for line in lines {
+            if let Some((name, value)) = line.split_once(':') {
+                headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_owned());
+            }
+        }
+        let length: usize = headers
+            .get("content-length")
+            .and_then(|value| value.parse().ok())
+            .ok_or("Invalid DiskHound response")?;
+        if length > RESPONSE_LIMIT {
+            return Err("DiskHound response too large");
+        }
+        let start = header_end + 4;
+        while self.pending.len() < start + length {
+            self.fill().await?;
+        }
+        let body = self.pending[start..start + length].to_vec();
+        self.pending.drain(..start + length);
+        Ok(RawResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+}
+
+fn loopback_get(port: u16, path: &str) -> String {
+    format!(
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: application/json\r\nConnection: keep-alive\r\n\r\n"
+    )
+}
+
+/// Read a handshake response. Nothing secret has been written yet, so a
+/// transport failure is "DiskHound isn't there", not an unknown outcome.
+async fn read_before_token(conn: &mut LoopbackConn) -> Result<RawResponse> {
+    match tokio::time::timeout(REQUEST_TIMEOUT, conn.read_response()).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(UNAVAILABLE)) | Err(_) => Err(OFFLINE),
+        Ok(Err(_)) => Err(NOT_DISKHOUND),
+    }
+}
+
+/// Metadata, then a fresh proof, then the bearer, all on this socket.
+/// The token bytes are written only after the proof matches.
+async fn exchange_proved(
+    port: u16,
+    key: &[u8],
+    token: &str,
+    version: &str,
+    body: &[u8],
+) -> Result<RawResponse> {
+    let mut conn = LoopbackConn::connect(port).await?;
+    conn.write_all(loopback_get(port, "/.well-known/oauth-protected-resource/mcp").as_bytes())
+        .await
+        .map_err(|_| OFFLINE)?;
+    let metadata_response = read_before_token(&mut conn).await?;
+    if !(200..300).contains(&metadata_response.status) {
+        return Err(NOT_DISKHOUND);
+    }
+    let metadata: Value =
+        serde_json::from_slice(&metadata_response.body).map_err(|_| NOT_DISKHOUND)?;
+    if metadata["resource_name"] != "DiskHound"
+        || metadata["resource"] != format!("http://127.0.0.1:{port}/mcp")
+    {
+        return Err(NOT_DISKHOUND);
+    }
+    let nonce = random()?;
+    conn.write_all(
+        loopback_get(port, &format!("/diskhound/listener-proof?nonce={nonce}")).as_bytes(),
+    )
+    .await
+    .map_err(|_| OFFLINE)?;
+    let proof_response = read_before_token(&mut conn).await?;
+    if !(200..300).contains(&proof_response.status) {
+        return Err(NOT_DISKHOUND);
+    }
+    let proof_body: Value =
+        serde_json::from_slice(&proof_response.body).map_err(|_| NOT_DISKHOUND)?;
+    if !proof_matches(key, &nonce, proof_body["proof"].as_str().unwrap_or("")) {
+        return Err(NOT_DISKHOUND);
+    }
+    let mut request = format!(
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAccept: application/json, text/event-stream\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAuthorization: Bearer {token}\r\nMCP-Protocol-Version: {version}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    request.extend_from_slice(body);
+    // From here a failed write or read means the listener may have the call.
+    conn.write_all(&request).await.map_err(|_| UNAVAILABLE)?;
+    match tokio::time::timeout(REQUEST_TIMEOUT, conn.read_response()).await {
+        Ok(result) => result,
+        Err(_) => Err(UNAVAILABLE),
+    }
+}
+
 impl Bridge {
     fn new(http: Client, origin: String, port: u16, credentials: Option<Credentials>) -> Self {
         Bridge {
@@ -387,6 +636,8 @@ impl Bridge {
             version: "2025-03-26".into(),
             client_name: "MCP client".into(),
             verified: false,
+            listener_key_path: None,
+            listener_key_override: None,
             approval: None,
             approval_due: None,
             approval_applied: false,
@@ -400,6 +651,11 @@ impl Bridge {
     }
 
     /// Make sure DiskHound owns the port before sending it a token or a login.
+    ///
+    /// The public metadata is not enough: another account can bind the port
+    /// and copy `resource_name`. The listener key is mode 0600 in the user's
+    /// data directory. DiskHound returns HMAC-SHA256(key, nonce) for a nonce
+    /// this process just minted, and the key itself is never sent.
     async fn verify(&mut self) -> Result<()> {
         if self.verified {
             return Ok(());
@@ -422,8 +678,42 @@ impl Bridge {
         {
             return Err(NOT_DISKHOUND);
         }
+        let path = match &self.listener_key_path {
+            Some(path) => path.clone(),
+            None => listener_key_path()?,
+        };
+        let key = load_listener_key(&path)?;
+        let nonce = random()?;
+        let proof_response = self
+            .http
+            .get(format!(
+                "{}/diskhound/listener-proof?nonce={nonce}",
+                self.origin
+            ))
+            .send()
+            .await
+            .map_err(|_| UNAVAILABLE)?;
+        if !proof_response.status().is_success() {
+            return Err(NOT_DISKHOUND);
+        }
+        let payload = body(proof_response).await.map_err(|_| NOT_DISKHOUND)?;
+        let proof = payload["proof"].as_str().unwrap_or("");
+        if !proof_matches(&key, &nonce, proof) {
+            return Err(NOT_DISKHOUND);
+        }
         self.verified = true;
         Ok(())
+    }
+
+    fn listener_key_bytes(&self) -> Result<Vec<u8>> {
+        if let Some(key) = &self.listener_key_override {
+            return Ok(key.clone());
+        }
+        let path = match &self.listener_key_path {
+            Some(path) => path.clone(),
+            None => listener_key_path()?,
+        };
+        load_listener_key(&path)
     }
 
     async fn load_saved(&mut self) -> Result<()> {
@@ -562,25 +852,37 @@ impl Bridge {
             if let Some(store) = &self.credentials {
                 self.credentials = Some(store.for_client(&self.client_name)?);
             }
-            match self.verify().await {
-                Ok(()) => {
-                    self.load_saved().await?;
-                    if self.token.is_some() {
-                        match self.forward(message).await {
-                            Err(REVOKED) => {} // A stale saved approval: ask again below.
-                            other => return other.map(|reply| (reply, Vec::new())),
-                        }
+            // Read the saved token before any proof. A slow keyring call must
+            // not sit between "this is DiskHound" and the request that sends
+            // the bearer.
+            self.load_saved().await?;
+            if self.token.is_some() {
+                match self.forward(message).await {
+                    Err(REVOKED) => {} // A stale saved approval: ask again below.
+                    // The bearer was not written. Explain, and keep the token
+                    // so a later call can try this port again.
+                    Err(NOT_DISKHOUND) => self.failed = Some(NOT_DISKHOUND),
+                    Err(OFFLINE) => self.failed = Some(OFFLINE),
+                    // The bearer was written and the reply did not come back.
+                    // That outcome is unknown; do not answer as if it never happened.
+                    Err(reason) => return Err(reason),
+                    other => return other.map(|reply| (reply, Vec::new())),
+                }
+            } else {
+                match self.verify().await {
+                    Ok(()) => {}
+                    // Connect anyway: diskhound_status tells the agent what to ask the user.
+                    Err(reason) => {
+                        self.failed = Some(if reason == NOT_DISKHOUND {
+                            NOT_DISKHOUND
+                        } else {
+                            OFFLINE
+                        });
                     }
-                    self.approval_due = Some(Instant::now() + APPROVAL_DELAY);
                 }
-                // Connect anyway: diskhound_status tells the agent what to ask the user.
-                Err(reason) => {
-                    self.failed = Some(if reason == NOT_DISKHOUND {
-                        NOT_DISKHOUND
-                    } else {
-                        OFFLINE
-                    });
-                }
+            }
+            if self.token.is_none() && self.failed.is_none() {
+                self.approval_due = Some(Instant::now() + APPROVAL_DELAY);
             }
             // No approval yet. Answer now and ask the user in the background,
             // so a client's connect timeout can't cut the user's decision short.
@@ -681,22 +983,14 @@ impl Bridge {
     }
 
     async fn forward(&mut self, message: &Value) -> Result<Option<Value>> {
-        self.verify().await?;
-        let response = self
-            .http
-            .post(format!("{}/mcp", self.origin))
-            .bearer_auth(self.token.as_ref().ok_or("Missing approval")?)
-            .header("Accept", "application/json, text/event-stream")
-            .header("MCP-Protocol-Version", &self.version)
-            .json(message)
-            .send()
-            .await
-            .map_err(|_| {
-                // Something else may hold the port next time; check again.
-                self.verified = false;
-                UNAVAILABLE
-            })?;
-        if response.status().as_u16() == 401 {
+        // A proof from an earlier call does not cover this one. The bearer
+        // leaves only on the connection that just produced a new proof.
+        self.verified = false;
+        let token = self.token.clone().ok_or("Missing approval")?;
+        let key = self.listener_key_bytes()?;
+        let payload = serde_json::to_vec(message).map_err(|_| "Invalid DiskHound response")?;
+        let response = exchange_proved(self.port, &key, &token, &self.version, &payload).await?;
+        if response.status == 401 {
             // Never retry a tool call, or silently regain a revoked permission.
             // Keep this process denied; only a new connection may ask again.
             if let Some(store) = &self.credentials {
@@ -710,11 +1004,10 @@ impl Bridge {
             return Err(REVOKED);
         }
         if let Some(granted) = response
-            .headers()
-            .get(CAPABILITIES_HEADER)
-            .and_then(|h| h.to_str().ok())
+            .headers
+            .get(&CAPABILITIES_HEADER.to_ascii_lowercase())
         {
-            let granted = granted.to_owned();
+            let granted = granted.clone();
             if self
                 .capabilities
                 .as_deref()
@@ -724,18 +1017,18 @@ impl Bridge {
             }
             self.capabilities = Some(granted);
         }
-        if response.status().as_u16() == 202 && message.get("id").is_none() {
+        if response.status == 202 && message.get("id").is_none() {
             return Ok(None);
         }
-        let status = response.status();
-        let value = body(response).await?;
+        let value = serde_json::from_slice::<Value>(&response.body)
+            .map_err(|_| "Invalid DiskHound response")?;
         if value["jsonrpc"] != "2.0"
             || value.get("id") != message.get("id")
             || (value.get("result").is_some() == value.get("error").is_some())
         {
             return Err("Invalid MCP response from DiskHound");
         }
-        if !status.is_success() && value.get("error").is_none() {
+        if !(200..300).contains(&response.status) && value.get("error").is_none() {
             return Err("DiskHound rejected the request");
         }
         if message["method"] == "initialize" {

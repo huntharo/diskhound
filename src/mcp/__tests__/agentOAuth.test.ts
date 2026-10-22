@@ -13,7 +13,7 @@ import type { AuthorizationParams } from "@modelcontextprotocol/sdk/server/auth/
 import type { OAuthClientInformationFull } from "@modelcontextprotocol/sdk/shared/auth.js";
 
 import { McpPolicyStore } from "../accessPolicy";
-import { AgentOAuth, type ConsentDecision, type ConsentRequest } from "../agentOAuth";
+import { AgentOAuth, isLoopbackRedirectUri, type ConsentDecision, type ConsentRequest } from "../agentOAuth";
 
 const RESOURCE = new URL("http://127.0.0.1:51733/mcp");
 const REDIRECT_URI = "http://127.0.0.1:47999/callback";
@@ -296,4 +296,69 @@ describe("AgentOAuth", () => {
     const fresh = new AgentOAuth({ policy, clientsFile: file, resource: RESOURCE, requestConsent: consent, onChanged });
     expect(fresh.clientsStore.getClient("anything")).toBeUndefined();
   });
+
+  it("refuses a redirect that is not an http loopback URL", async () => {
+    expect(isLoopbackRedirectUri("http://127.0.0.1:9/callback")).toBe(true);
+    expect(isLoopbackRedirectUri("http://localhost:9/callback")).toBe(true);
+    expect(isLoopbackRedirectUri("http://[::1]:9/callback")).toBe(true);
+    expect(isLoopbackRedirectUri("https://127.0.0.1:9/callback")).toBe(false);
+    expect(isLoopbackRedirectUri("http://127.0.0.1/callback")).toBe(false);
+    expect(isLoopbackRedirectUri("http://example.com:9/callback")).toBe(false);
+    await expect(oauth.clientsStore.registerClient!({
+      client_name: "Elsewhere",
+      redirect_uris: ["https://example.com/callback"],
+    } as OAuthClientInformationFull)).rejects.toBeInstanceOf(InvalidRequestError);
+  });
+
+  it("writes a client when its Session is issued and reloads only that client", async () => {
+    const file = Path.join(tempDir, "clients.json");
+    const client = await registerClient("Kept");
+    const extra = await registerClient("Pending");
+    expect(FS.existsSync(file)).toBe(false);
+    const { verifier, challenge } = pkce();
+    const id = await begin(client, challenge);
+    await flush();
+    const code = new URL(poll(id).location!).searchParams.get("code")!;
+    await oauth.exchangeAuthorizationCode(client, code, verifier, REDIRECT_URI, RESOURCE);
+    const saved = JSON.parse(FS.readFileSync(file, "utf8")) as { client_id: string; client_name?: string }[];
+    expect(saved.map((entry) => entry.client_id)).toEqual([client.client_id]);
+    if (process.platform !== "win32") expect(FS.statSync(file).mode & 0o777).toBe(0o600);
+    const reloaded = new AgentOAuth({ policy, clientsFile: file, resource: RESOURCE, requestConsent: consent, onChanged });
+    try {
+      expect((await reloaded.clientsStore.getClient(client.client_id))?.client_name).toBe("Kept");
+      expect(await reloaded.clientsStore.getClient(extra.client_id)).toBeUndefined();
+    } finally {
+      reloaded.close();
+    }
+  });
+
+  it("frees forgotten client slots without a restart and keeps a session that is still there", async () => {
+    // Matches CLIENT_LIMIT in agentOAuth.ts. Revoked sessions still hold a
+    // slot; Forget revoked is what gives it back.
+    const file = Path.join(tempDir, "clients.json");
+    const approved: OAuthClientInformationFull[] = [];
+    for (let index = 0; index < 256; index += 1) {
+      const client = await registerClient(`Agent ${index}`);
+      const id = await begin(client, pkce().challenge);
+      await flush();
+      const code = new URL(poll(id).location!).searchParams.get("code")!;
+      await oauth.exchangeAuthorizationCode(client, code, undefined, REDIRECT_URI, RESOURCE);
+      approved.push(client);
+    }
+
+    const kept = approved[255]!;
+    for (const session of policy.sessions()) {
+      if (session.oauth?.clientId === kept.client_id) continue;
+      policy.revokeSession(session.id);
+    }
+    await expect(registerClient("Still full")).rejects.toThrow(/OAuth client limit reached/);
+
+    expect(policy.forgetRevoked()).toBe(255);
+    const fresh = await registerClient("After forget");
+    expect(await oauth.clientsStore.getClient(fresh.client_id)).toMatchObject({ client_name: "After forget" });
+    expect((await oauth.clientsStore.getClient(kept.client_id))?.client_name).toBe("Agent 255");
+    expect(await oauth.clientsStore.getClient(approved[0]!.client_id)).toBeUndefined();
+    const saved = JSON.parse(FS.readFileSync(file, "utf8")) as { client_id: string }[];
+    expect(saved.map((entry) => entry.client_id)).toEqual([kept.client_id]);
+  }, 30_000);
 });

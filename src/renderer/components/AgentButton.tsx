@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 
 import type { AgentAccessSnapshot } from "../../shared/agentAccess";
-import { useAgentAccess, type AgentSettingsTarget } from "../lib/agentAccessStore";
+import { openRemovalReview, useAgentAccess, type AgentSettingsTarget } from "../lib/agentAccessStore";
 import {
   activeSessions,
   blockedBySession,
   lastActionBySession,
   pendingText,
+  reviewSummary,
   roleShortName,
 } from "../lib/agentDisplay";
 import { relativeTime } from "../lib/format";
@@ -27,6 +28,8 @@ const DAY_MS = 24 * 60 * 60_000;
  * - on: a green listening dot;
  * - an approval waiting (its sheet may be behind another app): amber,
  *   with a count;
+ * - agents' removal requests waiting for review: an amber pill counting
+ *   the items until the list is empty. Nothing comes to the front;
  * - for 10 minutes after an agent's call: the pill naming it, pulsing
  *   blue for 30 s, red when the call failed or was blocked.
  *
@@ -91,6 +94,7 @@ export function AgentButton({ onOpenSettings }: { onOpenSettings: (target: Agent
   if (!snapshot) return null;
 
   const { status } = snapshot;
+  const review = reviewSummary(snapshot.removals);
   const showPill = latest !== null && age < VISIBLE_MS;
   const active = age < ACTIVE_MS;
   const title = !status.enabled
@@ -99,6 +103,8 @@ export function AgentButton({ onOpenSettings }: { onOpenSettings: (target: Agent
       ? `AI agents: ${status.error}`
       : pending.length > 0
         ? `${pending[0]!.clientName} is waiting for your approval`
+        : review.items > 0
+          ? `${review.items} item${review.items === 1 ? "" : "s"} from agents to review. ${review.from}.`
         : latest && showPill
           ? `${latest.sessionName}: ${latest.summary} (${relativeTime(latest.at)})`
           : `AI agents are on. Listening on ${status.mcpUrl}`;
@@ -110,7 +116,21 @@ export function AgentButton({ onOpenSettings }: { onOpenSettings: (target: Agent
 
   return (
     <div className="agent-btn-wrap" ref={wrapRef}>
-      {showPill && latest ? (
+      {review.items > 0 ? (
+        <button
+          className={`agent-pill review ${open ? "open" : ""}`}
+          onClick={() => setOpen(!open)}
+          title={title}
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          aria-label={`${review.items} item${review.items === 1 ? "" : "s"} from agents to review. Show AI agents.`}
+        >
+          <span className="agent-pill-dot waiting" />
+          <span className="agent-pill-count">{review.items}</span>
+          <span className="agent-pill-name">to review</span>
+          {badge}
+        </button>
+      ) : showPill && latest ? (
         <button
           className={`agent-pill ${active ? "active" : ""} ${latest.ok ? "" : "failed"} ${open ? "open" : ""}`}
           onClick={() => setOpen(!open)}
@@ -164,6 +184,7 @@ function AgentPopover({ snapshot, now, anchor, onGo, onClose }: {
   onClose: () => void;
 }) {
   const { status } = snapshot;
+  const review = reviewSummary(snapshot.removals);
   const sessions = activeSessions(snapshot);
   const last = lastActionBySession(snapshot.activity);
   const blockedToday = [...blockedBySession(snapshot, now - DAY_MS).values()].reduce((sum, n) => sum + n, 0);
@@ -177,6 +198,25 @@ function AgentPopover({ snapshot, now, anchor, onGo, onClose }: {
         <span>AI agents</span>
         <span className={`agent-status-chip ${chip}`}>{status.error ? "Error" : status.listening ? "On" : "Off"}</span>
       </div>
+
+      {review.items > 0 && (
+        <div className="agent-pop-row pending">
+          <span className="agent-pill-dot waiting" />
+          <div className="agent-pop-main">
+            <div className="agent-pop-name">{review.items} item{review.items === 1 ? "" : "s"} to review</div>
+            <div className="agent-pop-what" title={review.from}>{review.from}</div>
+          </div>
+          <button
+            className="action-btn agent-review-btn"
+            onClick={() => {
+              onClose();
+              openRemovalReview();
+            }}
+          >
+            Review…
+          </button>
+        </div>
+      )}
 
       {!status.enabled ? (
         <div className="agent-pop-off">

@@ -37,7 +37,7 @@
     "build:mcp:debug": "cargo build --locked --manifest-path native/diskhound-mcp/Cargo.toml"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.30.0",
+    "@modelcontextprotocol/sdk": "1.32.1",
     "@shutterstock/p-map-iterable": "^1.1.2",
     "blake2": "^5.0.1",
     "electron-updater": "^6.6.2",

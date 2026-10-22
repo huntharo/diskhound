@@ -44,6 +44,17 @@ describe("agentPath", () => {
     expect(agentPath("~\\Downloads", "win32", "C:\\Users\\test")).toBe("C:\\Users\\test\\Downloads");
   });
 
+  it("keeps a trailing space that distinguishes a filename", () => {
+    expect(agentPath("/home/review/report.txt ", "linux")).toBe("/home/review/report.txt ");
+    expect(agentPath("/home/review/report.txt ", "darwin")).toBe("/home/review/report.txt ");
+    expect(agentPath("C:\\Users\\test\\report.txt ", "win32")).toBe("C:\\Users\\test\\report.txt ");
+    expect(agentPath("~/Downloads ", "linux", "/home/test")).toBe("/home/test/Downloads ");
+  });
+
+  it("refuses a leading space instead of rewriting the path", () => {
+    expect(() => agentPath(" /home/review/report.txt", "linux")).toThrow(/absolute path/);
+  });
+
   it("refuses relative paths", () => {
     expect(() => agentPath("Downloads", "darwin")).toThrow(/absolute path/);
     expect(() => agentPath("./a", "linux")).toThrow(/absolute path/);

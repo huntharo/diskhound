@@ -20,7 +20,7 @@ import { formatScanRoot } from "../shared/pathUtils";
 import { formatDriveSpace, driveSpaceLabel, driveUsedPercent } from "./lib/driveSpace";
 import { formatBytes } from "./lib/format";
 import { useSizeUnitBase } from "./lib/sizeUnitSettings";
-import { focusAgentSettings, type AgentSettingsTarget } from "./lib/agentAccessStore";
+import { focusAgentSettings, useRemovalReviewOpen, type AgentSettingsTarget } from "./lib/agentAccessStore";
 import { clearDeletedPaths, markDeletedPaths } from "./lib/deletedPaths";
 import { appendDuplicateProgress } from "./lib/duplicateStream";
 import { useLiveDiskSpace } from "./lib/hooks";
@@ -40,6 +40,7 @@ import { MemoryView } from "./components/MemoryView";
 import { MiddleEllipsis } from "./components/MiddleEllipsis";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ShortcutHelp } from "./components/ShortcutHelp";
+import { RemovalReviewSheet } from "./components/RemovalReviewSheet";
 import { EasyMoveView } from "./components/EasyMoveView";
 import { FileList } from "./components/FileList";
 import { FolderList } from "./components/FolderList";
@@ -200,6 +201,8 @@ export function App() {
   const [themePreference, setThemePreference] = useState<GeneralSettings["theme"]>("dark");
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
+  /** Agents' removal requests, opened from the header, Settings or the tray. */
+  const removalReviewOpen = useRemovalReviewOpen();
   // Elevation status feeds the "Run as admin for faster scans" banner.
   // Null means we haven't probed yet; `elevated=true` AND
   // `scheduledTaskRegistered=true` independently suppress the banner
@@ -588,8 +591,8 @@ export function App() {
       if (section === "ai-agents") focusAgentSettings("section");
     });
 
-    // Paths an agent moved to the Trash or deleted (the user confirmed
-    // each batch in a native dialog): strike them through like in-app ones.
+    // Paths an agent asked to remove and the user approved in the review
+    // list: strike them through like in-app ones.
     const unsubPathsTrashed = nativeApi.onPathsTrashed((paths) => {
       markDeletedPaths(paths, "trash");
     });
@@ -1474,6 +1477,7 @@ export function App() {
         </footer>
 
         <ShortcutHelp open={shortcutHelpOpen} onClose={() => setShortcutHelpOpen(false)} />
+        {removalReviewOpen && <ErrorBoundary name="Agent requests"><RemovalReviewSheet /></ErrorBoundary>}
       </div>
     </ToastProvider>
   );
