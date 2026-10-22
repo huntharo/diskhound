@@ -134,6 +134,31 @@ describe("macPrunePlan", () => {
     expect([...plan.otherMounts]).toEqual(["/Users/me/mnt/image"]);
   });
 
+  it("leaves out Mobile Documents from ancestor scans and keeps explicitly selected iCloud folders", () => {
+    const icloud = "/Users/me/Library/Mobile Documents";
+    const dataIcloud = "/System/Volumes/Data/Users/me/Library/Mobile Documents";
+    for (const root of ["/", "/Users/me", "/Users/me/Library", "/System/Volumes/Data"]) {
+      const plan = macPrunePlan(root, mounts(), firmlinks());
+      expect(skipReason(plan, root === "/System/Volumes/Data" ? dataIcloud : icloud), root).toBe("icloud-drive");
+      if (root === "/") expect(skipReason(plan, dataIcloud)).toBe("icloud-drive");
+      expect(skipReason(plan, "/Users/me/Library/Mobile Documents backup"), root).toBeNull();
+      expect(skipReason(plan, "/Users/me/Library/Other Documents"), root).toBeNull();
+    }
+    const plan = macPrunePlan(icloud, mounts(), firmlinks());
+    expect(skipReason(plan, icloud)).toBeNull();
+    expect(skipReason(plan, `${icloud}/com~apple~CloudDocs`)).toBeNull();
+    expect(skipReason(macPrunePlan(dataIcloud, mounts(), firmlinks()), dataIcloud)).toBeNull();
+  });
+
+  it("recognizes differently-cased paths on case-insensitive macOS volumes", () => {
+    const plan = macPrunePlan("/users/me", mounts(), firmlinks());
+    expect(skipReason(plan, "/users/me/library/mobile documents")).toBe("icloud-drive");
+    expect(skipReason(plan, "/system/volumes/data/users/me/LIBRARY/Mobile Documents")).toBe("icloud-drive");
+    const explicit = macPrunePlan("/users/me/library/mobile documents", mounts(), firmlinks());
+    expect(skipReason(explicit, "/users/me/library/mobile documents")).toBeNull();
+    expect(skipReason(explicit, "/users/me/library/mobile documents/com~apple~CloudDocs")).toBeNull();
+  });
+
   it("walks a mount when it is the scan root", () => {
     expect(macPrunePlan("/Volumes/Storage", mounts(), firmlinks()).otherMounts.size).toBe(0);
     expect(macPrunePlan("/Volumes/Storage/", mounts(), firmlinks()).otherMounts.size).toBe(0);

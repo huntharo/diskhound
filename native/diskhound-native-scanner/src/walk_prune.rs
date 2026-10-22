@@ -22,8 +22,12 @@
 //!    content (.Spotlight-V100, .fseventsd, MobileSoftwareUpdate, …) has
 //!    no twin and is still walked once, through /System/Volumes/Data.
 //!
-//! The plan is built once per scan. Deciding is a string compare and two
-//! set lookups per directory; nothing is stat'ed during the walk.
+//! 4. macOS iCloud Drive. A scan containing a home folder does not enter
+//!    its Library/Mobile Documents directory, which can request iCloud
+//!    access. Selecting that directory itself as the scan root still works.
+//!
+//! The plan is built once per scan. Deciding uses path comparisons and
+//! set lookups; nothing is stat'ed during the walk.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -63,6 +67,7 @@ pub enum Prune {
     OtherMount,
     DuplicateMount,
     FirmlinkTwin,
+    ICloudDrive,
 }
 
 #[derive(Debug, Default)]
@@ -75,6 +80,8 @@ pub struct PrunePlan {
     /// Data-volume names of directories the walk reaches through a
     /// firmlink below the root.
     pub firmlink_twins: HashSet<String>,
+    /// macOS: leave Mobile Documents out of scans rooted above it.
+    pub prune_icloud_drive: bool,
 }
 
 impl PrunePlan {
@@ -86,6 +93,9 @@ impl PrunePlan {
         }
         if !is_dir {
             return None;
+        }
+        if self.prune_icloud_drive && mobile_documents_suffix(child) == Some("") {
+            return Some(Prune::ICloudDrive);
         }
         if self.other_mounts.contains(child) {
             return Some(Prune::OtherMount);
@@ -111,7 +121,7 @@ pub struct PruneLog {
 impl PruneLog {
     pub fn note(&self, reason: Prune, path: &str) {
         match reason {
-            Prune::PseudoFs => {}
+            Prune::PseudoFs | Prune::ICloudDrive => {}
             Prune::OtherMount => {
                 if let Ok(mut mounts) = self.other_mounts.lock() {
                     mounts.push(path.to_string());
@@ -173,6 +183,25 @@ fn is_under(root: &str, path: &str) -> bool {
 
 fn is_at_or_under(root: &str, path: &str) -> bool {
     path == root || is_under(root, path)
+}
+
+/// The part below a user's Mobile Documents directory, for either name
+/// of the macOS Data volume. `Some("")` denotes the directory itself.
+fn mobile_documents_suffix(path: &str) -> Option<&str> {
+    let below_users = strip_prefix_ascii_case(path, "/Users/")
+        .or_else(|| strip_prefix_ascii_case(path, "/System/Volumes/Data/Users/"))?;
+    let (user, below_home) = below_users.split_once('/')?;
+    if user.is_empty() {
+        return None;
+    }
+    let suffix = strip_prefix_ascii_case(below_home, "Library/Mobile Documents")?;
+    (suffix.is_empty() || suffix.starts_with('/')).then_some(suffix)
+}
+
+fn strip_prefix_ascii_case<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = path.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then_some(&path[prefix.len()..])
 }
 
 // ── macOS: firmlinks and the startup volume group ─────────────────────
@@ -247,7 +276,10 @@ fn is_startup_volume(point: &str) -> bool {
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn mac_prune_plan(root: &str, mounts: &[String], firmlinks: &[Firmlink]) -> PrunePlan {
     let root = trim_mount_point(root);
-    let mut plan = PrunePlan::default();
+    let mut plan = PrunePlan {
+        prune_icloud_drive: mobile_documents_suffix(root).is_none(),
+        ..PrunePlan::default()
+    };
 
     for link in firmlinks {
         if is_under(root, &link.data) && is_at_or_under(root, &link.system) {
@@ -571,6 +603,7 @@ pub fn plan_for(root: &Path) -> PrunePlan {
         other_mounts: foreign_mount_points(&mounts, &root),
         duplicate_mounts: duplicate_mount_paths(&mounts, &root),
         firmlink_twins: HashSet::new(),
+        prune_icloud_drive: false,
     }
 }
 
@@ -603,6 +636,7 @@ mod tests {
             other_mounts: set(&["/Volumes/USB"]),
             duplicate_mounts: set(&["/mnt/bind"]),
             firmlink_twins: set(&["/System/Volumes/Data/Users"]),
+            prune_icloud_drive: false,
         };
         assert_eq!(plan.skip_reason("/Volumes/USB", true), Some(Prune::OtherMount));
         assert_eq!(plan.skip_reason("/mnt/bind", true), Some(Prune::DuplicateMount));
@@ -771,6 +805,83 @@ mod tests {
         assert_eq!(
             owning_mount("/Users/me", &mounts(), &firmlinks()),
             Some("/System/Volumes/Data")
+        );
+    }
+
+    #[test]
+    fn mac_scans_leave_out_mobile_documents_unless_it_is_the_root() {
+        let icloud = "/Users/me/Library/Mobile Documents";
+        let data_icloud = "/System/Volumes/Data/Users/me/Library/Mobile Documents";
+        for root in ["/", "/Users/me", "/Users/me/Library", MAC_DATA_VOLUME] {
+            let plan = mac_prune_plan(root, &mounts(), &firmlinks());
+            let path = if root == MAC_DATA_VOLUME {
+                data_icloud
+            } else {
+                icloud
+            };
+            assert_eq!(
+                plan.skip_reason(path, true),
+                Some(Prune::ICloudDrive),
+                "{root}"
+            );
+            if root == "/" {
+                assert_eq!(
+                    plan.skip_reason(data_icloud, true),
+                    Some(Prune::ICloudDrive)
+                );
+            }
+            assert_eq!(plan.skip_reason(path, false), None, "{root}");
+            assert_eq!(
+                plan.skip_reason("/Users/me/Library/Mobile Documents backup", true),
+                None
+            );
+            assert_eq!(
+                plan.skip_reason("/Users/me/Library/Other Documents", true),
+                None
+            );
+        }
+        let plan = mac_prune_plan(icloud, &mounts(), &firmlinks());
+        assert_eq!(plan.skip_reason(icloud, true), None);
+        assert_eq!(
+            plan.skip_reason(
+                "/Users/me/Library/Mobile Documents/com~apple~CloudDocs",
+                true
+            ),
+            None
+        );
+        let plan = mac_prune_plan(data_icloud, &mounts(), &firmlinks());
+        assert_eq!(plan.skip_reason(data_icloud, true), None);
+    }
+
+    #[test]
+    fn mac_icloud_paths_match_case_insensitive_volume_spellings() {
+        let plan = mac_prune_plan("/users/me", &mounts(), &firmlinks());
+        assert_eq!(
+            plan.skip_reason("/users/me/library/mobile documents", true),
+            Some(Prune::ICloudDrive)
+        );
+        assert_eq!(
+            plan.skip_reason(
+                "/system/volumes/data/users/me/LIBRARY/Mobile Documents",
+                true
+            ),
+            Some(Prune::ICloudDrive)
+        );
+        let explicit = mac_prune_plan(
+            "/users/me/library/mobile documents",
+            &mounts(),
+            &firmlinks(),
+        );
+        assert_eq!(
+            explicit.skip_reason("/users/me/library/mobile documents", true),
+            None
+        );
+        assert_eq!(
+            explicit.skip_reason(
+                "/users/me/library/mobile documents/com~apple~CloudDocs",
+                true
+            ),
+            None
         );
     }
 
