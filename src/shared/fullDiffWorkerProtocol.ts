@@ -1,4 +1,4 @@
-import type { FullDiffResult } from "./contracts";
+import type { FullDiffResult, FullDiffWorkProgress } from "./contracts";
 
 export interface FullDiffWorkerInput {
   baselineId: string;
@@ -30,6 +30,8 @@ export interface FullDiffSortJob {
 export interface SortedIndex {
   /** False when the index file doesn't exist; it diffs as empty. */
   exists: boolean;
+  /** Exact number of file records written across these runs. */
+  records: number;
   /** Run files in the order they were written. */
   runs: string[];
 }
@@ -48,6 +50,8 @@ export type FullDiffWorkerRequest =
     };
 
 export type FullDiffWorkerResponse =
+  | { type: "progress"; requestId: string; progress: FullDiffWorkProgress }
+  | { type: "sort-progress"; requestId: string; bytesRead: number }
   | {
       type: "result";
       requestId: string;

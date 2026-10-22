@@ -1,3 +1,6 @@
+import { ScanProgress } from "./ScanProgress";
+import { comparisonPercent } from "../lib/scanProgress";
+import type { FullDiffProgress } from "../../shared/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import type {
@@ -29,6 +32,7 @@ import { toast } from "./Toasts";
 import { FileIcon } from "./FileIcon";
 
 interface Props {
+  comparisons: FullDiffProgress[];
   rootPath: string | null;
   /** The live snapshot — used to detect scan completions for auto-refresh. */
   snapshot: ScanSnapshot;
@@ -132,7 +136,7 @@ function resolveTimeRange(range: TimeRange, history: ScanHistoryEntry[], diffMod
 
 // ── Main component ─────────────────────────────────────────
 
-export function ChangesView({ rootPath, snapshot, drives }: Props) {
+export function ChangesView({ rootPath, snapshot, drives, comparisons }: Props) {
   const [diff, setDiff] = useState<ScanDiffResult | null>(null);
   const [history, setHistory] = useState<ScanHistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -475,8 +479,10 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
     return fullDiffStatus.baselineIndexBytes + fullDiffStatus.currentIndexBytes;
   }, [fullDiffStatus]);
 
+  const comparison = comparisons.find((item) => item.baselineId === diff?.baselineId && item.currentId === diff?.currentId);
+
   const shouldAutoLoadFullDiff = Boolean(
-    fullDiffStatus?.cached
+    comparison?.status === "running" || comparison?.status === "complete" || fullDiffStatus?.cached
       || (fullDiffCombinedBytes !== null && fullDiffCombinedBytes <= FULL_DIFF_AUTOLOAD_MAX_BYTES),
   );
 
@@ -844,7 +850,11 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
             )}
             {detailTab === "files" && !matchingFullDiff && fullDiffLoading && (
               <div className="changes-empty-detail">
-                <div className="changes-empty-detail-title">Loading changes…</div>
+                <ScanProgress progress={{
+                  active: true, label: "Examining changes",
+                  detail: comparison?.phase === "merging" ? "Comparing files" : "Reading scan indexes",
+                  percent: comparison ? comparisonPercent(comparison) : null,
+                }} />
                 <div className="changes-empty-detail-hint">
                   {fullDiffCombinedBytes !== null && fullDiffCombinedBytes > FULL_DIFF_QUICK_BYTES
                     ? `Comparing ${formatBytes(fullDiffCombinedBytes)} of file indexes. On a drive this size that can take half a minute or more.`

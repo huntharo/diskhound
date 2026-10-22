@@ -1,3 +1,6 @@
+import { useFullDiffProgress } from "../lib/useFullDiffProgress";
+import { scanDisplayProgress } from "../lib/scanProgress";
+import { ProgressBar } from "./ScanProgress";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import type {
@@ -611,32 +614,13 @@ export function SystemWidget() {
   }, [memory, diskIo, gpu, gpuAvailable]);
 
   // ── Scan section ──────────────────────────────────────────
-  const scanDrive = rootDrive(scan?.rootPath, drives);
-  const scanPercent = scan?.status === "running" && scanDrive && scanDrive.usedBytes > 0
-    ? Math.min(99, Math.max(0, Math.round((scan.bytesSeen / scanDrive.usedBytes) * 100)))
-    : null;
-  const scanTitle = scan?.status === "running"
-    ? "Scan running"
-    : scan?.status === "done"
-      ? "Latest scan"
-      : scan?.status === "error"
-        ? "Scan failed"
-        : "No active scan";
+  const comparisons = useFullDiffProgress();
+  const scanProgress = scanDisplayProgress(scan, drives, comparisons, nativeApi.platform);
+  const scanTitle = scanProgress.label;
   const scanDetail = scan?.rootPath
-    ? `${scan.rootPath}${scan.finishedAt ? ` · ${relativeTime(scan.finishedAt)}` : ""}`
+    ? `${scan.rootPath}${scan.finishedAt && !scanProgress.active ? ` · ${relativeTime(scan.finishedAt)}` : ""}`
     : "Pick a root in the main app to build disk history.";
-  const scanRightLabel = scanPercent !== null
-    ? `${scanPercent}%`
-    : scan?.status === "done"
-      ? "100%"
-      : scan?.status === "error"
-        ? "error"
-        : "idle";
-  const scanFillPercent = scan?.status === "running"
-    ? (scanPercent ?? 5)
-    : scan?.status === "done" || scan?.status === "error"
-      ? 100
-      : 0;
+  const scanRightLabel = scanProgress.percent !== null ? `${scanProgress.percent}%` : "";
   // Live-elapsed for running scans. Re-evaluated on each `now`
   // tick (every 5 s) so the timer doesn't freeze between
   // scan-snapshot pushes.
@@ -843,12 +827,8 @@ export function SystemWidget() {
               View changes →
             </button>
           )}
-          <div className="system-widget-scan-track" aria-hidden="true">
-            <div
-              className="system-widget-scan-fill"
-              style={{ width: `${scanFillPercent}%` }}
-            />
-          </div>
+          {scanProgress.detail && <div className="system-widget-scan-phase">{scanProgress.detail}</div>}
+          <ProgressBar percent={scanProgress.active ? scanProgress.percent : scan?.status === "done" ? 100 : 0} label={scanTitle} />
         </section>
         )}
 

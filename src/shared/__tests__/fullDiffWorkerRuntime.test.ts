@@ -503,3 +503,19 @@ function randomIndexPair(caseSensitive: boolean, windows: boolean, seed: number)
   }
   return { baselineLines: lines(baseline), currentLines: lines(current), expected: { totals, changes } };
 }
+
+it("reports weighted byte and exact record progress across both sort paths", async () => {
+  const baselinePath = await writeIndex("progress-a", [{ p: "/same", s: 1 }, { p: "/gone", s: 2 }, { p: "/dir", t: "d" }]);
+  const currentPath = await writeIndex("progress-b", [{ p: "/same", s: 2 }, { p: "/new", s: 3 }, { p: "/link", s: 3, h: 1 }]);
+  for (const helper of [false, true]) {
+    const seen: import("../contracts").FullDiffWorkProgress[] = [];
+    await computeFullDiffFromIndexFiles({ baselineId: "progress-a", currentId: "progress-b", baselinePath, currentPath, sortChunkRecords: 1 }, {
+      onProgress: (item) => seen.push(item),
+      sortElsewhere: helper ? (job, signal, onBytes) => sortIndexIntoRuns(job, signal, onBytes) : undefined,
+    });
+    expect(seen[0]).toMatchObject({ phase: "sorting", fraction: 0, total: (await FSP.stat(baselinePath)).size + (await FSP.stat(currentPath)).size });
+    expect(seen.find((item) => item.phase === "merging")).toMatchObject({ fraction: 0.55, completed: 0, total: 4 });
+    expect(seen.at(-1)).toMatchObject({ phase: "merging", fraction: 1, completed: 4, total: 4 });
+    expect(seen.map((item) => item.fraction)).toEqual(seen.map((item) => item.fraction).sort((a, b) => a - b));
+  }
+});

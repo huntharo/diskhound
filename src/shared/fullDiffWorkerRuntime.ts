@@ -9,7 +9,7 @@ import { Worker } from "node:worker_threads";
 import { createGunzip, deflateRaw, inflateRawSync } from "node:zlib";
 
 import { resolveBundledWorkerScript } from "./bundledWorkerPath";
-import type { FullDiffResult, FullFileChange } from "./contracts";
+import type { FullDiffResult, FullFileChange, FullDiffWorkProgress } from "./contracts";
 import type {
   FullDiffSortJob,
   FullDiffWorkerInput,
@@ -181,6 +181,7 @@ async function readFileIndexRecords(
   filePath: string,
   caseSensitive: boolean,
   onRecord: (path: string, size: number, key: string) => void | Promise<void>,
+  onBytesRead?: (bytes: number) => void,
 ): Promise<boolean> {
   if (!FS.existsSync(filePath)) {
     return false;
@@ -217,6 +218,7 @@ async function readFileIndexRecords(
         if (pending) await pending;
       }
       rest = text.slice(start);
+      onBytesRead?.(source.bytesRead);
     }
     if (rest) {
       const pending = handle(rest);
@@ -280,11 +282,19 @@ async function writeRun(records: SortedRecord[], runPath: string): Promise<void>
  * Sorts one index into runs under `job.runDir`. When it settles, it has
  * nothing left writing there, so the caller can delete the directory.
  */
-export async function sortIndexIntoRuns(job: FullDiffSortJob, signal?: AbortSignal): Promise<SortedIndex> {
+export async function sortIndexIntoRuns(job: FullDiffSortJob, signal?: AbortSignal, onBytesRead?: (bytes: number) => void): Promise<SortedIndex> {
   const runs: string[] = [];
   let buffer: SortedRecord[] = [];
   let writing: Promise<void> | undefined;
   let madeRunDir = false;
+  let records = 0;
+  let lastProgressAt = 0;
+  const reportBytes = (bytes: number) => {
+    const now = performance.now();
+    if (now - lastProgressAt < 250) return;
+    lastProgressAt = now;
+    onBytesRead?.(bytes);
+  };
 
   // One run is compressed and written while the next one fills.
   const flush = async () => {
@@ -308,12 +318,13 @@ export async function sortIndexIntoRuns(job: FullDiffSortJob, signal?: AbortSign
 
   try {
     const exists = await readFileIndexRecords(job.indexPath, job.caseSensitive, (p, s, key) => {
+      records += 1;
       buffer.push({ key, p, s });
       if (buffer.length >= job.sortChunkRecords) return flush();
-    });
+    }, reportBytes);
     await flush();
     await writing;
-    return { exists, runs };
+    return { exists, runs, records };
   } catch (error) {
     await writing?.catch(() => undefined);
     throw error;
@@ -488,6 +499,7 @@ async function mergeSortedRuns(
   currentRuns: string[],
   caseSensitive: boolean,
   accumulator: DiffAccumulator,
+  onMerged: (records: number) => void,
 ): Promise<void> {
   const readers: RunReader[] = [];
   const open = (runs: string[]) => runs.map((runPath, order) => {
@@ -499,12 +511,20 @@ async function mergeSortedRuns(
   try {
     const baseline = new RunMerge(open(baselineRuns));
     const current = new RunMerge(open(currentRuns));
+    let merged = 0;
     for (let step = 1; ; step += 1) {
       const left = baseline.head;
       const right = current.head;
-      if (!left && !right) return;
+      if (!left && !right) {
+        onMerged(merged);
+        return;
+      }
       fullDiffWork.steps += 1;
-      if (step % MERGE_STEPS_PER_YIELD === 0) await yieldToEventLoop();
+      if (step % MERGE_STEPS_PER_YIELD === 0) {
+        onMerged(merged);
+        await yieldToEventLoop();
+      }
+      merged += left && right && left.key === right.key ? 2 : 1;
 
       if (!right || (left && left.key < right.key)) {
         const previousSize = left!.size;
@@ -654,7 +674,8 @@ export interface ComputeFullDiffOptions {
    * thread, while this thread sorts the current one. Without it, both
    * sort on this thread, interleaved.
    */
-  sortElsewhere?: (job: FullDiffSortJob, signal: AbortSignal) => Promise<SortedIndex>;
+  sortElsewhere?: (job: FullDiffSortJob, signal: AbortSignal, onBytesRead: (bytes: number) => void) => Promise<SortedIndex>;
+  onProgress?: (progress: FullDiffWorkProgress) => void;
 }
 
 /**
@@ -666,6 +687,8 @@ async function sortBothIndexes(
   baselineJob: FullDiffSortJob,
   currentJob: FullDiffSortJob,
   sortElsewhere: ComputeFullDiffOptions["sortElsewhere"],
+  onBaselineBytes: (bytes: number) => void,
+  onCurrentBytes: (bytes: number) => void,
 ): Promise<[SortedIndex, SortedIndex]> {
   const controller = new AbortController();
   let failure: { error: unknown } | undefined;
@@ -677,10 +700,10 @@ async function sortBothIndexes(
 
   const [baseline, current] = await Promise.allSettled([
     (sortElsewhere
-      ? sortElsewhere(baselineJob, controller.signal)
-      : sortIndexIntoRuns(baselineJob, controller.signal)
+      ? sortElsewhere(baselineJob, controller.signal, onBaselineBytes)
+      : sortIndexIntoRuns(baselineJob, controller.signal, onBaselineBytes)
     ).catch(stopTheOther),
-    sortIndexIntoRuns(currentJob, controller.signal).catch(stopTheOther),
+    sortIndexIntoRuns(currentJob, controller.signal, onCurrentBytes).catch(stopTheOther),
   ]);
   if (failure) throw failure.error;
   return [
@@ -706,6 +729,25 @@ export async function computeFullDiffFromIndexFiles(
     return null;
   }
 
+  // Reading compressed bytes is a useful sort estimate; reserve its last
+  // percent until both sides have finished sorting and writing their runs.
+  let lastProgressAt = -Infinity;
+  let lastPhase = "";
+  const report = (phase: FullDiffWorkProgress["phase"], fraction: number, completed: number, total: number, force = false) => {
+    fullDiffWork.steps += 1;
+    const now = performance.now();
+    if (!force && phase === lastPhase && now - lastProgressAt < 250) return;
+    lastPhase = phase;
+    lastProgressAt = now;
+    options.onProgress?.({ phase, fraction, completed, total });
+  };
+  let baselineRead = 0;
+  let currentRead = 0;
+  const sortTotal = (baselineSize ?? 0) + (currentSize ?? 0);
+  const reportSort = () => report("sorting", sortTotal > 0
+    ? 0.55 * Math.min(0.99, (baselineRead + currentRead) / sortTotal) : 0,
+    baselineRead + currentRead, sortTotal);
+  reportSort();
   const tmpDir = Path.join(OS.tmpdir(), `diskhound-diff-${input.baselineId}-${input.currentId}-${process.pid}`);
   await FSP.mkdir(tmpDir, { recursive: true });
 
@@ -720,9 +762,15 @@ export async function computeFullDiffFromIndexFiles(
       job(input.baselinePath, "b"),
       job(input.currentPath, "c"),
       options.sortElsewhere,
+      (bytes) => { baselineRead = Math.min(bytes, baselineSize ?? 0); reportSort(); },
+      (bytes) => { currentRead = Math.min(bytes, currentSize ?? 0); reportSort(); },
     );
     const accumulator = createDiffAccumulator(input.baselineId, input.currentId, limit);
-    await mergeSortedRuns(baseline.runs, current.runs, caseSensitive, accumulator);
+    const totalRecords = baseline.records + current.records;
+    report("merging", 0.55, 0, totalRecords);
+    await mergeSortedRuns(baseline.runs, current.runs, caseSensitive, accumulator, (merged) => {
+      report("merging", 0.55 + 0.45 * (totalRecords > 0 ? merged / totalRecords : 1), merged, totalRecords, merged === totalRecords);
+    });
     return accumulator.finalize();
   } finally {
     await FSP.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
@@ -736,6 +784,8 @@ export function resolveBundledFullDiffWorkerPath(baseDir: string): string {
 export interface RunFullDiffWorkerOptions {
   workerPath: string;
   signal?: AbortSignal;
+  onProgress?: (progress: FullDiffWorkProgress) => void;
+  onSortProgress?: (bytesRead: number) => void;
 }
 
 function newRequestId(): string {
@@ -761,7 +811,7 @@ export async function runFullDiffSortWorker(
   return response.sorted;
 }
 
-type FullDiffWorkerSuccess = Exclude<FullDiffWorkerResponse, { type: "error" }>;
+type FullDiffWorkerSuccess = Exclude<FullDiffWorkerResponse, { type: "error" | "progress" | "sort-progress" }>;
 
 async function runWorkerRequest(
   request: FullDiffWorkerRequest,
@@ -820,6 +870,15 @@ async function runWorkerRequest(
         return;
       }
 
+      // Progress is non-terminal. Keep every listener and the worker alive.
+      if (message.type === "progress") {
+        options.onProgress?.(message.progress);
+        return;
+      }
+      if (message.type === "sort-progress") {
+        options.onSortProgress?.(message.bytesRead);
+        return;
+      }
       if (message.type === "error") {
         settle(() => reject(new Error(message.message)));
         return;
